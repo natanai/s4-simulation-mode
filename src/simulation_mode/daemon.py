@@ -18,6 +18,10 @@ last_error = None
 last_alarm_variant = None
 last_tick_wallclock = 0.0
 tick_count = 0
+_daemon_connection = None
+last_unpause_attempt_ts = None
+last_unpause_result = None
+last_pause_requests_count = None
 
 
 def _set_last_error(error):
@@ -26,13 +30,46 @@ def _set_last_error(error):
     daemon_error = error
 
 
-def _maybe_auto_unpause():
-    if not settings.auto_unpause:
-        return
+def set_connection(conn):
+    global _daemon_connection
+    _daemon_connection = conn
 
-    # Only attempt to unpause in an actively running zone.
+
+def _pause_requests_count(clock_service):
+    if clock_service is None:
+        return None
+    for attr in ("pause_requests", "_pause_requests", "pause_requests_count", "_pause_requests_count"):
+        value = getattr(clock_service, attr, None)
+        if value is None:
+            continue
+        try:
+            value = value() if callable(value) else value
+            if isinstance(value, int):
+                return value
+            if hasattr(value, "__len__"):
+                return len(value)
+        except Exception:
+            continue
+    return None
+
+
+def _is_paused(clock_service, clock_module):
+    _ClockSpeed = getattr(clock_module, "ClockSpeedMode", None)
+    if _ClockSpeed is None:
+        _ClockSpeed = getattr(clock_module, "ClockSpeed", None)
+    if _ClockSpeed is None:
+        return False
+    speed_attr = getattr(clock_service, "clock_speed", None)
+    current_speed = speed_attr() if callable(speed_attr) else speed_attr
+    return current_speed == _ClockSpeed.PAUSED
+
+
+def _try_unpause():
+    global last_unpause_attempt_ts, last_unpause_result, last_pause_requests_count
     services = importlib.import_module("services")
     clock_module = importlib.import_module("clock")
+    sims4_commands = importlib.import_module("sims4.commands")
+
     try:
         zone = services.current_zone()
         if zone is None or not getattr(zone, "is_zone_running", True):
@@ -42,7 +79,13 @@ def _maybe_auto_unpause():
         if clock_service is None:
             return
 
-        # Enum names vary between builds.
+        if not _is_paused(clock_service, clock_module):
+            return
+
+        last_unpause_attempt_ts = time.time()
+        last_pause_requests_count = _pause_requests_count(clock_service)
+        last_unpause_result = "failed"
+
         _ClockSpeed = getattr(clock_module, "ClockSpeedMode", None)
         if _ClockSpeed is None:
             _ClockSpeed = getattr(clock_module, "ClockSpeed", None)
@@ -52,17 +95,41 @@ def _maybe_auto_unpause():
         _GameSpeedChangeSource = getattr(clock_module, "GameSpeedChangeSource", None)
         _change_source = _GameSpeedChangeSource.GAMEPLAY if _GameSpeedChangeSource is not None else None
 
-        speed_attr = getattr(clock_service, "clock_speed", None)
-        current_speed = speed_attr() if callable(speed_attr) else speed_attr
+        if _GameSpeedChangeSource is not None:
+            clock_service.set_clock_speed(_ClockSpeed.NORMAL, change_source=_change_source)
+        else:
+            clock_service.set_clock_speed(_ClockSpeed.NORMAL)
 
-        if current_speed == _ClockSpeed.PAUSED:
-            if _GameSpeedChangeSource is not None:
-                clock_service.set_clock_speed(_ClockSpeed.NORMAL, change_source=_change_source)
-            else:
-                clock_service.set_clock_speed(_ClockSpeed.NORMAL)
+        if not _is_paused(clock_service, clock_module):
+            last_unpause_result = "clock_service_ok"
+            return
 
-    except Exception:
+        if _daemon_connection is not None:
+            sims4_commands.client_cheat("|clock.toggle_pause_unpause", _daemon_connection)
+            if not _is_paused(clock_service, clock_module):
+                last_unpause_result = "toggle_used"
+                return
+
+            sims4_commands.client_cheat("|clock.setspeed one", _daemon_connection)
+            if not _is_paused(clock_service, clock_module):
+                last_unpause_result = "setspeed_used"
+                return
+
+        last_unpause_result = "failed"
+    except Exception as exc:
+        last_unpause_result = f"failed: {exc}"
+        _set_last_error(str(exc))
+
+
+def _maybe_auto_unpause():
+    if not settings.auto_unpause:
         return
+
+    # Only attempt to unpause in an actively running zone.
+    try:
+        _try_unpause()
+    except Exception as exc:
+        _set_last_error(str(exc))
 
 
 def _maybe_reassert_death():

@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 
 
-_TICK_MIN_SECONDS = 2
+_TICK_MIN_SECONDS = 1
 _TICK_MAX_SECONDS = 120
 
 

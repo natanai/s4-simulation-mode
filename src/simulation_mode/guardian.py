@@ -28,6 +28,8 @@ _OBJECT_KEYWORDS = {
     "motive_bladder": ["toilet", "urinal", "potty"],
     "motive_energy": ["bed", "tent", "coffin", "sleeping"],
     "motive_hygiene": ["shower", "bath", "sink"],
+    "motive_fun": ["tv", "stereo", "radio", "computer", "console", "game", "toy"],
+    "motive_social": ["phone", "computer"],
 }
 
 _AFFORDANCE_KEYWORDS = {
@@ -35,6 +37,8 @@ _AFFORDANCE_KEYWORDS = {
     "motive_bladder": ["use"],
     "motive_energy": ["sleep", "nap"],
     "motive_hygiene": ["shower", "bath", "wash", "brush"],
+    "motive_fun": ["watch", "play", "listen", "dance"],
+    "motive_social": ["chat", "talk", "social", "call", "text"],
 }
 
 _LAST_GLOBAL_CHECK = 0.0
@@ -44,6 +48,34 @@ _LAST_NO_MOTIVE_LOG = 0.0
 _PER_SIM_LAST_PUSH = {}
 _PER_SIM_PUSH_HISTORY = {}
 _MOTIVE_STATS = {}
+_LAST_CARE_DETAILS = None
+
+_CARE_KIND_TO_MOTIVE = {
+    "eat": "motive_hunger",
+    "sleep": "motive_energy",
+    "hygiene": "motive_hygiene",
+    "fun": "motive_fun",
+    "social": "motive_social",
+    "bladder": "motive_bladder",
+}
+
+_MOTIVE_TO_CARE_KIND = {value: key for key, value in _CARE_KIND_TO_MOTIVE.items()}
+
+
+def motive_percent(value: float) -> float:
+    try:
+        percent = (float(value) + 100.0) / 200.0
+    except Exception:
+        return 0.0
+    if percent < 0.0:
+        return 0.0
+    if percent > 1.0:
+        return 1.0
+    return percent
+
+
+def motive_is_green(value: float, green_percent: float) -> bool:
+    return motive_percent(value) >= green_percent
 
 
 def _get_motive_stat(stat_name):
@@ -281,6 +313,128 @@ def _select_lowest_motive(snapshot):
             lowest_key = key
             lowest_value = value
     return lowest_key, lowest_value
+
+
+def _snapshot_dict(snapshot):
+    return {key: value for key, value in snapshot}
+
+
+def _affordance_label(affordance):
+    return (
+        getattr(affordance, "__name__", None)
+        or getattr(affordance, "__qualname__", None)
+        or str(affordance)
+    )
+
+
+def pick_care_goal(sim_info, snapshot: dict, green_percent: float):
+    lowest_key = None
+    lowest_value = None
+    lowest_percent = None
+    for key, value in snapshot.items():
+        percent = motive_percent(value)
+        if lowest_percent is None or percent < lowest_percent:
+            lowest_percent = percent
+            lowest_key = key
+            lowest_value = value
+    if lowest_key is None:
+        return None, None, None
+    care_kind = _MOTIVE_TO_CARE_KIND.get(lowest_key)
+    return lowest_key, lowest_value, care_kind
+
+
+def _attempt_care_push(sim, motive_key):
+    target_obj = _find_target_object(sim, motive_key)
+    if target_obj is None:
+        if _maybe_run_autonomy(sim):
+            return False, f"no object for {motive_key}; autonomy refresh attempted"
+        return False, f"no object for {motive_key}; autonomy refresh unavailable"
+    affordance = _find_affordance(target_obj, motive_key)
+    if affordance is None:
+        if _maybe_run_autonomy(sim):
+            return False, f"no affordance for {motive_key}; autonomy refresh attempted"
+        return False, f"no affordance for {motive_key}; autonomy refresh unavailable"
+    try:
+        result = _push_interaction(sim, affordance, target_obj)
+    except Exception as exc:
+        return False, f"push failed for {motive_key}: {exc}"
+    if result:
+        global _LAST_CARE_DETAILS
+        _LAST_CARE_DETAILS = (
+            motive_key,
+            f"{_object_label(target_obj)}:{_affordance_label(affordance)}",
+        )
+        return True, f"pushed {motive_key} via {_object_label(target_obj)}"
+    return False, f"push failed for {motive_key}"
+
+
+def push_self_care(sim_info, now: float, green_percent: float):
+    sim = sim_info.get_sim_instance() if sim_info else None
+    if sim is None:
+        return False, "no sim instance"
+    if getattr(sim_info, "is_npc", False):
+        return False, "npc skipped"
+    if getattr(sim_info, "is_human", True) is False:
+        return False, "non-human skipped"
+
+    snapshot = _motive_snapshot(sim_info)
+    if not snapshot:
+        return False, "no motive stats available"
+    snapshot_dict = _snapshot_dict(snapshot)
+
+    motive_key, motive_value, care_kind = pick_care_goal(sim_info, snapshot_dict, green_percent)
+    if motive_key is None or care_kind is None:
+        return False, "no care goal found"
+
+    sim_id = _sim_identifier(sim_info)
+    if not _can_push_for_sim(sim_id, now):
+        return False, "guardian cooldown"
+
+    busy_state = _is_sim_busy(sim)
+    if busy_state is True:
+        return False, "sim busy"
+    if busy_state is None and motive_value is not None:
+        if motive_value > settings.guardian_red_motive:
+            return False, "sim likely busy"
+
+    ordered = sorted(snapshot, key=lambda item: motive_percent(item[1]))
+    lowest_key = ordered[0][0]
+    non_social_keys = [key for key, _ in ordered if key != "motive_social"]
+    attempted = []
+    attempted_non_social = False
+    if lowest_key != "motive_social":
+        for key in non_social_keys:
+            attempted.append(key)
+            attempted_non_social = True
+            pushed, message = _attempt_care_push(sim, key)
+            if pushed:
+                _record_push(sim_id, now)
+                return True, message
+    else:
+        attempted.append(lowest_key)
+        pushed, message = _attempt_care_push(sim, lowest_key)
+        if pushed:
+            _record_push(sim_id, now)
+            return True, message
+
+    if "motive_social" in snapshot_dict:
+        allow_social = (
+            settings.director_allow_social_goals
+            or lowest_key == "motive_social"
+            or attempted_non_social
+            or not non_social_keys
+        )
+        if allow_social and "motive_social" not in attempted:
+            pushed, message = _attempt_care_push(sim, "motive_social")
+            if pushed:
+                _record_push(sim_id, now)
+                return True, message
+
+    return False, "no viable self-care interaction"
+
+
+def last_care_details():
+    return _LAST_CARE_DETAILS
 
 
 def _can_push_for_sim(sim_id, now):

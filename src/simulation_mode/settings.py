@@ -26,6 +26,10 @@ KNOWN_DEFAULTS = [
     ("director_enabled", "true"),
     ("director_check_seconds", "90"),
     ("director_min_safe_motive", "-10"),
+    ("director_green_motive_percent", "0.50"),
+    ("director_green_min_commodities", "6"),
+    ("director_allow_social_goals", "false"),
+    ("director_use_guardian_when_low", "true"),
     ("director_per_sim_cooldown_seconds", "300"),
     ("director_max_pushes_per_sim_per_hour", "12"),
     ("director_prefer_career_skills", "true"),
@@ -69,6 +73,18 @@ def _build_default_template_text():
     lines.append("director_enabled={}".format(defaults["director_enabled"]))
     lines.append("director_check_seconds={}".format(defaults["director_check_seconds"]))
     lines.append("director_min_safe_motive={}".format(defaults["director_min_safe_motive"]))
+    lines.append(
+        "director_green_motive_percent={}".format(defaults["director_green_motive_percent"])
+    )
+    lines.append(
+        "director_green_min_commodities={}".format(defaults["director_green_min_commodities"])
+    )
+    lines.append(
+        "director_allow_social_goals={}".format(defaults["director_allow_social_goals"])
+    )
+    lines.append(
+        "director_use_guardian_when_low={}".format(defaults["director_use_guardian_when_low"])
+    )
     lines.append(
         "director_per_sim_cooldown_seconds={}".format(
             defaults["director_per_sim_cooldown_seconds"]
@@ -215,6 +231,10 @@ class SimulationModeSettings:
         director_enabled=True,
         director_check_seconds=90,
         director_min_safe_motive=-10,
+        director_green_motive_percent=0.5,
+        director_green_min_commodities=6,
+        director_allow_social_goals=False,
+        director_use_guardian_when_low=True,
         director_per_sim_cooldown_seconds=300,
         director_max_pushes_per_sim_per_hour=12,
         director_prefer_career_skills=True,
@@ -238,6 +258,10 @@ class SimulationModeSettings:
         self.director_enabled = director_enabled
         self.director_check_seconds = director_check_seconds
         self.director_min_safe_motive = director_min_safe_motive
+        self.director_green_motive_percent = director_green_motive_percent
+        self.director_green_min_commodities = director_green_min_commodities
+        self.director_allow_social_goals = director_allow_social_goals
+        self.director_use_guardian_when_low = director_use_guardian_when_low
         self.director_per_sim_cooldown_seconds = director_per_sim_cooldown_seconds
         self.director_max_pushes_per_sim_per_hour = director_max_pushes_per_sim_per_hour
         self.director_prefer_career_skills = director_prefer_career_skills
@@ -460,6 +484,26 @@ def load_settings(target):
                 try:
                     target.director_min_safe_motive = int(value)
                 except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_green_motive_percent":
+                try:
+                    target.director_green_motive_percent = max(0.0, min(1.0, float(value)))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_green_min_commodities":
+                try:
+                    target.director_green_min_commodities = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_allow_social_goals":
+                if isinstance(value, bool):
+                    target.director_allow_social_goals = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_use_guardian_when_low":
+                if isinstance(value, bool):
+                    target.director_use_guardian_when_low = value
+                else:
                     _log_invalid_value(key, raw_value)
             elif key == "director_per_sim_cooldown_seconds":
                 try:

@@ -91,6 +91,32 @@ _CAREER_TO_SKILLS = {
     "Business": ["charisma"],
 }
 
+_WHIM_RULES = {
+    "fun": {
+        "object_keywords": ["tv", "stereo", "radio", "computer", "console", "game"],
+        "affordance_keywords": ["watch", "play", "listen", "dance"],
+    },
+    "social": {
+        "object_keywords": ["phone", "computer"],
+        "affordance_keywords": ["chat", "talk", "social", "call", "text"],
+    },
+    "exercise": {
+        "object_keywords": [
+            "treadmill",
+            "punch",
+            "weights",
+            "workout",
+            "basketball",
+            "pullup",
+            "exercise",
+            "bike",
+            "bicycle",
+            "stationary",
+        ],
+        "affordance_keywords": ["workout", "practice", "train", "jog"],
+    },
+}
+
 _last_check_time = 0.0
 _per_sim_last_push_time = {}
 _per_sim_push_count_window_start = {}
@@ -103,6 +129,9 @@ last_director_time = 0.0
 last_director_debug = []
 
 _LAST_ACTION_DETAILS = None
+_LAST_WANT_DETAILS = None
+
+_last_motive_snapshot_by_sim = {}
 
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
@@ -254,76 +283,174 @@ def _skill_max_from_skill(skill):
     return None
 
 
-def choose_skill_goal(sim_info):
-    if sim_info is None:
+def _choose_career_skill(sim_info):
+    if sim_info is None or not settings.director_prefer_career_skills:
         return None
+    career_tracker = getattr(sim_info, "career_tracker", None)
+    career = None
+    if career_tracker is not None:
+        career = getattr(career_tracker, "career_current", None)
+        if career is None:
+            career = getattr(career_tracker, "current_career", None)
+    career_name = ""
+    career_guid = None
+    if career is not None:
+        career_name = getattr(getattr(career, "__class__", None), "__name__", "")
+        career_guid = getattr(career, "guid64", None)
+    if not career_name:
+        return None
+    lowered = career_name.lower()
+    for key, skills in _CAREER_TO_SKILLS.items():
+        if key.lower() in lowered:
+            for skill_key in skills:
+                if _skill_allowed(skill_key):
+                    reason = f"career: {career_name}"
+                    if career_guid is not None:
+                        reason = f"career: {career_name} ({career_guid})"
+                    return skill_key, reason
+    return None
 
-    if settings.director_prefer_career_skills:
-        career_tracker = getattr(sim_info, "career_tracker", None)
-        career = None
-        if career_tracker is not None:
-            career = getattr(career_tracker, "career_current", None)
-            if career is None:
-                career = getattr(career_tracker, "current_career", None)
-        career_name = ""
-        career_guid = None
-        if career is not None:
-            career_name = getattr(getattr(career, "__class__", None), "__name__", "")
-            career_guid = getattr(career, "guid64", None)
-        if career_name:
-            lowered = career_name.lower()
-            for key, skills in _CAREER_TO_SKILLS.items():
-                if key.lower() in lowered:
-                    for skill_key in skills:
-                        if _skill_allowed(skill_key):
-                            reason = f"career: {career_name}"
-                            if career_guid is not None:
-                                reason = f"career: {career_name} ({career_guid})"
-                            return skill_key, reason
 
-    if settings.director_fallback_to_started_skills:
-        skill_tracker = getattr(sim_info, "skill_tracker", None)
-        get_skills = None
-        if skill_tracker is not None:
-            get_skills = getattr(skill_tracker, "get_all_skills", None)
-            if get_skills is None:
-                get_skills = getattr(skill_tracker, "get_all_skill_types", None)
-        if callable(get_skills):
+def _choose_started_skill(sim_info):
+    if sim_info is None or not settings.director_fallback_to_started_skills:
+        return None
+    skill_tracker = getattr(sim_info, "skill_tracker", None)
+    get_skills = None
+    if skill_tracker is not None:
+        get_skills = getattr(skill_tracker, "get_all_skills", None)
+        if get_skills is None:
+            get_skills = getattr(skill_tracker, "get_all_skill_types", None)
+    if callable(get_skills):
+        try:
+            skills = list(get_skills())
+        except Exception:
+            skills = []
+        for skill in skills:
             try:
-                skills = list(get_skills())
-            except Exception:
-                skills = []
-            for skill in skills:
-                try:
-                    name = _extract_skill_name(skill)
-                    if not name:
-                        continue
-                    lowered = name.lower()
-                    matched_key = None
-                    for key in _SKILL_RULES:
-                        if key in lowered:
-                            matched_key = key
-                            break
-                    if matched_key is None:
-                        continue
-                    if not _skill_allowed(matched_key):
-                        continue
-
-                    level = _skill_level_from_skill(skill)
-                    if level is None and skill_tracker is not None:
-                        level = _skill_level_from_tracker(skill_tracker, skill)
-                    max_level = _skill_max_from_skill(skill)
-                    if max_level is None and skill_tracker is not None:
-                        max_level = _skill_max_from_tracker(skill_tracker, skill)
-
-                    if level is None or max_level is None:
-                        continue
-                    if level > 0 and level < max_level:
-                        return matched_key, "started skill"
-                except Exception:
+                name = _extract_skill_name(skill)
+                if not name:
+                    continue
+                lowered = name.lower()
+                matched_key = None
+                for key in _SKILL_RULES:
+                    if key in lowered:
+                        matched_key = key
+                        break
+                if matched_key is None:
+                    continue
+                if not _skill_allowed(matched_key):
                     continue
 
+                level = _skill_level_from_skill(skill)
+                if level is None and skill_tracker is not None:
+                    level = _skill_level_from_tracker(skill_tracker, skill)
+                max_level = _skill_max_from_skill(skill)
+                if max_level is None and skill_tracker is not None:
+                    max_level = _skill_max_from_tracker(skill_tracker, skill)
+
+                if level is None or max_level is None:
+                    continue
+                if level > 0 and level < max_level:
+                    return matched_key, "started skill"
+            except Exception:
+                continue
     return None
+
+
+def choose_skill_goal(sim_info):
+    return _choose_career_skill(sim_info) or _choose_started_skill(sim_info)
+
+
+def _extract_whim_name(whim):
+    for attr in ("name", "display_name", "whim_type", "whim_category"):
+        value = getattr(whim, attr, None)
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                value = None
+        if value:
+            return str(value)
+    return str(whim) if whim is not None else ""
+
+
+def get_active_whim_targets(sim_info):
+    sim = sim_info.get_sim_instance() if sim_info else None
+    for source in (sim_info, sim):
+        if source is None:
+            continue
+        tracker = getattr(source, "whim_tracker", None)
+        if tracker is None:
+            tracker = getattr(source, "whims_tracker", None)
+        if tracker is None:
+            continue
+        for attr in ("get_whims", "get_active_whims", "get_current_whims"):
+            getter = getattr(tracker, attr, None)
+            if callable(getter):
+                try:
+                    whims = list(getter())
+                except Exception:
+                    whims = []
+                return [whim for whim in whims if whim]
+        active = getattr(tracker, "active_whims", None)
+        if active is not None:
+            try:
+                return list(active)
+            except Exception:
+                return []
+    return []
+
+
+def _resolve_whim_rule(whim_name: str):
+    lowered = (whim_name or "").lower()
+    if "fun" in lowered or "have fun" in lowered:
+        return "fun"
+    if "friendly" in lowered or "social" in lowered or "be friendly" in lowered:
+        return "social"
+    if "exercise" in lowered or "workout" in lowered:
+        return "exercise"
+    return None
+
+
+def _select_whim_target(sim_info):
+    whims = get_active_whim_targets(sim_info)
+    if not whims:
+        return None, "WHIM unavailable (API not found)"
+    non_social_rule = None
+    social_rule = None
+    for whim in whims:
+        whim_name = _extract_whim_name(whim)
+        rule_key = _resolve_whim_rule(whim_name)
+        if rule_key is None:
+            continue
+        if rule_key == "social":
+            social_rule = (rule_key, whim_name)
+            continue
+        if non_social_rule is None:
+            non_social_rule = (rule_key, whim_name)
+    selected = non_social_rule or social_rule
+    if selected is None:
+        return None, "WHIM no supported target"
+    return selected, None
+
+
+def _push_whim(sim, rule_key, whim_name):
+    global _LAST_WANT_DETAILS
+    if rule_key == "social" and not settings.director_allow_social_goals:
+        return False, "WHIM social disabled"
+    rule = _WHIM_RULES.get(rule_key)
+    if rule is None:
+        return False, "WHIM no rule"
+    target_obj = _find_target_object(sim, rule)
+    if target_obj is None:
+        return False, f"WHIM no object for {rule_key}"
+    affordance = _find_affordance(target_obj, rule)
+    if affordance is None:
+        return False, f"WHIM no affordance for {rule_key}"
+    pushed = _push_affordance(sim, target_obj, affordance)
+    if pushed:
+        _LAST_WANT_DETAILS = (whim_name, _get_object_label(target_obj), _get_affordance_label(affordance))
+    return pushed, f"WHIM {whim_name}"
 
 
 def _iter_objects():
@@ -509,7 +636,18 @@ def _record_action(sim_info, skill_key, reason, now):
     last_director_time = now
 
 
+def get_motive_snapshot_for_sim(sim_info):
+    if sim_info is None:
+        return []
+    sim_id = _sim_identifier(sim_info)
+    snapshot = _last_motive_snapshot_by_sim.get(sim_id)
+    if snapshot is None:
+        snapshot = _get_motive_snapshot(sim_info)
+    return snapshot or []
+
+
 def _evaluate(now: float):
+    global last_director_time
     last_director_debug[:] = []
     household = services.active_household()
     if household is None:
@@ -534,8 +672,27 @@ def _evaluate(now: float):
             snapshot = _get_motive_snapshot(sim_info)
             if snapshot:
                 min_motive = _safe_min_motive(snapshot)
-                if min_motive is not None and min_motive < settings.director_min_safe_motive:
-                    _append_debug(f"{sim_name}: SKIP motives unsafe")
+                sim_id = _sim_identifier(sim_info)
+                _last_motive_snapshot_by_sim[sim_id] = list(snapshot)
+                green_count = 0
+                for _key, value in snapshot:
+                    if guardian.motive_is_green(value, settings.director_green_motive_percent):
+                        green_count += 1
+                if green_count < settings.director_green_min_commodities:
+                    if settings.director_use_guardian_when_low and settings.guardian_enabled:
+                        success, debug_message = guardian.push_self_care(
+                            sim_info, now, settings.director_green_motive_percent
+                        )
+                        if success:
+                            care_details = guardian.last_care_details() or ("unknown", "unknown")
+                            motive_key, interaction = care_details
+                            action = f"{sim_name}: CARE {motive_key} via {interaction}"
+                            _append_action(action)
+                            last_director_time = now
+                        else:
+                            _append_debug(f"{sim_name}: CARE {debug_message}")
+                    else:
+                        _append_debug(f"{sim_name}: CARE disabled (gate)")
                     continue
             else:
                 _append_debug(f"{sim_name}: SKIP motives unreadable (no motive stats found)")
@@ -550,12 +707,42 @@ def _evaluate(now: float):
                     _append_debug(f"{sim_name}: SKIP busy")
                     continue
 
-            sim_id = _sim_identifier(sim_info)
             if not _can_push_for_sim(sim_id, now):
                 _append_debug(f"{sim_name}: SKIP cooldown")
                 continue
 
-            goal = choose_skill_goal(sim_info)
+            whim_target, whim_reason = _select_whim_target(sim_info)
+            goal = None
+            if whim_target is not None:
+                whim_key, whim_name = whim_target
+                if whim_key == "social":
+                    if not settings.director_allow_social_goals:
+                        _append_debug(f"{sim_name}: WHIM social disabled")
+                    else:
+                        goal = choose_skill_goal(sim_info)
+                        if goal is None:
+                            pushed, whim_message = _push_whim(sim, whim_key, whim_name)
+                            if pushed:
+                                _record_push(sim_id, now)
+                                action = f"{sim_name} -> WHIM {whim_name}"
+                                _append_action(action)
+                                last_director_time = now
+                                continue
+                            _append_debug(f"{sim_name}: {whim_message}")
+                else:
+                    pushed, whim_message = _push_whim(sim, whim_key, whim_name)
+                    if pushed:
+                        _record_push(sim_id, now)
+                        action = f"{sim_name} -> WHIM {whim_name}"
+                        _append_action(action)
+                        last_director_time = now
+                        continue
+                    _append_debug(f"{sim_name}: {whim_message}")
+            elif whim_reason:
+                _append_debug(f"{sim_name}: {whim_reason}")
+
+            if goal is None:
+                goal = choose_skill_goal(sim_info)
             if goal is None:
                 _append_debug(f"{sim_name}: NO GOAL")
                 continue

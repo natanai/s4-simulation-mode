@@ -251,6 +251,7 @@ def _usage_lines():
         "simulation director_push <skill_key>",
         "simulation director_takeover <skill_key>",
         "simulation configpath",
+        "simulation dump_log",
         "simulation help",
         "keys: auto_unpause, allow_death, allow_pregnancy, tick, guardian_enabled, guardian_check_seconds, "
         "guardian_min_motive, guardian_red_motive, guardian_per_sim_cooldown_seconds, "
@@ -538,6 +539,16 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         config_path = os.path.abspath(get_config_path())
         output(f"config_path={config_path}")
         output(f"exists={os.path.exists(config_path)}")
+        return True
+
+    if action_key == "dump_log":
+        dumper = importlib.import_module("simulation_mode.log_dump")
+        ok, result = dumper.dump_state_to_file()
+        if ok:
+            output(f"log_dump_written={result}")
+        else:
+            output("log_dump_failed")
+            output(result.splitlines()[-1] if result else "unknown error")
         return True
 
     if action_key == "debug":

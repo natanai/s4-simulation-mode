@@ -3,6 +3,7 @@ import time
 import traceback
 
 from simulation_mode import clock_utils
+from simulation_mode import director
 from simulation_mode.settings import settings
 
 
@@ -176,6 +177,10 @@ def _on_tick(_alarm_handle=None):
                 guardian.run_guardian()
         except Exception as exc:
             _set_last_error(str(exc))
+    try:
+        director.on_tick(time.time())
+    except Exception as exc:
+        _set_last_error(str(exc))
 
 
 def start():

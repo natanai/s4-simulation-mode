@@ -27,6 +27,17 @@ guardian_red_motive=-50
 guardian_per_sim_cooldown_seconds=60
 guardian_max_pushes_per_sim_per_hour=30
 
+# Life Director (skill progression; no cheating; pushes real interactions)
+director_enabled=true
+director_check_seconds=90
+director_min_safe_motive=-10
+director_per_sim_cooldown_seconds=300
+director_max_pushes_per_sim_per_hour=12
+director_prefer_career_skills=true
+director_fallback_to_started_skills=true
+director_skill_allow_list=
+director_skill_block_list=
+
 # Optional integration if you ALSO installed a mod that defines this trait ID
 integrate_better_autonomy_trait=false
 better_autonomy_trait_id=3985292068
@@ -47,6 +58,15 @@ class SimulationModeSettings:
         guardian_red_motive=-50,
         guardian_per_sim_cooldown_seconds=60,
         guardian_max_pushes_per_sim_per_hour=30,
+        director_enabled=True,
+        director_check_seconds=90,
+        director_min_safe_motive=-10,
+        director_per_sim_cooldown_seconds=300,
+        director_max_pushes_per_sim_per_hour=12,
+        director_prefer_career_skills=True,
+        director_fallback_to_started_skills=True,
+        director_skill_allow_list=None,
+        director_skill_block_list=None,
         integrate_better_autonomy_trait=False,
         better_autonomy_trait_id=3985292068,
     ):
@@ -61,6 +81,15 @@ class SimulationModeSettings:
         self.guardian_red_motive = guardian_red_motive
         self.guardian_per_sim_cooldown_seconds = guardian_per_sim_cooldown_seconds
         self.guardian_max_pushes_per_sim_per_hour = guardian_max_pushes_per_sim_per_hour
+        self.director_enabled = director_enabled
+        self.director_check_seconds = director_check_seconds
+        self.director_min_safe_motive = director_min_safe_motive
+        self.director_per_sim_cooldown_seconds = director_per_sim_cooldown_seconds
+        self.director_max_pushes_per_sim_per_hour = director_max_pushes_per_sim_per_hour
+        self.director_prefer_career_skills = director_prefer_career_skills
+        self.director_fallback_to_started_skills = director_fallback_to_started_skills
+        self.director_skill_allow_list = director_skill_allow_list or []
+        self.director_skill_block_list = director_skill_block_list or []
         self.integrate_better_autonomy_trait = integrate_better_autonomy_trait
         self.better_autonomy_trait_id = better_autonomy_trait_id
 
@@ -114,6 +143,15 @@ def _parse_value(value):
         return float(value)
     except Exception:
         return value
+
+
+def _parse_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip().lower() for item in value if str(item).strip()]
+    text = str(value)
+    return [item.strip().lower() for item in text.split(",") if item.strip()]
 
 
 def _ensure_template(path: Path):
@@ -251,6 +289,45 @@ def load_settings(target):
                     target.guardian_max_pushes_per_sim_per_hour = max(0, int(value))
                 except Exception:
                     _log_invalid_value(key, raw_value)
+            elif key == "director_enabled":
+                if isinstance(value, bool):
+                    target.director_enabled = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_check_seconds":
+                try:
+                    target.director_check_seconds = max(1, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_min_safe_motive":
+                try:
+                    target.director_min_safe_motive = int(value)
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_per_sim_cooldown_seconds":
+                try:
+                    target.director_per_sim_cooldown_seconds = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_max_pushes_per_sim_per_hour":
+                try:
+                    target.director_max_pushes_per_sim_per_hour = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_prefer_career_skills":
+                if isinstance(value, bool):
+                    target.director_prefer_career_skills = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_fallback_to_started_skills":
+                if isinstance(value, bool):
+                    target.director_fallback_to_started_skills = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_skill_allow_list":
+                target.director_skill_allow_list = _parse_list(raw_value)
+            elif key == "director_skill_block_list":
+                target.director_skill_block_list = _parse_list(raw_value)
             elif key == "integrate_better_autonomy_trait":
                 if isinstance(value, bool):
                     target.integrate_better_autonomy_trait = value

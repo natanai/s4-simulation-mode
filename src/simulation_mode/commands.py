@@ -48,6 +48,15 @@ def _status_lines():
         f"guardian_red_motive={settings.guardian_red_motive}",
         f"guardian_per_sim_cooldown_seconds={settings.guardian_per_sim_cooldown_seconds}",
         f"guardian_max_pushes_per_sim_per_hour={settings.guardian_max_pushes_per_sim_per_hour}",
+        f"director_enabled={settings.director_enabled}",
+        f"director_check_seconds={settings.director_check_seconds}",
+        f"director_min_safe_motive={settings.director_min_safe_motive}",
+        f"director_per_sim_cooldown_seconds={settings.director_per_sim_cooldown_seconds}",
+        f"director_max_pushes_per_sim_per_hour={settings.director_max_pushes_per_sim_per_hour}",
+        f"director_prefer_career_skills={settings.director_prefer_career_skills}",
+        f"director_fallback_to_started_skills={settings.director_fallback_to_started_skills}",
+        f"director_skill_allow_list={settings.director_skill_allow_list}",
+        f"director_skill_block_list={settings.director_skill_block_list}",
         f"integrate_better_autonomy_trait={settings.integrate_better_autonomy_trait}",
         f"better_autonomy_trait_id={settings.better_autonomy_trait_id}",
         f"daemon_running={running}",
@@ -85,6 +94,11 @@ def _stop_daemon():
 def _daemon_status():
     daemon = importlib.import_module("simulation_mode.daemon")
     return daemon.is_running(), daemon.daemon_error
+
+
+def _director_snapshot():
+    director = importlib.import_module("simulation_mode.director")
+    return director.last_director_time, list(director.last_director_actions)
 
 
 def _apply_pregnancy_patch():
@@ -192,16 +206,21 @@ def _usage_lines():
         "simulation set <key> <value>",
         "simulation set tick 1..120",
         "simulation reload",
+        "simulation director",
         "simulation configpath",
         "simulation help",
         "keys: auto_unpause, allow_death, allow_pregnancy, tick, guardian_enabled, guardian_check_seconds, "
         "guardian_min_motive, guardian_red_motive, guardian_per_sim_cooldown_seconds, "
-        "guardian_max_pushes_per_sim_per_hour, integrate_better_autonomy_trait, better_autonomy_trait_id",
+        "guardian_max_pushes_per_sim_per_hour, director_enabled, director_check_seconds, "
+        "director_min_safe_motive, director_per_sim_cooldown_seconds, "
+        "director_max_pushes_per_sim_per_hour, director_prefer_career_skills, "
+        "director_fallback_to_started_skills, director_skill_allow_list, "
+        "director_skill_block_list, integrate_better_autonomy_trait, better_autonomy_trait_id",
     ]
 
 
 def _emit_help(output):
-    output("Simulation Mode v0.4 help:")
+    output("Simulation Mode v0.5 help:")
     for line in _usage_lines():
         output(f"- {line}")
 
@@ -306,6 +325,19 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
     if action_key == "reload":
         _reload_settings(_connection, output)
         _emit_status(output)
+        return True
+
+    if action_key == "director":
+        last_time, actions = _director_snapshot()
+        output(f"director_enabled={settings.director_enabled}")
+        output(f"director_check_seconds={settings.director_check_seconds}")
+        output(f"last_director_time={last_time}")
+        if actions:
+            output("last_director_actions:")
+            for line in actions[-10:]:
+                output(f"- {line}")
+        else:
+            output("last_director_actions=")
         return True
 
     if action_key == "configpath":

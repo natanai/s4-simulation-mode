@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.4.0)
+# Simulation Mode Kernel Mod (v0.5.0)
 
 ## What it is
 
@@ -9,7 +9,7 @@ This is a minimal Sims 4 script mod kernel that registers the `simulation` cheat
 * Optionally auto-unpause if the game clock is paused.
 * Toggle death on/off while Simulation Mode is enabled (reasserted periodically).
 
-## What it is not (v0.4.0 non-goals)
+## What it is not (v0.5.0 non-goals)
 
 * No action/event logging yet.
 * No cheating motive values or filling needs.
@@ -73,6 +73,7 @@ Open the cheat console and run:
 * `simulation true`
 * `simulation false`
 * `simulation reload`
+* `simulation director`
 * `simulation help`
 * `simulation debug` (includes auto-unpause diagnostics)
 
@@ -85,7 +86,22 @@ After editing the TXT file, run `simulation reload` in-game to apply changes wit
 Notes:
 
 * `guardian_min_motive` starts intervening when a core motive drops below this value. Motives generally range from -100..100, with yellow between -1..-50 and red below -50.
+* The Life Director nudges real skill-building interactions (no motive/skill cheating) when Sims are safe and idle.
 * `death.toggle` is applied on enable and reasserted periodically while Simulation Mode is running.
+
+## Life Director settings
+
+```text
+director_enabled=true
+director_check_seconds=90
+director_min_safe_motive=-10
+director_per_sim_cooldown_seconds=300
+director_max_pushes_per_sim_per_hour=12
+director_prefer_career_skills=true
+director_fallback_to_started_skills=true
+director_skill_allow_list=
+director_skill_block_list=
+```
 
 ## Test plan
 

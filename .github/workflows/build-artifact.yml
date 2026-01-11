@@ -1,0 +1,84 @@
+name: Build Simulation Mode Script
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_target:
+        description: "Where to publish the built file (release, branch, or both)."
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - branch
+          - both
+      release_tag:
+        description: "Release tag to create or update (optional)."
+        required: false
+        default: ""
+      release_name:
+        description: "Release name (optional)."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build .ts4script with Python 3.7 container
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            python:3.7 \
+            bash -lc "python tools/build_ts4script.py"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: s4-simulation-mode
+          path: dist/s4-simulation-mode.ts4script
+
+      - name: Prepare release metadata
+        if: ${{ inputs.publish_target == 'release' || inputs.publish_target == 'both' }}
+        id: release_meta
+        run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=build-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -n "${{ inputs.release_name }}" ]; then
+            echo "name=${{ inputs.release_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=Build ${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update GitHub release
+        if: ${{ inputs.publish_target == 'release' || inputs.publish_target == 'both' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: ${{ steps.release_meta.outputs.name }}
+          files: dist/s4-simulation-mode.ts4script
+          generate_release_notes: true
+
+      - name: Commit build artifact to branch
+        if: ${{ (inputs.publish_target == 'branch' || inputs.publish_target == 'both') && github.ref_type == 'branch' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f dist/s4-simulation-mode.ts4script
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: add built ts4script artifact"
+          git push origin "HEAD:${{ github.ref_name }}"

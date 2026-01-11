@@ -51,6 +51,10 @@ def _status_lines():
         f"director_enabled={settings.director_enabled}",
         f"director_check_seconds={settings.director_check_seconds}",
         f"director_min_safe_motive={settings.director_min_safe_motive}",
+        f"director_green_motive_percent={settings.director_green_motive_percent}",
+        f"director_green_min_commodities={settings.director_green_min_commodities}",
+        f"director_allow_social_goals={settings.director_allow_social_goals}",
+        f"director_use_guardian_when_low={settings.director_use_guardian_when_low}",
         f"director_per_sim_cooldown_seconds={settings.director_per_sim_cooldown_seconds}",
         f"director_max_pushes_per_sim_per_hour={settings.director_max_pushes_per_sim_per_hour}",
         f"director_prefer_career_skills={settings.director_prefer_career_skills}",
@@ -105,6 +109,34 @@ def _director_snapshot():
         list(director.last_director_actions),
         list(director.last_director_debug),
     )
+
+
+def _active_sim_info():
+    services = importlib.import_module("services")
+    getter = getattr(services, "active_sim_info", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            return None
+    sim = services.active_sim()
+    if sim is None:
+        return None
+    return getattr(sim, "sim_info", None)
+
+
+def _emit_director_motive_snapshot(output, sim_info):
+    director = importlib.import_module("simulation_mode.director")
+    guardian = importlib.import_module("simulation_mode.guardian")
+    snapshot = director.get_motive_snapshot_for_sim(sim_info)
+    if not snapshot:
+        output("motive_snapshot=")
+        return
+    output("motive_snapshot:")
+    for key, value in snapshot:
+        percent = guardian.motive_percent(value)
+        green = guardian.motive_is_green(value, settings.director_green_motive_percent)
+        output(f"- {key}={value:.1f} percent={percent:.2f} green={green}")
 
 
 def _apply_pregnancy_patch():
@@ -213,6 +245,7 @@ def _usage_lines():
         "simulation set tick 1..120",
         "simulation reload",
         "simulation director",
+        "simulation director_gate",
         "simulation director_now",
         "simulation director_why",
         "simulation director_push <skill_key>",
@@ -222,6 +255,8 @@ def _usage_lines():
         "guardian_min_motive, guardian_red_motive, guardian_per_sim_cooldown_seconds, "
         "guardian_max_pushes_per_sim_per_hour, director_enabled, director_check_seconds, "
         "director_min_safe_motive, director_per_sim_cooldown_seconds, "
+        "director_green_motive_percent, director_green_min_commodities, "
+        "director_allow_social_goals, director_use_guardian_when_low, "
         "director_max_pushes_per_sim_per_hour, director_prefer_career_skills, "
         "director_fallback_to_started_skills, director_skill_allow_list, "
         "director_skill_block_list, integrate_better_autonomy_trait, better_autonomy_trait_id",
@@ -241,6 +276,7 @@ def _handle_set(key, value, _connection, output):
 
     key = key.strip().lower()
     if key in {"auto_unpause", "allow_death", "allow_pregnancy", "guardian_enabled",
+               "director_allow_social_goals", "director_use_guardian_when_low",
                "integrate_better_autonomy_trait"}:
         parsed = _parse_bool(value)
         if parsed is None:
@@ -269,9 +305,19 @@ def _handle_set(key, value, _connection, output):
 
     if key in {"guardian_check_seconds", "guardian_min_motive", "guardian_red_motive",
                "guardian_per_sim_cooldown_seconds", "guardian_max_pushes_per_sim_per_hour",
-               "better_autonomy_trait_id"}:
+               "director_green_min_commodities", "better_autonomy_trait_id"}:
         try:
             parsed = int(value)
+        except Exception:
+            output(f"Invalid value for {key}: {value}")
+            return False
+        setattr(settings, key, parsed)
+        output(f"Updated {key} to {parsed}. To persist, edit simulation-mode.txt")
+        return True
+
+    if key in {"director_green_motive_percent"}:
+        try:
+            parsed = float(value)
         except Exception:
             output(f"Invalid value for {key}: {value}")
             return False
@@ -340,15 +386,53 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         last_called, last_run, last_time, actions, _debug = _director_snapshot()
         output(f"director_enabled={settings.director_enabled}")
         output(f"director_check_seconds={settings.director_check_seconds}")
+        output(f"director_green_motive_percent={settings.director_green_motive_percent}")
+        output(f"director_green_min_commodities={settings.director_green_min_commodities}")
+        output(f"director_allow_social_goals={settings.director_allow_social_goals}")
+        output(f"director_use_guardian_when_low={settings.director_use_guardian_when_low}")
         output(f"last_director_called_time={last_called}")
         output(f"last_director_run_time={last_run}")
         output(f"last_director_time={last_time}")
+        sim_info = _active_sim_info()
+        if sim_info is not None:
+            _emit_director_motive_snapshot(output, sim_info)
+        else:
+            output("motive_snapshot= (no active sim)")
         if actions:
             output("last_director_actions:")
             for line in actions[-10:]:
                 output(f"- {line}")
         else:
             output("last_director_actions=")
+        director = importlib.import_module("simulation_mode.director")
+        if director.last_director_debug:
+            output("last_director_debug:")
+            for line in director.last_director_debug[-10:]:
+                output(f"- {line}")
+        else:
+            output("last_director_debug=")
+        return True
+
+    if action_key == "director_gate":
+        director = importlib.import_module("simulation_mode.director")
+        guardian = importlib.import_module("simulation_mode.guardian")
+        sim_info = _active_sim_info()
+        if sim_info is None:
+            output("No active sim found.")
+            return True
+        snapshot = director.get_motive_snapshot_for_sim(sim_info)
+        if not snapshot:
+            output("motive_snapshot= (unavailable)")
+            return True
+        greens = 0
+        for _key, value in snapshot:
+            if guardian.motive_is_green(value, settings.director_green_motive_percent):
+                greens += 1
+        gate_pass = greens >= settings.director_green_min_commodities
+        output(f"green_gate_pass={gate_pass}")
+        output(f"green_count={greens}")
+        output(f"green_min_commodities={settings.director_green_min_commodities}")
+        _emit_director_motive_snapshot(output, sim_info)
         return True
 
     if action_key == "director_now":

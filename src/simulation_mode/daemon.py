@@ -7,7 +7,8 @@ _ALARM_HANDLE = None
 _LAST_DEATH_REASSERT = 0
 _DEATH_REASSERT_SECONDS = 60
 last_error = None
-last_tick_wallclock = None
+last_alarm_variant = None
+last_tick_wallclock = 0.0
 tick_count = 0
 
 
@@ -86,24 +87,107 @@ def _on_tick(_alarm_handle=None):
     _maybe_reassert_death()
 
 
+def _try_schedule_alarm(alarms, owner, seconds, callback):
+    global last_alarm_variant
+    attempts = [
+        ("seconds_owner_callback_sleep",
+         lambda: alarms.add_alarm_real_time(
+             owner,
+             float(seconds),
+             callback,
+             repeating=True,
+             use_sleep_time=True,
+         )),
+        ("seconds_owner_callback",
+         lambda: alarms.add_alarm_real_time(
+             owner,
+             float(seconds),
+             callback,
+             repeating=True,
+         )),
+        ("seconds_owner_callback_reordered_sleep",
+         lambda: alarms.add_alarm_real_time(
+             owner,
+             callback,
+             float(seconds),
+             repeating=True,
+             use_sleep_time=True,
+         )),
+        ("seconds_owner_callback_reordered",
+         lambda: alarms.add_alarm_real_time(
+             owner,
+             callback,
+             float(seconds),
+             repeating=True,
+         )),
+    ]
+    try:
+        date_and_time = importlib.import_module("date_and_time")
+        clock = importlib.import_module("clock")
+        time_span = date_and_time.TimeSpan(clock.interval_in_real_seconds(float(seconds)))
+        attempts.extend([
+            ("timespan_owner_callback_sleep",
+             lambda: alarms.add_alarm_real_time(
+                 owner,
+                 time_span,
+                 callback,
+                 repeating=True,
+                 use_sleep_time=True,
+             )),
+            ("timespan_owner_callback",
+             lambda: alarms.add_alarm_real_time(
+                 owner,
+                 time_span,
+                 callback,
+                 repeating=True,
+             )),
+            ("timespan_owner_callback_reordered_sleep",
+             lambda: alarms.add_alarm_real_time(
+                 owner,
+                 callback,
+                 time_span,
+                 repeating=True,
+                 use_sleep_time=True,
+             )),
+            ("timespan_owner_callback_reordered",
+             lambda: alarms.add_alarm_real_time(
+                 owner,
+                 callback,
+                 time_span,
+                 repeating=True,
+             )),
+        ])
+    except Exception:
+        pass
+
+    last_exc = None
+    for name, attempt in attempts:
+        try:
+            handle = attempt()
+            last_alarm_variant = name
+            return handle
+        except TypeError as exc:
+            last_exc = exc
+            continue
+    if last_exc is None:
+        raise RuntimeError("No alarm variants attempted")
+    raise last_exc
+
+
 def start():
-    global _ALARM_HANDLE
+    global _ALARM_HANDLE, last_alarm_variant
     stop()
     _set_last_error(None)
+    last_alarm_variant = None
     try:
         alarms = importlib.import_module("alarms")
         services = importlib.import_module("services")
-        date_and_time = importlib.import_module("date_and_time")
-        clock = importlib.import_module("clock")
         interval = max(1, int(settings.tick_seconds))
-        time_span = date_and_time.TimeSpan(clock.interval_in_real_seconds(interval))
-        _ALARM_HANDLE = alarms.add_alarm_real_time(
+        _ALARM_HANDLE = _try_schedule_alarm(
+            alarms,
             services.time_service(),
-            time_span,
+            interval,
             _on_tick,
-            repeating=True,
-            use_sleep_time=True,
-            cross_zone=False,
         )
         if _ALARM_HANDLE is None:
             _set_last_error("alarm failed to start")

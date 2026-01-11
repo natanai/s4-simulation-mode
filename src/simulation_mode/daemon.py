@@ -12,15 +12,46 @@ def _set_last_error(error):
 def _maybe_auto_unpause():
     if not settings.auto_unpause:
         return
+
+    # Only attempt to unpause in an actively running zone.
     try:
         import services
-        from clock import ClockSpeed
 
+        zone = services.current_zone()
+        if zone is None or not getattr(zone, "is_zone_running", True):
+            return
+    except Exception:
+        pass
+
+    try:
         clock_service = services.game_clock_service()
         if clock_service is None:
             return
-        if clock_service.clock_speed == ClockSpeed.PAUSED:
-            clock_service.set_clock_speed(ClockSpeed.NORMAL)
+
+        # Enum names vary between builds.
+        try:
+            from clock import ClockSpeedMode as _ClockSpeed
+        except Exception:
+            from clock import ClockSpeed as _ClockSpeed
+
+        # Prefer USER source so it behaves like pressing Play.
+        try:
+            from clock import GameSpeedChangeSource as _GameSpeedChangeSource
+
+            _change_source = getattr(_GameSpeedChangeSource, "USER", _GameSpeedChangeSource.GAMEPLAY)
+        except Exception:
+            _GameSpeedChangeSource = None
+            _change_source = None
+
+        speed_attr = getattr(clock_service, "clock_speed", None)
+        current_speed = speed_attr() if callable(speed_attr) else speed_attr
+
+        if current_speed == _ClockSpeed.PAUSED:
+            if _GameSpeedChangeSource is not None:
+                clock_service.set_clock_speed(_ClockSpeed.NORMAL, change_source=_change_source)
+            else:
+                clock_service.set_clock_speed(_ClockSpeed.NORMAL)
+
     except Exception:
         return
 

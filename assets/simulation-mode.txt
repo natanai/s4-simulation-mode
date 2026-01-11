@@ -1,0 +1,19 @@
+# Simulation Mode (The Sims 4) — Settings
+# Edit this file, then in-game run: simulation reload
+enabled=false
+auto_unpause=true
+allow_death=false
+allow_pregnancy=false
+tick_seconds=5
+
+# Self-Care Guardian (no cheating; pushes real interactions)
+guardian_enabled=true
+guardian_check_seconds=20
+guardian_min_motive=-25
+guardian_red_motive=-50
+guardian_per_sim_cooldown_seconds=60
+guardian_max_pushes_per_sim_per_hour=30
+
+# Optional integration if you ALSO installed a mod that defines this trait ID
+integrate_better_autonomy_trait=false
+better_autonomy_trait_id=3985292068

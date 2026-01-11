@@ -80,7 +80,9 @@ jobs:
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           name: ${{ steps.release_meta.outputs.name }}
-          files: dist/simulation-mode.ts4script
+          files: |
+            dist/simulation-mode.ts4script
+            assets/simulation-mode.txt
           generate_release_notes: true
 
       - name: Commit build artifact to branch

@@ -1,20 +1,20 @@
-# Simulation Mode Kernel Mod (v0.3.0)
+# Simulation Mode Kernel Mod (v0.4.0)
 
 ## What it is
 
 This is a minimal Sims 4 script mod kernel that registers the `simulation` cheat-console command and runs a lightweight real-time watchdog while Simulation Mode is enabled. The watchdog can:
 
-* Keep household Sims alive by bumping critical motives when they fall below a floor.
+* Push real in-world self-care interactions (sleep/eat/toilet/shower) when household Sims are trending toward yellow/red motives.
 * Block pregnancy unless explicitly allowed (to avoid naming dialogs during unattended play).
 * Optionally auto-unpause if the game clock is paused.
-* Optionally auto-respond to dialogs (best effort; may fail on game updates).
 * Toggle death on/off while Simulation Mode is enabled (reasserted periodically).
 
-## What it is not (v0.3.0 non-goals)
+## What it is not (v0.4.0 non-goals)
 
 * No action/event logging yet.
-* No complex autonomy rewrites or interaction injection beyond pregnancy blocking.
-* No attempts to override global game options (aging, etc.).
+* No cheating motive values or filling needs.
+* No complex autonomy rewrites beyond light interaction pushes.
+* No attempt to override global game options (aging, etc.).
 * No attempt to handle every modal dialog in the game.
 
 ## Prereqs
@@ -49,6 +49,13 @@ Run the “Build Simulation Mode Script” workflow and download the artifact na
 python tools/install_to_mods.py
 ```
 
+Place both files in your Mods folder:
+
+```
+Mods/SimulationMode/simulation-mode.ts4script
+Mods/SimulationMode/simulation-mode.txt
+```
+
 The `.ts4script` must be no deeper than one subfolder in your Mods folder.
 
 If the `simulation` command does not register, verify the archive contains a root
@@ -65,33 +72,28 @@ Open the cheat console and run:
 * `simulation status`
 * `simulation true`
 * `simulation false`
-* `simulation help`
-* `simulation set auto_unpause true|false`
-* `simulation set auto_dialogs true|false`
-* `simulation set allow_death true|false`
-* `simulation set allow_pregnancy true|false`
-* `simulation set tick 1..120`
 * `simulation reload`
-* `simulation preset safe`
-* `simulation preset risky`
+* `simulation help`
 * `simulation debug` (includes auto-unpause diagnostics)
 
-Pregnancy is blocked by default while Simulation Mode is enabled. Motive protection only bumps critical motives upward when they dip below a floor; it does not max all needs.
+Settings are stored in the manually editable file:
 
-Settings are persisted to:
+`Mods/SimulationMode/simulation-mode.txt`
 
-`Documents/Electronic Arts/The Sims 4/mod_data/simulation-mode/settings.json`
+After editing the TXT file, run `simulation reload` in-game to apply changes without restarting.
 
 Notes:
 
-* `auto_dialogs` runs the `ui.dialog.auto_respond` cheat when Simulation Mode is enabled, but it may fail on some patches.
+* `guardian_min_motive` starts intervening when a core motive drops below this value. Motives generally range from -100..100, with yellow between -1..-50 and red below -50.
 * `death.toggle` is applied on enable and reasserted periodically while Simulation Mode is running.
 
 ## Test plan
 
 1. Put `simulation-mode.ts4script` into `Mods/SimulationMode/`.
-2. Enable script mods.
-3. In-game, run `simulation status` (should show loaded + version if provided).
-4. Run `simulation set tick 1`, then `simulation true`.
-5. Wait 3–5 seconds; run `simulation status` again: `tick_count` should be > 0 and `daemon_running` should be `True`.
-6. Pause the game, wait 2 seconds, and confirm it unpauses. If it does not, confirm `daemon_running` is `True` and `tick_count` is increasing, then debug the clock API.
+2. Add `simulation-mode.txt` to `Mods/SimulationMode/`.
+3. Enable script mods.
+4. In-game, run `simulation status` (should show loaded + version if provided).
+5. Run `simulation true`.
+6. Wait 3–5 seconds; run `simulation status` again: `tick_count` should be > 0 and `daemon_running` should be `True`.
+7. Pause the game, wait 2 seconds, and confirm it unpauses. If it does not, confirm `daemon_running` is `True` and `tick_count` is increasing, then debug the clock API.
+8. Let a household Sim dip into yellow motives and confirm the guardian pushes a self-care interaction.

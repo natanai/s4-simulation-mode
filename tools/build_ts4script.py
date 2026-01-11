@@ -61,6 +61,7 @@ def main():
             relative = source_path.relative_to(PROJECT_ROOT / "src")
             archive.write(source_path, arcname=str(relative))
         for compiled_path in compiled_sources:
+            # Sims 4 loads .pyc bytecode from ts4script archives; removing these breaks the mod.
             relative = compiled_path.relative_to(BUILD_DIR)
             archive.write(compiled_path, arcname=str(relative))
 

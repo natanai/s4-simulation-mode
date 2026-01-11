@@ -31,6 +31,12 @@ The build always outputs `dist/simulation-mode.ts4script`. Versioning is tracked
 `VERSION.txt` (and optionally git tags), not in the filename. The artifact name is always
 `simulation-mode.ts4script`.
 
+### Packaging rules
+
+The game only loads compiled `.pyc` bytecode from the archive, so the build must include
+the `.pyc` files alongside the sources. Do not remove `.pyc` from the archive; the mod will
+not load.
+
 ## Download from GitHub Actions
 
 Run the “Build Simulation Mode Script” workflow and download the artifact named

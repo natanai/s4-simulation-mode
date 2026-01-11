@@ -1,6 +1,11 @@
+import importlib
+import time
+
 from simulation_mode.settings import settings
 
 _ALARM_HANDLE = None
+_LAST_DEATH_REASSERT = 0
+_DEATH_REASSERT_SECONDS = 60
 last_error = None
 
 
@@ -15,8 +20,7 @@ def _maybe_auto_unpause():
 
     # Only attempt to unpause in an actively running zone.
     try:
-        import services
-
+        services = importlib.import_module("services")
         zone = services.current_zone()
         if zone is None or not getattr(zone, "is_zone_running", True):
             return
@@ -29,18 +33,17 @@ def _maybe_auto_unpause():
             return
 
         # Enum names vary between builds.
-        try:
-            from clock import ClockSpeedMode as _ClockSpeed
-        except Exception:
-            from clock import ClockSpeed as _ClockSpeed
+        clock_module = importlib.import_module("clock")
+        _ClockSpeed = getattr(clock_module, "ClockSpeedMode", None)
+        if _ClockSpeed is None:
+            _ClockSpeed = getattr(clock_module, "ClockSpeed", None)
+        if _ClockSpeed is None:
+            return
 
-        # Prefer USER source so it behaves like pressing Play.
-        try:
-            from clock import GameSpeedChangeSource as _GameSpeedChangeSource
-
+        _GameSpeedChangeSource = getattr(clock_module, "GameSpeedChangeSource", None)
+        if _GameSpeedChangeSource is not None:
             _change_source = getattr(_GameSpeedChangeSource, "USER", _GameSpeedChangeSource.GAMEPLAY)
-        except Exception:
-            _GameSpeedChangeSource = None
+        else:
             _change_source = None
 
         speed_attr = getattr(clock_service, "clock_speed", None)
@@ -56,10 +59,26 @@ def _maybe_auto_unpause():
         return
 
 
+def _maybe_reassert_death():
+    global _LAST_DEATH_REASSERT
+    if settings.allow_death:
+        return
+    now = time.time()
+    if now - _LAST_DEATH_REASSERT < _DEATH_REASSERT_SECONDS:
+        return
+    _LAST_DEATH_REASSERT = now
+    try:
+        sims4_commands = importlib.import_module("sims4.commands")
+        sims4_commands.execute("death.toggle false", None)
+    except Exception as exc:
+        _set_last_error(str(exc))
+
+
 def _on_tick(_alarm_handle=None):
     if not settings.enabled:
         return
     _maybe_auto_unpause()
+    _maybe_reassert_death()
 
 
 def start():
@@ -67,9 +86,8 @@ def start():
     stop()
     _set_last_error(None)
     try:
-        import alarms
-        import services
-
+        alarms = importlib.import_module("alarms")
+        services = importlib.import_module("services")
         interval = max(1, int(settings.tick_seconds))
         _ALARM_HANDLE = alarms.add_alarm_real_time(
             services.time_service(),
@@ -87,8 +105,7 @@ def stop():
     if _ALARM_HANDLE is None:
         return
     try:
-        import alarms
-
+        alarms = importlib.import_module("alarms")
         alarms.cancel_alarm(_ALARM_HANDLE)
     except Exception:
         pass

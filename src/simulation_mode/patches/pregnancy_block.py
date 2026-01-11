@@ -1,9 +1,12 @@
+import importlib
+
 from simulation_mode.settings import settings
 
 
 def apply_patch():
     try:
-        from sims.pregnancy.pregnancy_tracker import PregnancyTracker
+        pregnancy_tracker = importlib.import_module("sims.pregnancy.pregnancy_tracker")
+        PregnancyTracker = pregnancy_tracker.PregnancyTracker
     except Exception:
         return False
 

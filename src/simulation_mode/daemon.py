@@ -2,6 +2,7 @@ import importlib
 import time
 import traceback
 
+from simulation_mode import clock_utils
 from simulation_mode.settings import settings
 
 
@@ -74,17 +75,6 @@ def _pause_requests_count(clock_service):
     return None
 
 
-def _is_paused(clock_service, clock_module):
-    _ClockSpeed = getattr(clock_module, "ClockSpeedMode", None)
-    if _ClockSpeed is None:
-        _ClockSpeed = getattr(clock_module, "ClockSpeed", None)
-    if _ClockSpeed is None:
-        return False
-    speed_attr = getattr(clock_service, "clock_speed", None)
-    current_speed = speed_attr() if callable(speed_attr) else speed_attr
-    return current_speed == _ClockSpeed.PAUSED
-
-
 def _try_unpause():
     global last_unpause_attempt_ts, last_unpause_result, last_pause_requests_count
     services = importlib.import_module("services")
@@ -100,7 +90,7 @@ def _try_unpause():
         if clock_service is None:
             return
 
-        if not _is_paused(clock_service, clock_module):
+        if not clock_utils.is_paused(clock_service):
             return
 
         last_unpause_attempt_ts = time.time()
@@ -122,19 +112,19 @@ def _try_unpause():
         if ok:
             _set_last_error(None)
 
-        if not _is_paused(clock_service, clock_module):
+        if not clock_utils.is_paused(clock_service):
             last_unpause_result = "clock_service_ok"
             return
 
         if _DAEMON_CONNECTION is not None:
             sims4_commands.client_cheat("|clock.toggle_pause_unpause", _DAEMON_CONNECTION)
-            if not _is_paused(clock_service, clock_module):
+            if not clock_utils.is_paused(clock_service):
                 _set_last_error(None)
                 last_unpause_result = "toggle_used"
                 return
 
             sims4_commands.client_cheat("|clock.setspeed one", _DAEMON_CONNECTION)
-            if not _is_paused(clock_service, clock_module):
+            if not clock_utils.is_paused(clock_service):
                 _set_last_error(None)
                 last_unpause_result = "setspeed_used"
                 return
@@ -179,6 +169,13 @@ def _on_tick(_alarm_handle=None):
         return
     _maybe_auto_unpause()
     _maybe_reassert_death()
+    if settings.guardian_enabled:
+        try:
+            if not clock_utils.is_paused():
+                guardian = importlib.import_module("simulation_mode.guardian")
+                guardian.run_guardian()
+        except Exception as exc:
+            _set_last_error(str(exc))
 
 
 def start():

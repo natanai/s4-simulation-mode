@@ -4,7 +4,7 @@ import time
 import sims4.commands
 from sims4.commands import BOOL_TRUE, CommandType
 
-from simulation_mode.settings import get_config_path, load_settings, save_settings, settings
+from simulation_mode.settings import get_config_path, load_settings, settings
 
 _FALSE_STRINGS = {"false", "f", "0", "off", "no", "n"}
 _TICK_MIN_SECONDS = 1
@@ -38,14 +38,21 @@ def _status_lines():
     return [
         f"enabled={settings.enabled}",
         f"auto_unpause={settings.auto_unpause}",
-        f"auto_dialogs={settings.auto_dialogs}",
         f"allow_death={settings.allow_death}",
         f"allow_pregnancy={settings.allow_pregnancy}",
-        f"tick={settings.tick_seconds}",
+        f"tick_seconds={settings.tick_seconds}",
+        f"guardian_enabled={settings.guardian_enabled}",
+        f"guardian_check_seconds={settings.guardian_check_seconds}",
+        f"guardian_min_motive={settings.guardian_min_motive}",
+        f"guardian_red_motive={settings.guardian_red_motive}",
+        f"guardian_per_sim_cooldown_seconds={settings.guardian_per_sim_cooldown_seconds}",
+        f"guardian_max_pushes_per_sim_per_hour={settings.guardian_max_pushes_per_sim_per_hour}",
+        f"integrate_better_autonomy_trait={settings.integrate_better_autonomy_trait}",
+        f"better_autonomy_trait_id={settings.better_autonomy_trait_id}",
         f"daemon_running={running}",
         f"tick_count={daemon_tick_count}",
         f"daemon_error={daemon_error}",
-        f"config_path={get_config_path()}",
+        f"settings_path={get_config_path()}",
     ]
 
 
@@ -96,17 +103,6 @@ def _apply_pregnancy_patch():
     return False
 
 
-def _apply_auto_dialogs(_connection, output):
-    if not settings.auto_dialogs:
-        return True
-    try:
-        sims4.commands.client_cheat("|ui.dialog.auto_respond", _connection)
-        return True
-    except Exception as exc:
-        output(f"auto_dialogs failed: {exc}")
-        return False
-
-
 def _apply_death_toggle(_connection, output):
     try:
         state = "true" if settings.allow_death else "false"
@@ -124,7 +120,6 @@ def _set_enabled(enabled: bool, _connection, output):
         daemon.set_connection(_connection)
         _apply_pregnancy_patch()
         _apply_death_toggle(_connection, output)
-        _apply_auto_dialogs(_connection, output)
         return _start_daemon()
     return _stop_daemon()
 
@@ -196,14 +191,15 @@ def _usage_lines():
         "simulation set <key> <value>",
         "simulation set tick 1..120",
         "simulation reload",
-        "simulation preset <safe|risky>",
         "simulation help",
-        "keys: auto_unpause, auto_dialogs, allow_death, allow_pregnancy, tick",
+        "keys: auto_unpause, allow_death, allow_pregnancy, tick, guardian_enabled, guardian_check_seconds, "
+        "guardian_min_motive, guardian_red_motive, guardian_per_sim_cooldown_seconds, "
+        "guardian_max_pushes_per_sim_per_hour, integrate_better_autonomy_trait, better_autonomy_trait_id",
     ]
 
 
 def _emit_help(output):
-    output("Simulation Mode v0.3 help:")
+    output("Simulation Mode v0.4 help:")
     for line in _usage_lines():
         output(f"- {line}")
 
@@ -214,14 +210,13 @@ def _handle_set(key, value, _connection, output):
         return False
 
     key = key.strip().lower()
-    if key in {"auto_unpause", "auto_dialogs", "allow_death", "allow_pregnancy"}:
+    if key in {"auto_unpause", "allow_death", "allow_pregnancy", "guardian_enabled",
+               "integrate_better_autonomy_trait"}:
         parsed = _parse_bool(value)
         if parsed is None:
             output(f"Invalid value for {key}: {value}")
             return False
         setattr(settings, key, parsed)
-        if settings.enabled and key == "auto_dialogs" and parsed:
-            _apply_auto_dialogs(_connection, output)
         if settings.enabled and key == "allow_death":
             _apply_death_toggle(_connection, output)
         if key == "allow_pregnancy":
@@ -229,8 +224,7 @@ def _handle_set(key, value, _connection, output):
                 _apply_pregnancy_patch()
             if settings.allow_pregnancy:
                 _set_last_patch_error(None)
-        save_settings(settings)
-        output(f"Updated {key} to {parsed}")
+        output(f"Updated {key} to {parsed}. To persist, edit simulation-mode.txt")
         return True
 
     if key == "tick":
@@ -240,50 +234,39 @@ def _handle_set(key, value, _connection, output):
             output(f"Invalid value for tick: {value}")
             return False
         _set_tick_seconds(tick_value)
-        save_settings(settings)
-        output(f"Updated tick to {settings.tick_seconds}")
+        output(f"Updated tick_seconds to {settings.tick_seconds}. To persist, edit simulation-mode.txt")
+        return True
+
+    if key in {"guardian_check_seconds", "guardian_min_motive", "guardian_red_motive",
+               "guardian_per_sim_cooldown_seconds", "guardian_max_pushes_per_sim_per_hour",
+               "better_autonomy_trait_id"}:
+        try:
+            parsed = int(value)
+        except Exception:
+            output(f"Invalid value for {key}: {value}")
+            return False
+        setattr(settings, key, parsed)
+        output(f"Updated {key} to {parsed}. To persist, edit simulation-mode.txt")
         return True
 
     output(f"Unknown setting: {key}")
     return False
 
 
-def _apply_preset(name, _connection, output):
-    preset = name.strip().lower() if name else ""
-    was_enabled = settings.enabled
-    settings.enabled = False
-    if preset == "safe":
-        settings.auto_dialogs = True
-        settings.allow_death = False
-        settings.allow_pregnancy = False
-        settings.auto_unpause = True
-        _set_tick_seconds(10)
-    elif preset == "risky":
-        settings.auto_dialogs = True
-        settings.allow_death = True
-        settings.allow_pregnancy = True
-        settings.auto_unpause = True
-        _set_tick_seconds(10)
-    else:
-        settings.enabled = was_enabled
-        output(f"Unknown preset: {name}")
-        return False
-
-    _set_enabled(True, _connection, output)
-    save_settings(settings)
-    return True
-
-
 def _reload_settings(_connection, output):
+    was_enabled = settings.enabled
     load_settings(settings)
     if settings.enabled:
+        daemon = importlib.import_module("simulation_mode.daemon")
+        daemon.set_connection(_connection)
         _apply_death_toggle(_connection, output)
         if settings.allow_pregnancy:
             _set_last_patch_error(None)
         else:
             _apply_pregnancy_patch()
-        _apply_auto_dialogs(_connection, output)
         _start_daemon()
+    elif was_enabled:
+        _stop_daemon()
     output("Reloaded settings from disk.")
     return True
 
@@ -320,14 +303,6 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "reload":
         _reload_settings(_connection, output)
-        _emit_status(output)
-        return True
-
-    if action_key == "preset":
-        preset_name = key.strip().lower() if key else ""
-        if not _apply_preset(key, _connection, output):
-            return False
-        output(f"Preset applied: {preset_name}")
         _emit_status(output)
         return True
 
@@ -370,20 +345,8 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         return True
 
-    if action_key == "protect_motives":
-        parsed = _parse_bool(key)
-        if parsed is not None:
-            settings.protect_motives = parsed
-        _emit_status(output)
-        return True
-
     if action_key == "auto_unpause":
         _handle_set("auto_unpause", key, _connection, output)
-        _emit_status(output)
-        return True
-
-    if action_key == "auto_dialogs":
-        _handle_set("auto_dialogs", key, _connection, output)
         _emit_status(output)
         return True
 

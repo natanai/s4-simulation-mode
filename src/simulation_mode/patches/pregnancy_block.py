@@ -1,19 +1,19 @@
 from simulation_mode.settings import settings
 
 
-def _apply_patch():
+def apply_patch():
     try:
         from sims.pregnancy.pregnancy_tracker import PregnancyTracker
     except Exception:
-        return
+        return False
 
     try:
         original = PregnancyTracker.start_pregnancy
     except Exception:
-        return
+        return False
 
     if getattr(PregnancyTracker.start_pregnancy, "_simulation_mode_patched", False):
-        return
+        return True
 
     def wrapper(self, *args, **kwargs):
         try:
@@ -27,7 +27,5 @@ def _apply_patch():
     try:
         PregnancyTracker.start_pregnancy = wrapper
     except Exception:
-        return
-
-
-_apply_patch()
+        return False
+    return True

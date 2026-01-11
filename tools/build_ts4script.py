@@ -8,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 PACKAGE_DIR = SRC_ROOT / "simulation_mode"
 BUILD_DIR = PROJECT_ROOT / "build"
-DIST_DIR = PROJECT_ROOT / "dist"
+DIST_DIR = PROJECT_ROOT / "dist" / "SimulationMode"
 OUTPUT_ARCHIVE = DIST_DIR / "simulation-mode.ts4script"
 BOOTSTRAP_MODULE = SRC_ROOT / "s4_simulation_mode.py"
 

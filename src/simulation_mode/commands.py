@@ -98,7 +98,13 @@ def _daemon_status():
 
 def _director_snapshot():
     director = importlib.import_module("simulation_mode.director")
-    return director.last_director_time, list(director.last_director_actions)
+    return (
+        director.last_director_called_time,
+        director.last_director_run_time,
+        director.last_director_time,
+        list(director.last_director_actions),
+        list(director.last_director_debug),
+    )
 
 
 def _apply_pregnancy_patch():
@@ -207,6 +213,9 @@ def _usage_lines():
         "simulation set tick 1..120",
         "simulation reload",
         "simulation director",
+        "simulation director_now",
+        "simulation director_why",
+        "simulation director_push <skill_key>",
         "simulation configpath",
         "simulation help",
         "keys: auto_unpause, allow_death, allow_pregnancy, tick, guardian_enabled, guardian_check_seconds, "
@@ -328,9 +337,11 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         return True
 
     if action_key == "director":
-        last_time, actions = _director_snapshot()
+        last_called, last_run, last_time, actions, _debug = _director_snapshot()
         output(f"director_enabled={settings.director_enabled}")
         output(f"director_check_seconds={settings.director_check_seconds}")
+        output(f"last_director_called_time={last_called}")
+        output(f"last_director_run_time={last_run}")
         output(f"last_director_time={last_time}")
         if actions:
             output("last_director_actions:")
@@ -338,6 +349,60 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
                 output(f"- {line}")
         else:
             output("last_director_actions=")
+        return True
+
+    if action_key == "director_now":
+        director = importlib.import_module("simulation_mode.director")
+        director.run_now(time.time())
+        last_called, last_run, last_time, actions, debug = _director_snapshot()
+        output(f"last_director_called_time={last_called}")
+        output(f"last_director_run_time={last_run}")
+        output(f"last_director_time={last_time}")
+        if actions:
+            output("last_director_actions:")
+            for line in actions[-10:]:
+                output(f"- {line}")
+        else:
+            output("last_director_actions=")
+        if debug:
+            output("last_director_debug:")
+            for line in debug[-10:]:
+                output(f"- {line}")
+        else:
+            output("last_director_debug=")
+        return True
+
+    if action_key == "director_why":
+        _last_called, _last_run, _last_time, _actions, debug = _director_snapshot()
+        if debug:
+            output("last_director_debug:")
+            for line in debug[-25:]:
+                output(f"- {line}")
+        else:
+            output("last_director_debug=")
+        return True
+
+    if action_key == "director_push":
+        director = importlib.import_module("simulation_mode.director")
+        services = importlib.import_module("services")
+        skill_key = key.strip().lower() if key else None
+        if not skill_key:
+            output("Missing skill_key")
+            return True
+        sim = services.active_sim()
+        if sim is None:
+            output("No active sim found.")
+            return True
+        ok = director.push_skill_now(sim, skill_key, time.time())
+        _last_called, _last_run, _last_time, actions, debug = _director_snapshot()
+        if ok:
+            output(f"director_push {skill_key}: success")
+            if actions:
+                output(f"last_director_action={actions[-1]}")
+        else:
+            output(f"director_push {skill_key}: failure")
+            if debug:
+                output(f"last_director_debug={debug[-1]}")
         return True
 
     if action_key == "configpath":

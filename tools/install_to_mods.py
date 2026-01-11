@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DIST_FILE = PROJECT_ROOT / "dist" / "s4-simulation-mode-v0.2.1.ts4script"
+DIST_FILE = PROJECT_ROOT / "dist" / "simulation-mode.ts4script"
 SUBFOLDER_NAME = "SimulationMode"
 
 

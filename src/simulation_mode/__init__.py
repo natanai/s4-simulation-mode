@@ -1,6 +1,8 @@
 import sims4.commands
 from sims4.commands import BOOL_TRUE, CommandType
 
+__version__ = "0.2.1"
+
 from simulation_mode import daemon
 from simulation_mode.settings import settings
 from simulation_mode.patches import pregnancy_block  # noqa: F401

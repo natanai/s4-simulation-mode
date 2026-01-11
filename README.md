@@ -25,6 +25,9 @@ This is a minimal Sims 4 script mod kernel that registers the `simulation` cheat
 python tools/build_ts4script.py
 ```
 
+The build always outputs `dist/simulation-mode.ts4script`. Versioning is tracked in
+`VERSION.txt` (and optionally git tags), not in the filename.
+
 ## Install
 
 ```bash

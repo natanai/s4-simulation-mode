@@ -5,11 +5,10 @@ import zipfile
 import shutil
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_FILE = PROJECT_ROOT / "src" / "simulation_mode.py"
+SRC_DIR = PROJECT_ROOT / "src" / "simulation_mode"
 BUILD_DIR = PROJECT_ROOT / "build"
 DIST_DIR = PROJECT_ROOT / "dist"
-PYC_DEST = BUILD_DIR / "simulation_mode.pyc"
-OUTPUT_ARCHIVE = DIST_DIR / "s4-simulation-mode.ts4script"
+OUTPUT_ARCHIVE = DIST_DIR / "s4-simulation-mode-v0.2.ts4script"
 
 
 def _require_python_37():
@@ -23,28 +22,50 @@ def _require_python_37():
         sys.exit(1)
 
 
+def _iter_source_files():
+    return sorted(path for path in SRC_DIR.rglob("*.py") if path.is_file())
+
+
+def _compile_source(path: Path):
+    relative = path.relative_to(PROJECT_ROOT / "src")
+    pyc_path = BUILD_DIR / relative.with_suffix(".pyc")
+    pyc_path.parent.mkdir(parents=True, exist_ok=True)
+    compiled_path = py_compile.compile(
+        str(path),
+        cfile=str(pyc_path),
+        doraise=True,
+    )
+    if compiled_path != str(pyc_path):
+        shutil.copy2(compiled_path, pyc_path)
+    return relative, pyc_path.relative_to(BUILD_DIR)
+
+
 def main():
     _require_python_37()
 
-    if not SRC_FILE.exists():
-        print(f"Error: missing source file at {SRC_FILE}.", file=sys.stderr)
+    if not SRC_DIR.exists():
+        print(f"Error: missing source directory at {SRC_DIR}.", file=sys.stderr)
         sys.exit(1)
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     DIST_DIR.mkdir(parents=True, exist_ok=True)
 
-    compiled_path = py_compile.compile(
-        str(SRC_FILE),
-        cfile=str(PYC_DEST),
-        doraise=True,
-    )
+    sources = _iter_source_files()
+    if not sources:
+        print(f"Error: no source files found under {SRC_DIR}.", file=sys.stderr)
+        sys.exit(1)
 
-    if compiled_path != str(PYC_DEST):
-        shutil.copy2(compiled_path, PYC_DEST)
+    compiled = [
+        _compile_source(source_path)
+        for source_path in sources
+    ]
 
     with zipfile.ZipFile(OUTPUT_ARCHIVE, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.write(SRC_FILE, arcname="simulation_mode.py")
-        archive.write(PYC_DEST, arcname="simulation_mode.pyc")
+        for source_path in sources:
+            relative = source_path.relative_to(PROJECT_ROOT / "src")
+            archive.write(source_path, arcname=str(relative))
+        for _, pyc_relative in compiled:
+            archive.write(BUILD_DIR / pyc_relative, arcname=str(pyc_relative))
 
     print(f"Built {OUTPUT_ARCHIVE}")
 

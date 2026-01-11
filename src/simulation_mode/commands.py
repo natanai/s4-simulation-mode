@@ -153,7 +153,8 @@ def _clock_speed_info():
 
 
 def _format_debug(enabled: bool, running: bool, last_error: str, tick_count: int = None,
-                  seconds_since_last_tick: float = None, clock_speed: str = None):
+                  seconds_since_last_tick: float = None, clock_speed: str = None,
+                  last_alarm_variant: str = None):
     output = [
         f"enabled={enabled}",
         f"daemon_running={running}",
@@ -166,6 +167,8 @@ def _format_debug(enabled: bool, running: bool, last_error: str, tick_count: int
         output.append(f"tick_count={tick_count}")
     if seconds_since_last_tick is not None:
         output.append(f"seconds_since_last_tick={seconds_since_last_tick:.1f}")
+    if last_alarm_variant:
+        output.append(f"last_alarm_variant={last_alarm_variant}")
     if clock_speed:
         output.append(f"clock_speed={clock_speed}")
     return " | ".join(output)
@@ -289,12 +292,14 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         running, last_error = _daemon_status()
         tick_count = None
         seconds_since_last_tick = None
+        last_alarm_variant = None
         clock_speed = _clock_speed_info()
         try:
             daemon = importlib.import_module("simulation_mode.daemon")
             tick_count = daemon.tick_count
-            if daemon.last_tick_wallclock:
+            if daemon.last_tick_wallclock and daemon.last_tick_wallclock > 0:
                 seconds_since_last_tick = time.time() - daemon.last_tick_wallclock
+            last_alarm_variant = daemon.last_alarm_variant
         except Exception:
             pass
         output(_format_debug(
@@ -303,6 +308,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             last_error,
             tick_count=tick_count,
             seconds_since_last_tick=seconds_since_last_tick,
+            last_alarm_variant=last_alarm_variant,
             clock_speed=clock_speed,
         ))
         return True

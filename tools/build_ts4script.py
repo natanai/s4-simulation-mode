@@ -9,7 +9,8 @@ SRC_ROOT = PROJECT_ROOT / "src"
 PACKAGE_DIR = SRC_ROOT / "simulation_mode"
 BUILD_DIR = PROJECT_ROOT / "build"
 DIST_DIR = PROJECT_ROOT / "dist"
-OUTPUT_ARCHIVE = DIST_DIR / "s4-simulation-mode-v0.2.1.ts4script"
+OUTPUT_ARCHIVE = DIST_DIR / "simulation-mode.ts4script"
+BOOTSTRAP_MODULE = SRC_ROOT / "s4_simulation_mode.py"
 
 
 def _require_python_37():
@@ -50,6 +51,13 @@ def main():
         print(f"Error: missing source directory at {PACKAGE_DIR}.", file=sys.stderr)
         sys.exit(1)
 
+    if not BOOTSTRAP_MODULE.exists():
+        print(
+            f"Error: missing bootstrap module at {BOOTSTRAP_MODULE}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     DIST_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -71,6 +79,9 @@ def main():
             archive.write(BUILD_DIR / pyc_relative, arcname=str(pyc_relative))
 
     print(f"Built {OUTPUT_ARCHIVE}")
+    print("Dist contents:")
+    for item in sorted(DIST_DIR.iterdir()):
+        print(f"- {item}")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ _ALARM_HANDLE = None
 _LAST_DEATH_REASSERT = 0
 _DEATH_REASSERT_SECONDS = 60
 last_error = None
+last_tick_wallclock = None
+tick_count = 0
 
 
 def _set_last_error(error):
@@ -75,6 +77,9 @@ def _maybe_reassert_death():
 
 
 def _on_tick(_alarm_handle=None):
+    global last_tick_wallclock, tick_count
+    tick_count += 1
+    last_tick_wallclock = time.time()
     if not settings.enabled:
         return
     _maybe_auto_unpause()
@@ -88,13 +93,20 @@ def start():
     try:
         alarms = importlib.import_module("alarms")
         services = importlib.import_module("services")
+        date_and_time = importlib.import_module("date_and_time")
+        clock = importlib.import_module("clock")
         interval = max(1, int(settings.tick_seconds))
+        time_span = date_and_time.TimeSpan(clock.interval_in_real_seconds(interval))
         _ALARM_HANDLE = alarms.add_alarm_real_time(
             services.time_service(),
-            interval,
+            time_span,
             _on_tick,
             repeating=True,
+            use_sleep_time=True,
+            cross_zone=False,
         )
+        if _ALARM_HANDLE is None:
+            _set_last_error("alarm failed to start")
     except Exception as exc:
         _ALARM_HANDLE = None
         _set_last_error(str(exc))

@@ -1,4 +1,5 @@
 import importlib
+import time
 
 import sims4.commands
 from sims4.commands import BOOL_TRUE, CommandType
@@ -48,6 +49,8 @@ def _start_daemon():
     try:
         daemon = importlib.import_module("simulation_mode.daemon")
         daemon.start()
+        if not daemon.is_running():
+            return False, daemon.last_error or "alarm failed to start"
         return True, None
     except Exception as exc:
         return False, str(exc)
@@ -126,7 +129,31 @@ def _set_tick_seconds(value: int):
     return clamped
 
 
-def _format_debug(enabled: bool, running: bool, last_error: str):
+def _clock_speed_info():
+    try:
+        services = importlib.import_module("services")
+        clock = importlib.import_module("clock")
+        clock_service = services.game_clock_service()
+        if clock_service is None:
+            return None
+        speed_attr = getattr(clock_service, "clock_speed", None)
+        current_speed = speed_attr() if callable(speed_attr) else speed_attr
+        if current_speed is None:
+            return None
+        speed_name = getattr(current_speed, "name", None)
+        if speed_name:
+            return speed_name
+        if hasattr(clock, "ClockSpeedMode"):
+            return clock.ClockSpeedMode(current_speed).name
+        if hasattr(clock, "ClockSpeed"):
+            return clock.ClockSpeed(current_speed).name
+        return str(current_speed)
+    except Exception:
+        return None
+
+
+def _format_debug(enabled: bool, running: bool, last_error: str, tick_count: int = None,
+                  seconds_since_last_tick: float = None, clock_speed: str = None):
     output = [
         f"enabled={enabled}",
         f"daemon_running={running}",
@@ -135,6 +162,12 @@ def _format_debug(enabled: bool, running: bool, last_error: str):
         output.append(f"daemon_error={last_error}")
     if _last_patch_error:
         output.append(f"patch_error={_last_patch_error}")
+    if tick_count is not None:
+        output.append(f"tick_count={tick_count}")
+    if seconds_since_last_tick is not None:
+        output.append(f"seconds_since_last_tick={seconds_since_last_tick:.1f}")
+    if clock_speed:
+        output.append(f"clock_speed={clock_speed}")
     return " | ".join(output)
 
 
@@ -254,7 +287,24 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "debug":
         running, last_error = _daemon_status()
-        output(_format_debug(settings.enabled, running, last_error))
+        tick_count = None
+        seconds_since_last_tick = None
+        clock_speed = _clock_speed_info()
+        try:
+            daemon = importlib.import_module("simulation_mode.daemon")
+            tick_count = daemon.tick_count
+            if daemon.last_tick_wallclock:
+                seconds_since_last_tick = time.time() - daemon.last_tick_wallclock
+        except Exception:
+            pass
+        output(_format_debug(
+            settings.enabled,
+            running,
+            last_error,
+            tick_count=tick_count,
+            seconds_since_last_tick=seconds_since_last_tick,
+            clock_speed=clock_speed,
+        ))
         return True
 
     if action_key == "allow_pregnancy":

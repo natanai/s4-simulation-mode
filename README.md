@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.2.1)
+# Simulation Mode Kernel Mod (v0.3.0)
 
 ## What it is
 
@@ -7,8 +7,10 @@ This is a minimal Sims 4 script mod kernel that registers the `simulation` cheat
 * Keep household Sims alive by bumping critical motives when they fall below a floor.
 * Block pregnancy unless explicitly allowed (to avoid naming dialogs during unattended play).
 * Optionally auto-unpause if the game clock is paused.
+* Optionally auto-respond to dialogs (best effort; may fail on game updates).
+* Toggle death on/off while Simulation Mode is enabled (reasserted periodically).
 
-## What it is not (v0.2.1 non-goals)
+## What it is not (v0.3.0 non-goals)
 
 * No action/event logging yet.
 * No complex autonomy rewrites or interaction injection beyond pregnancy blocking.
@@ -25,8 +27,9 @@ This is a minimal Sims 4 script mod kernel that registers the `simulation` cheat
 python tools/build_ts4script.py
 ```
 
-The build always outputs `dist/simulation-mode.ts4script`. Versioning is tracked in
-`VERSION.txt` (and optionally git tags), not in the filename.
+The build always outputs `dist/SimulationMode/simulation-mode.ts4script`. Versioning is tracked in
+`VERSION.txt` (and optionally git tags), not in the filename. The artifact name is always
+`simulation-mode.ts4script`.
 
 ## Install
 
@@ -50,9 +53,21 @@ Open the cheat console and run:
 * `simulation status`
 * `simulation true`
 * `simulation false`
-* `simulation allow_pregnancy true|false`
-* `simulation protect_motives true|false`
-* `simulation auto_unpause true|false`
-* `simulation tick <seconds>` (clamped to 2..120)
+* `simulation help`
+* `simulation set auto_unpause true|false`
+* `simulation set auto_dialogs true|false`
+* `simulation set allow_death true|false`
+* `simulation set allow_pregnancy true|false`
+* `simulation set tick <seconds>` (clamped to 2..120)
+* `simulation preset safe|chaos`
 
 Pregnancy is blocked by default while Simulation Mode is enabled. Motive protection only bumps critical motives upward when they dip below a floor; it does not max all needs.
+
+Settings are persisted to:
+
+`Documents/Electronic Arts/The Sims 4/mod_data/simulation-mode/settings.json`
+
+Notes:
+
+* `auto_dialogs` runs the `ui.dialog.auto_respond` cheat when Simulation Mode is enabled, but it may fail on some patches.
+* `death.toggle` is applied on enable and reasserted periodically while Simulation Mode is running.

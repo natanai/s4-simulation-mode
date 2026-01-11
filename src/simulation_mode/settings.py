@@ -11,37 +11,191 @@ _TICK_MAX_SECONDS = 120
 logger = sims4.log.Logger("SimulationMode")
 
 
-_DEFAULT_TEMPLATE = """# Simulation Mode (The Sims 4) — Settings
-# Edit this file, then in-game run: simulation reload
-enabled=false
-auto_unpause=true
-allow_death=false
-allow_pregnancy=false
-tick_seconds=5
+KNOWN_DEFAULTS = [
+    ("enabled", "false"),
+    ("auto_unpause", "true"),
+    ("allow_death", "false"),
+    ("allow_pregnancy", "false"),
+    ("tick_seconds", "5"),
+    ("guardian_enabled", "true"),
+    ("guardian_check_seconds", "20"),
+    ("guardian_min_motive", "-25"),
+    ("guardian_red_motive", "-50"),
+    ("guardian_per_sim_cooldown_seconds", "60"),
+    ("guardian_max_pushes_per_sim_per_hour", "30"),
+    ("director_enabled", "true"),
+    ("director_check_seconds", "90"),
+    ("director_min_safe_motive", "-10"),
+    ("director_per_sim_cooldown_seconds", "300"),
+    ("director_max_pushes_per_sim_per_hour", "12"),
+    ("director_prefer_career_skills", "true"),
+    ("director_fallback_to_started_skills", "true"),
+    ("director_skill_allow_list", ""),
+    ("director_skill_block_list", ""),
+    ("integrate_better_autonomy_trait", "false"),
+    ("better_autonomy_trait_id", "3985292068"),
+]
 
-# Self-Care Guardian (no cheating; pushes real interactions)
-guardian_enabled=true
-guardian_check_seconds=20
-guardian_min_motive=-25
-guardian_red_motive=-50
-guardian_per_sim_cooldown_seconds=60
-guardian_max_pushes_per_sim_per_hour=30
 
-# Life Director (skill progression; no cheating; pushes real interactions)
-director_enabled=true
-director_check_seconds=90
-director_min_safe_motive=-10
-director_per_sim_cooldown_seconds=300
-director_max_pushes_per_sim_per_hour=12
-director_prefer_career_skills=true
-director_fallback_to_started_skills=true
-director_skill_allow_list=
-director_skill_block_list=
+def _build_default_template_text():
+    defaults = dict(KNOWN_DEFAULTS)
+    lines = []
+    lines.append("# Simulation Mode (The Sims 4) — Settings")
+    lines.append("# Edit this file, then in-game run: simulation reload")
+    lines.append("")
+    lines.append("enabled={}".format(defaults["enabled"]))
+    lines.append("auto_unpause={}".format(defaults["auto_unpause"]))
+    lines.append("allow_death={}".format(defaults["allow_death"]))
+    lines.append("allow_pregnancy={}".format(defaults["allow_pregnancy"]))
+    lines.append("tick_seconds={}".format(defaults["tick_seconds"]))
+    lines.append("")
+    lines.append("# Self-Care Guardian (no cheating; pushes real interactions)")
+    lines.append("guardian_enabled={}".format(defaults["guardian_enabled"]))
+    lines.append("guardian_check_seconds={}".format(defaults["guardian_check_seconds"]))
+    lines.append("guardian_min_motive={}".format(defaults["guardian_min_motive"]))
+    lines.append("guardian_red_motive={}".format(defaults["guardian_red_motive"]))
+    lines.append(
+        "guardian_per_sim_cooldown_seconds={}".format(
+            defaults["guardian_per_sim_cooldown_seconds"]
+        )
+    )
+    lines.append(
+        "guardian_max_pushes_per_sim_per_hour={}".format(
+            defaults["guardian_max_pushes_per_sim_per_hour"]
+        )
+    )
+    lines.append("")
+    lines.append("# Life Director (skill progression; no cheating; pushes real interactions)")
+    lines.append("director_enabled={}".format(defaults["director_enabled"]))
+    lines.append("director_check_seconds={}".format(defaults["director_check_seconds"]))
+    lines.append("director_min_safe_motive={}".format(defaults["director_min_safe_motive"]))
+    lines.append(
+        "director_per_sim_cooldown_seconds={}".format(
+            defaults["director_per_sim_cooldown_seconds"]
+        )
+    )
+    lines.append(
+        "director_max_pushes_per_sim_per_hour={}".format(
+            defaults["director_max_pushes_per_sim_per_hour"]
+        )
+    )
+    lines.append(
+        "director_prefer_career_skills={}".format(
+            defaults["director_prefer_career_skills"]
+        )
+    )
+    lines.append(
+        "director_fallback_to_started_skills={}".format(
+            defaults["director_fallback_to_started_skills"]
+        )
+    )
+    lines.append("director_skill_allow_list={}".format(defaults["director_skill_allow_list"]))
+    lines.append("director_skill_block_list={}".format(defaults["director_skill_block_list"]))
+    lines.append("")
+    lines.append(
+        "# Optional integration if you ALSO installed a mod that defines this trait ID"
+    )
+    lines.append(
+        "integrate_better_autonomy_trait={}".format(
+            defaults["integrate_better_autonomy_trait"]
+        )
+    )
+    lines.append("better_autonomy_trait_id={}".format(defaults["better_autonomy_trait_id"]))
+    lines.append("")
+    return "\n".join(lines)
 
-# Optional integration if you ALSO installed a mod that defines this trait ID
-integrate_better_autonomy_trait=false
-better_autonomy_trait_id=3985292068
-"""
+
+_DEFAULT_TEMPLATE = _build_default_template_text()
+
+
+def _read_existing_keys(path):
+    keys = set()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line or line.startswith("#") or line.startswith(";"):
+                    continue
+                if "=" not in line:
+                    continue
+                key = line.split("=", 1)[0].strip()
+                if key:
+                    keys.add(key)
+    except Exception:
+        pass
+    return keys
+
+
+def _append_missing_keys(path):
+    existing = _read_existing_keys(path)
+    missing = []
+    for key, default_str in KNOWN_DEFAULTS:
+        if key not in existing:
+            missing.append((key, default_str))
+    if not missing:
+        return
+
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("\n")
+            handle.write("# --- Added by SimulationMode upgrade (missing keys) ---\n")
+            any_director = any(key.startswith("director_") for key, _ in missing)
+            any_guardian = any(key.startswith("guardian_") for key, _ in missing)
+            any_core = any(
+                key
+                in (
+                    "enabled",
+                    "auto_unpause",
+                    "allow_death",
+                    "allow_pregnancy",
+                    "tick_seconds",
+                )
+                for key, _ in missing
+            )
+            any_trait = any(
+                key.startswith("integrate_") or key.startswith("better_autonomy_")
+                for key, _ in missing
+            )
+
+            if any_core:
+                handle.write("# Core\n")
+                for key, value in missing:
+                    if key in (
+                        "enabled",
+                        "auto_unpause",
+                        "allow_death",
+                        "allow_pregnancy",
+                        "tick_seconds",
+                    ):
+                        handle.write("{}={}\n".format(key, value))
+                handle.write("\n")
+
+            if any_guardian:
+                handle.write("# Self-Care Guardian (no cheating; pushes real interactions)\n")
+                for key, value in missing:
+                    if key.startswith("guardian_"):
+                        handle.write("{}={}\n".format(key, value))
+                handle.write("\n")
+
+            if any_director:
+                handle.write(
+                    "# Life Director (skill progression; no cheating; pushes real interactions)\n"
+                )
+                for key, value in missing:
+                    if key.startswith("director_"):
+                        handle.write("{}={}\n".format(key, value))
+                handle.write("\n")
+
+            if any_trait:
+                handle.write(
+                    "# Optional integration if you ALSO installed a mod that defines this trait ID\n"
+                )
+                for key, value in missing:
+                    if key.startswith("integrate_") or key.startswith("better_autonomy_"):
+                        handle.write("{}={}\n".format(key, value))
+                handle.write("\n")
+    except Exception:
+        return
 
 
 class SimulationModeSettings:
@@ -221,7 +375,10 @@ def _log_exception(message: str):
 
 def load_settings(target):
     path = Path(get_config_path())
-    _ensure_template(path)
+    if not path.exists():
+        _ensure_template(path)
+    else:
+        _append_missing_keys(path)
     if not path.exists():
         return
     try:

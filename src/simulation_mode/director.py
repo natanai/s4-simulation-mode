@@ -538,7 +538,7 @@ def _evaluate(now: float):
                     _append_debug(f"{sim_name}: SKIP motives unsafe")
                     continue
             else:
-                _append_debug(f"{sim_name}: SKIP motives unsafe")
+                _append_debug(f"{sim_name}: SKIP motives unreadable (no motive stats found)")
                 continue
 
             busy_state = _is_sim_busy(sim)

@@ -12,12 +12,16 @@ from simulation_mode.settings import settings
 
 logger = sims4.log.Logger("SimulationModeGuardian")
 
-_MOTIVE_KEYS = (
-    "motive_hunger",
-    "motive_bladder",
-    "motive_energy",
-    "motive_hygiene",
-)
+_MOTIVE_ALIASES = {
+    "motive_hunger": ["motive_hunger", "motive_Hunger", "commodity_Hunger"],
+    "motive_bladder": ["motive_bladder", "motive_Bladder", "commodity_Bladder"],
+    "motive_energy": ["motive_energy", "motive_Energy", "commodity_Energy"],
+    "motive_fun": ["motive_fun", "motive_Fun", "commodity_Fun"],
+    "motive_social": ["motive_social", "motive_Social", "commodity_Social"],
+    "motive_hygiene": ["motive_hygiene", "motive_Hygiene", "commodity_Hygiene"],
+}
+
+_MOTIVE_KEYS = list(_MOTIVE_ALIASES.keys())
 
 _OBJECT_KEYWORDS = {
     "motive_hunger": ["fridge", "refriger", "microwave", "stove", "oven", "grill"],
@@ -57,6 +61,26 @@ def _get_motive_stat(stat_name):
 def _get_motive_value(sim_info, stat):
     if stat is None:
         return None
+    try:
+        stat_obj = sim_info.get_statistic(stat)
+        if stat_obj is None:
+            try:
+                stat_obj = sim_info.get_statistic(stat, add=True)
+            except TypeError:
+                pass
+        if stat_obj is not None and hasattr(stat_obj, "get_value"):
+            return stat_obj.get_value()
+    except Exception:
+        pass
+    try:
+        commodity_tracker = getattr(sim_info, "commodity_tracker", None)
+        if commodity_tracker is not None and hasattr(commodity_tracker, "get_value"):
+            try:
+                return commodity_tracker.get_value(stat)
+            except TypeError:
+                return commodity_tracker.get_value(stat, add=True)
+    except Exception:
+        pass
     try:
         tracker = sim_info.get_tracker(stat)
         if tracker is None:
@@ -238,11 +262,14 @@ def _maybe_apply_better_autonomy_trait(sim_info):
 def _motive_snapshot(sim_info):
     snapshot = []
     for key in _MOTIVE_KEYS:
-        stat = _get_motive_stat(key)
-        value = _get_motive_value(sim_info, stat)
-        if value is None:
-            continue
-        snapshot.append((key, value))
+        aliases = _MOTIVE_ALIASES.get(key, [key])
+        for alias in aliases:
+            stat = _get_motive_stat(alias)
+            value = _get_motive_value(sim_info, stat)
+            if value is None:
+                continue
+            snapshot.append((key, float(value)))
+            break
     return snapshot
 
 

@@ -64,6 +64,15 @@ def main():
             relative = compiled_path.relative_to(BUILD_DIR)
             archive.write(compiled_path, arcname=str(relative))
 
+    with zipfile.ZipFile(OUTPUT_ARCHIVE, "r") as archive:
+        pyc_entries = [name for name in archive.namelist() if name.endswith(".pyc")]
+        if not pyc_entries:
+            print(
+                f"Error: built archive {OUTPUT_ARCHIVE} contains no .pyc entries.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     print(f"Built {OUTPUT_ARCHIVE}")
     print("Dist contents:")
     for item in sorted(DIST_DIR.iterdir()):

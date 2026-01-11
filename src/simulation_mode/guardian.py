@@ -128,20 +128,23 @@ def _sim_identifier(sim_info):
 
 
 def _is_sim_busy(sim):
+    """
+    Return True only when the Sim has pending queued interactions waiting to run.
+    Do NOT treat queue.running as 'busy' because it's commonly a truthy idle/default interaction.
+    """
     queue = getattr(sim, "queue", None)
     if queue is None:
-        return None
-    for attr in ("running", "_queue", "queue", "_running"):
-        value = getattr(queue, attr, None)
-        if value is None:
-            continue
-        try:
-            if hasattr(value, "__len__"):
-                return len(value) > 0
-            return bool(value)
-        except Exception:
-            continue
-    return None
+        return False
+
+    # Primary signal: pending queued interactions (not the running SI).
+    try:
+        queued = getattr(queue, "_queue", None)
+        if queued is not None and hasattr(queued, "__len__"):
+            return len(queued) > 0
+    except Exception:
+        pass
+
+    return False
 
 
 def _object_label(obj):
@@ -391,11 +394,8 @@ def push_self_care(sim_info, now: float, green_percent: float):
         return False, "guardian cooldown"
 
     busy_state = _is_sim_busy(sim)
-    if busy_state is True:
+    if busy_state:
         return False, "sim busy"
-    if busy_state is None and motive_value is not None:
-        if motive_value > settings.guardian_red_motive:
-            return False, "sim likely busy"
 
     ordered = sorted(snapshot, key=lambda item: motive_percent(item[1]))
     lowest_key = ordered[0][0]
@@ -480,9 +480,7 @@ def _process_sim(sim_info, now):
         return
 
     busy_state = _is_sim_busy(sim)
-    if busy_state is True:
-        return
-    if busy_state is None and motive_value > settings.guardian_red_motive:
+    if busy_state:
         return
 
     sim_id = _sim_identifier(sim_info)

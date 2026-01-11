@@ -31,6 +31,12 @@ The build always outputs `dist/simulation-mode.ts4script`. Versioning is tracked
 `VERSION.txt` (and optionally git tags), not in the filename. The artifact name is always
 `simulation-mode.ts4script`.
 
+## Download from GitHub Actions
+
+Run the “Build Simulation Mode Script” workflow and download the artifact named
+`s4-simulation-mode` from the completed workflow run. The artifact contains
+`dist/simulation-mode.ts4script`.
+
 ## Install
 
 ```bash
@@ -59,6 +65,7 @@ Open the cheat console and run:
 * `simulation set allow_death true|false`
 * `simulation set allow_pregnancy true|false`
 * `simulation set tick <seconds>` (clamped to 2..120)
+* `simulation reload`
 * `simulation preset safe|chaos`
 
 Pregnancy is blocked by default while Simulation Mode is enabled. Motive protection only bumps critical motives upward when they dip below a floor; it does not max all needs.
@@ -71,3 +78,12 @@ Notes:
 
 * `auto_dialogs` runs the `ui.dialog.auto_respond` cheat when Simulation Mode is enabled, but it may fail on some patches.
 * `death.toggle` is applied on enable and reasserted periodically while Simulation Mode is running.
+
+## Test plan
+
+1. Put `simulation-mode.ts4script` into `Mods/SimulationMode/`.
+2. Enable script mods.
+3. In-game, run `simulation status` (should show loaded + version if provided).
+4. Run `simulation set tick 1`, then `simulation true`.
+5. Wait 3–5 seconds; run `simulation status` again: `tick_count` should be > 0 and `daemon_running` should be `True`.
+6. Pause the game, wait 2 seconds, and confirm it unpauses. If it does not, confirm `daemon_running` is `True` and `tick_count` is increasing, then debug the clock API.

@@ -4,7 +4,7 @@ import time
 import sims4.commands
 from sims4.commands import BOOL_TRUE, CommandType
 
-from simulation_mode.settings import get_config_path, save_settings, settings
+from simulation_mode.settings import get_config_path, load_settings, save_settings, settings
 
 _FALSE_STRINGS = {"false", "f", "0", "off", "no", "n"}
 _TICK_MIN_SECONDS = 2
@@ -28,7 +28,13 @@ def _set_last_patch_error(error):
     _last_patch_error = error
 
 
+def _daemon_snapshot():
+    daemon = importlib.import_module("simulation_mode.daemon")
+    return daemon.is_running(), daemon.daemon_error, daemon.tick_count
+
+
 def _status_lines():
+    running, daemon_error, daemon_tick_count = _daemon_snapshot()
     return [
         f"enabled={settings.enabled}",
         f"auto_unpause={settings.auto_unpause}",
@@ -36,6 +42,9 @@ def _status_lines():
         f"allow_death={settings.allow_death}",
         f"allow_pregnancy={settings.allow_pregnancy}",
         f"tick={settings.tick_seconds}",
+        f"daemon_running={running}",
+        f"tick_count={daemon_tick_count}",
+        f"daemon_error={daemon_error}",
         f"config_path={get_config_path()}",
     ]
 
@@ -46,19 +55,19 @@ def _emit_status(output):
 
 
 def _start_daemon():
+    daemon = importlib.import_module("simulation_mode.daemon")
     try:
-        daemon = importlib.import_module("simulation_mode.daemon")
         daemon.start()
         if not daemon.is_running():
-            return False, daemon.last_error or "alarm failed to start"
+            return False, daemon.daemon_error or "alarm failed to start"
         return True, None
     except Exception as exc:
         return False, str(exc)
 
 
 def _stop_daemon():
+    daemon = importlib.import_module("simulation_mode.daemon")
     try:
-        daemon = importlib.import_module("simulation_mode.daemon")
         daemon.stop()
         return True, None
     except Exception as exc:
@@ -66,19 +75,16 @@ def _stop_daemon():
 
 
 def _daemon_status():
-    try:
-        daemon = importlib.import_module("simulation_mode.daemon")
-        return daemon.is_running(), daemon.last_error
-    except Exception as exc:
-        return False, str(exc)
+    daemon = importlib.import_module("simulation_mode.daemon")
+    return daemon.is_running(), daemon.daemon_error
 
 
 def _apply_pregnancy_patch():
     if not settings.enabled or settings.allow_pregnancy:
         _set_last_patch_error(None)
         return True
+    pregnancy_block = importlib.import_module("simulation_mode.patches.pregnancy_block")
     try:
-        pregnancy_block = importlib.import_module("simulation_mode.patches.pregnancy_block")
         patched = pregnancy_block.apply_patch()
         if patched:
             _set_last_patch_error(None)
@@ -130,9 +136,9 @@ def _set_tick_seconds(value: int):
 
 
 def _clock_speed_info():
+    services = importlib.import_module("services")
+    clock = importlib.import_module("clock")
     try:
-        services = importlib.import_module("services")
-        clock = importlib.import_module("clock")
         clock_service = services.game_clock_service()
         if clock_service is None:
             return None
@@ -179,6 +185,7 @@ def _usage_lines():
         "simulation status",
         "simulation true|false",
         "simulation set <key> <value>",
+        "simulation reload",
         "simulation preset <safe|chaos>",
         "simulation help",
         "keys: auto_unpause, auto_dialogs, allow_death, allow_pregnancy, tick",
@@ -203,6 +210,8 @@ def _handle_set(key, value, _connection, output):
             output(f"Invalid value for {key}: {value}")
             return False
         setattr(settings, key, parsed)
+        if settings.enabled and key == "auto_dialogs" and parsed:
+            _apply_auto_dialogs(_connection, output)
         if settings.enabled and key == "allow_death":
             _apply_death_toggle(_connection, output)
         if key == "allow_pregnancy":
@@ -211,6 +220,7 @@ def _handle_set(key, value, _connection, output):
             if settings.allow_pregnancy:
                 _set_last_patch_error(None)
         save_settings(settings)
+        output(f"Updated {key} to {parsed}")
         return True
 
     if key == "tick":
@@ -221,6 +231,7 @@ def _handle_set(key, value, _connection, output):
             return False
         _set_tick_seconds(tick_value)
         save_settings(settings)
+        output(f"Updated tick to {settings.tick_seconds}")
         return True
 
     output(f"Unknown setting: {key}")
@@ -234,6 +245,7 @@ def _apply_preset(name, _connection, output):
         settings.allow_death = False
         settings.allow_pregnancy = False
         settings.auto_unpause = True
+        _set_tick_seconds(10)
     elif preset == "chaos":
         settings.auto_dialogs = False
         settings.allow_death = True
@@ -250,6 +262,21 @@ def _apply_preset(name, _connection, output):
             _set_last_patch_error(None)
         else:
             _apply_pregnancy_patch()
+        _apply_auto_dialogs(_connection, output)
+    return True
+
+
+def _reload_settings(_connection, output):
+    load_settings(settings)
+    if settings.enabled:
+        _apply_death_toggle(_connection, output)
+        if settings.allow_pregnancy:
+            _set_last_patch_error(None)
+        else:
+            _apply_pregnancy_patch()
+        _apply_auto_dialogs(_connection, output)
+        _start_daemon()
+    output("Reloaded settings from disk.")
     return True
 
 
@@ -283,6 +310,11 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         return True
 
+    if action_key == "reload":
+        _reload_settings(_connection, output)
+        _emit_status(output)
+        return True
+
     if action_key == "preset":
         _apply_preset(key, _connection, output)
         _emit_status(output)
@@ -294,8 +326,8 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         seconds_since_last_tick = None
         last_alarm_variant = None
         clock_speed = _clock_speed_info()
+        daemon = importlib.import_module("simulation_mode.daemon")
         try:
-            daemon = importlib.import_module("simulation_mode.daemon")
             tick_count = daemon.tick_count
             if daemon.last_tick_wallclock and daemon.last_tick_wallclock > 0:
                 seconds_since_last_tick = time.time() - daemon.last_tick_wallclock

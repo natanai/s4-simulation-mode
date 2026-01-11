@@ -38,7 +38,9 @@ jobs:
             -w /workspace \
             python:3.7 \
             bash -lc "python tools/build_ts4script.py"
-          ls -la dist || true
+
+      - name: Verify build artifact
+        run: test -f dist/simulation-mode.ts4script
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

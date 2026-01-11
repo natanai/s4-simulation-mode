@@ -249,6 +249,7 @@ def _usage_lines():
         "simulation director_now",
         "simulation director_why",
         "simulation director_push <skill_key>",
+        "simulation director_takeover <skill_key>",
         "simulation configpath",
         "simulation help",
         "keys: auto_unpause, allow_death, allow_pregnancy, tick, guardian_enabled, guardian_check_seconds, "
@@ -437,7 +438,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "director_now":
         director = importlib.import_module("simulation_mode.director")
-        director.run_now(time.time())
+        director.run_now(time.time(), force=True)
         last_called, last_run, last_time, actions, debug = _director_snapshot()
         output(f"last_director_called_time={last_called}")
         output(f"last_director_run_time={last_run}")
@@ -454,6 +455,50 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
                 output(f"- {line}")
         else:
             output("last_director_debug=")
+        return True
+
+    if action_key == "director_takeover":
+        director = importlib.import_module("simulation_mode.director")
+        services = importlib.import_module("services")
+        skill_key = key.strip().lower() if key else None
+        if not skill_key:
+            output("Missing skill_key")
+            return True
+        sim = None
+        try:
+            client = services.client_manager().get_first_client()
+            if client is not None:
+                sim = client.active_sim
+        except Exception:
+            sim = None
+        if sim is None:
+            output("No active sim found.")
+            return True
+        cancelled = False
+        try:
+            if hasattr(sim, "queue") and hasattr(sim.queue, "cancel_all"):
+                sim.queue.cancel_all()
+                cancelled = True
+            elif hasattr(sim, "cancel_all_interactions"):
+                sim.cancel_all_interactions()
+                cancelled = True
+            elif hasattr(sim, "queue") and hasattr(sim.queue, "clear"):
+                sim.queue.clear()
+                cancelled = True
+        except Exception:
+            output("director_takeover: cancel attempt failed")
+        if not cancelled:
+            output("director_takeover: cancel unavailable")
+        ok = director.push_skill_now(sim, skill_key, time.time())
+        _last_called, _last_run, _last_time, actions, debug = _director_snapshot()
+        if ok:
+            output(f"director_takeover {skill_key}: success")
+            if actions:
+                output(f"last_director_action={actions[-1]}")
+        else:
+            output(f"director_takeover {skill_key}: failure")
+            if debug:
+                output(f"last_director_debug={debug[-1]}")
         return True
 
     if action_key == "director_why":

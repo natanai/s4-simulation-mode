@@ -643,8 +643,10 @@ def get_motive_snapshot_for_sim(sim_info):
 def _evaluate(now: float):
     global last_director_time
     last_director_debug[:] = []
+    actions_before = len(last_director_actions)
     household = services.active_household()
     if household is None:
+        _append_debug("Director ran: no active household")
         return
     try:
         sim_infos = list(household)
@@ -652,7 +654,11 @@ def _evaluate(now: float):
         try:
             sim_infos = list(household.sim_infos)
         except Exception:
+            _append_debug("Director ran: unable to read household sims")
             return
+    if not sim_infos:
+        _append_debug("Director ran: no eligible sims")
+        return
 
     for sim_info in sim_infos:
         try:
@@ -764,6 +770,8 @@ def _evaluate(now: float):
                 _append_debug(f"{sim_name}: FAIL push_super_affordance false")
         except Exception:
             continue
+    if not last_director_debug and len(last_director_actions) == actions_before:
+        _append_debug("Director ran: no eligible sims")
 
 
 def on_tick(now: float):
@@ -783,8 +791,8 @@ def on_tick(now: float):
     _evaluate(now)
 
 
-def run_now(now: float):
-    global last_director_called_time, last_director_run_time
+def run_now(now: float, force: bool = False):
+    global _last_check_time, last_director_called_time, last_director_run_time
     if not settings.enabled or not settings.director_enabled:
         return
     try:
@@ -793,6 +801,11 @@ def run_now(now: float):
     except Exception:
         return
     last_director_called_time = now
+    if not force and now - _last_check_time < settings.director_check_seconds:
+        last_director_debug[:] = []
+        _append_debug("Director ran: throttled")
+        return
+    _last_check_time = now
     last_director_run_time = now
     _evaluate(now)
 

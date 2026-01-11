@@ -1,4 +1,5 @@
 import importlib
+import os
 import time
 
 import sims4.commands
@@ -191,6 +192,7 @@ def _usage_lines():
         "simulation set <key> <value>",
         "simulation set tick 1..120",
         "simulation reload",
+        "simulation configpath",
         "simulation help",
         "keys: auto_unpause, allow_death, allow_pregnancy, tick, guardian_enabled, guardian_check_seconds, "
         "guardian_min_motive, guardian_red_motive, guardian_per_sim_cooldown_seconds, "
@@ -304,6 +306,12 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
     if action_key == "reload":
         _reload_settings(_connection, output)
         _emit_status(output)
+        return True
+
+    if action_key == "configpath":
+        config_path = os.path.abspath(get_config_path())
+        output(f"config_path={config_path}")
+        output(f"exists={os.path.exists(config_path)}")
         return True
 
     if action_key == "debug":

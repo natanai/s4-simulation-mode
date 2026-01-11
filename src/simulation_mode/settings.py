@@ -1,8 +1,8 @@
 import os
 from pathlib import Path
+import traceback
 
 import sims4.log
-import paths
 
 
 _TICK_MIN_SECONDS = 1
@@ -65,19 +65,25 @@ class SimulationModeSettings:
         self.better_autonomy_trait_id = better_autonomy_trait_id
 
 
-def _get_user_mods_path():
-    base = getattr(paths, "USER_MODS_PATH", None)
-    if base is None:
-        user_data = getattr(paths, "USER_DATA_PATH")
-        base = os.path.join(user_data, "Mods")
-    return os.fspath(base)
+def _get_user_mod_subfolder_path():
+    try:
+        import paths
+        base = getattr(paths, "USER_MODS_PATH", None)
+        if base:
+            return os.path.join(os.fspath(base), "SimulationMode")
+    except Exception:
+        pass
+
+    try:
+        here = os.path.abspath(__file__)
+        return os.path.dirname(os.path.dirname(os.path.dirname(here)))
+    except Exception:
+        return os.getcwd()
 
 
 def get_config_path():
-    base = _get_user_mods_path()
-    config_dir = Path(base) / "SimulationMode"
-    os.makedirs(config_dir, exist_ok=True)
-    return config_dir / "simulation-mode.txt"
+    base = _get_user_mod_subfolder_path()
+    return os.path.join(base, "simulation-mode.txt")
 
 
 def _clamp_tick(value):
@@ -165,8 +171,18 @@ def _log_invalid_value(key, value):
     logger.warn(f"Invalid value for {key}: {value}")
 
 
+def _log_exception(message: str):
+    try:
+        logger.exception(message)
+    except Exception:
+        try:
+            logger.warn(f"{message}: {traceback.format_exc()}")
+        except Exception:
+            pass
+
+
 def load_settings(target):
-    path = get_config_path()
+    path = Path(get_config_path())
     _ensure_template(path)
     if not path.exists():
         return
@@ -252,9 +268,12 @@ def load_settings(target):
 
 
 def save_settings(_target):
-    path = get_config_path()
+    path = Path(get_config_path())
     _ensure_template(path)
 
 
 settings = SimulationModeSettings()
-load_settings(settings)
+try:
+    load_settings(settings)
+except Exception:
+    _log_exception("Settings load failed; continuing with defaults")

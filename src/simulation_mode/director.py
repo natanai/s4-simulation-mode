@@ -1,3 +1,4 @@
+import re
 import time
 
 from interactions.context import InteractionContext, QueueInsertStrategy, InteractionBucketType
@@ -33,7 +34,18 @@ _SKILL_RULES = {
         "affordance_keywords": ["cook", "have quick meal", "quick meal", "prepare"],
     },
     "fitness": {
-        "object_keywords": ["treadmill", "punch", "weights", "workout", "basketball", "pullup"],
+        "object_keywords": [
+            "treadmill",
+            "punch",
+            "weights",
+            "workout",
+            "basketball",
+            "pullup",
+            "exercise",
+            "bike",
+            "bicycle",
+            "stationary",
+        ],
         "affordance_keywords": ["workout", "practice", "train", "jog"],
     },
     "logic": {
@@ -85,12 +97,20 @@ _per_sim_push_count_window_start = {}
 _per_sim_push_count_in_window = {}
 
 last_director_actions = []
+last_director_called_time = 0.0
+last_director_run_time = 0.0
 last_director_time = 0.0
+last_director_debug = []
 
 _LAST_ACTION_DETAILS = None
 
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
+
+
+def _norm(s: str) -> str:
+    s = (s or "").lower()
+    return re.sub(r"[\s_\-]+", "", s)
 
 
 def _sim_identifier(sim_info):
@@ -378,7 +398,8 @@ def _find_target_object(sim, rule):
     for obj in _iter_objects():
         try:
             label = _get_object_label(obj)
-            if not any(keyword in label for keyword in keywords):
+            norm_label = _norm(label)
+            if not any(_norm(keyword) in norm_label for keyword in keywords):
                 continue
             distance = _distance(sim, obj)
             if distance is None:
@@ -404,15 +425,32 @@ def _find_affordance(obj, rule):
         for affordance in affordances:
             try:
                 name = _get_affordance_label(affordance)
-                if keyword in name:
+                if _norm(keyword) in _norm(name):
                     return affordance
             except Exception:
                 continue
     return None
 
 
-def try_push_skill_interaction(sim, skill_key):
+def _push_affordance(sim, target_obj, affordance):
     global _LAST_ACTION_DETAILS
+    context = InteractionContext(
+        sim,
+        InteractionContext.SOURCE_SCRIPT,
+        priority.Priority.High,
+        insert_strategy=QueueInsertStrategy.NEXT,
+        bucket=InteractionBucketType.DEFAULT,
+    )
+    result = sim.push_super_affordance(affordance, target_obj, context)
+    if result:
+        _LAST_ACTION_DETAILS = (
+            _get_object_label(target_obj),
+            _get_affordance_label(affordance),
+        )
+    return bool(result)
+
+
+def try_push_skill_interaction(sim, skill_key):
     rule = _SKILL_RULES.get(skill_key)
     if rule is None:
         return False
@@ -423,26 +461,12 @@ def try_push_skill_interaction(sim, skill_key):
         affordance = _find_affordance(target_obj, rule)
         if affordance is None:
             return False
-        context = InteractionContext(
-            sim,
-            InteractionContext.SOURCE_SCRIPT,
-            priority.Priority.High,
-            insert_strategy=QueueInsertStrategy.NEXT,
-            bucket=InteractionBucketType.DEFAULT,
-        )
-        result = sim.push_super_affordance(affordance, target_obj, context)
-        if result:
-            _LAST_ACTION_DETAILS = (
-                _get_object_label(target_obj),
-                _get_affordance_label(affordance),
-            )
-        return bool(result)
+        return _push_affordance(sim, target_obj, affordance)
     except Exception:
         return False
 
 
-def _record_action(sim_info, skill_key, reason, now):
-    global last_director_time
+def _sim_display_name(sim_info):
     sim_name = getattr(sim_info, "first_name", None)
     if callable(sim_name):
         try:
@@ -458,30 +482,35 @@ def _record_action(sim_info, skill_key, reason, now):
                 sim_name = None
     if not sim_name:
         sim_name = "Sim"
+    return sim_name
+
+
+def _append_debug(message):
+    last_director_debug.append(message)
+    if len(last_director_debug) > 50:
+        last_director_debug[:] = last_director_debug[-50:]
+
+
+def _append_action(action):
+    last_director_actions.append(action)
+    if len(last_director_actions) > 20:
+        last_director_actions[:] = last_director_actions[-20:]
+
+
+def _record_action(sim_info, skill_key, reason, now):
+    global last_director_time
+    sim_name = _sim_display_name(sim_info)
     object_label = "unknown"
     affordance_label = "unknown"
     if _LAST_ACTION_DETAILS:
         object_label, affordance_label = _LAST_ACTION_DETAILS
     action = f"{sim_name} -> {skill_key} ({reason}) via {object_label}:{affordance_label}"
-    last_director_actions.append(action)
-    if len(last_director_actions) > 20:
-        last_director_actions[:] = last_director_actions[-20:]
+    _append_action(action)
     last_director_time = now
 
 
-def on_tick(now: float):
-    global _last_check_time
-    if not settings.enabled or not settings.director_enabled:
-        return
-    try:
-        if clock_utils.is_paused():
-            return
-    except Exception:
-        return
-    if now - _last_check_time < settings.director_check_seconds:
-        return
-    _last_check_time = now
-
+def _evaluate(now: float):
+    last_director_debug[:] = []
     household = services.active_household()
     if household is None:
         return
@@ -495,8 +524,10 @@ def on_tick(now: float):
 
     for sim_info in sim_infos:
         try:
+            sim_name = _sim_display_name(sim_info)
             sim = sim_info.get_sim_instance()
             if sim is None:
+                _append_debug(f"{sim_name}: SKIP no sim instance")
                 continue
 
             min_motive = None
@@ -504,28 +535,115 @@ def on_tick(now: float):
             if snapshot:
                 min_motive = _safe_min_motive(snapshot)
                 if min_motive is not None and min_motive < settings.director_min_safe_motive:
+                    _append_debug(f"{sim_name}: SKIP motives unsafe")
                     continue
             else:
+                _append_debug(f"{sim_name}: SKIP motives unsafe")
                 continue
 
             busy_state = _is_sim_busy(sim)
             if busy_state is True:
+                _append_debug(f"{sim_name}: SKIP busy")
                 continue
             if busy_state is None and min_motive is not None:
                 if min_motive < settings.director_min_safe_motive + _BUSY_BUFFER:
+                    _append_debug(f"{sim_name}: SKIP busy")
                     continue
 
             sim_id = _sim_identifier(sim_info)
             if not _can_push_for_sim(sim_id, now):
+                _append_debug(f"{sim_name}: SKIP cooldown")
                 continue
 
             goal = choose_skill_goal(sim_info)
             if goal is None:
+                _append_debug(f"{sim_name}: NO GOAL")
                 continue
             skill_key, reason = goal
 
-            if try_push_skill_interaction(sim, skill_key):
+            rule = _SKILL_RULES.get(skill_key)
+            if rule is None:
+                _append_debug(f"{sim_name}: FAIL no rule for skill={skill_key}")
+                continue
+            target_obj = _find_target_object(sim, rule)
+            if target_obj is None:
+                _append_debug(f"{sim_name}: FAIL no object for skill={skill_key}")
+                continue
+            affordance = _find_affordance(target_obj, rule)
+            if affordance is None:
+                _append_debug(
+                    f"{sim_name}: FAIL no affordance on object={_get_object_label(target_obj)} "
+                    f"for skill={skill_key}"
+                )
+                continue
+            try:
+                pushed = _push_affordance(sim, target_obj, affordance)
+            except Exception:
+                _append_debug(f"{sim_name}: FAIL push_super_affordance exception")
+                continue
+            if pushed:
                 _record_push(sim_id, now)
                 _record_action(sim_info, skill_key, reason, now)
+            else:
+                _append_debug(f"{sim_name}: FAIL push_super_affordance false")
         except Exception:
             continue
+
+
+def on_tick(now: float):
+    global _last_check_time, last_director_called_time, last_director_run_time
+    if not settings.enabled or not settings.director_enabled:
+        return
+    try:
+        if clock_utils.is_paused():
+            return
+    except Exception:
+        return
+    last_director_called_time = now
+    if now - _last_check_time < settings.director_check_seconds:
+        return
+    _last_check_time = now
+    last_director_run_time = now
+    _evaluate(now)
+
+
+def run_now(now: float):
+    global last_director_called_time, last_director_run_time
+    if not settings.enabled or not settings.director_enabled:
+        return
+    try:
+        if clock_utils.is_paused():
+            return
+    except Exception:
+        return
+    last_director_called_time = now
+    last_director_run_time = now
+    _evaluate(now)
+
+
+def push_skill_now(sim, skill_key: str, now: float) -> bool:
+    global last_director_time
+    if not settings.enabled or not settings.director_enabled:
+        _append_debug(f"Sim: FAIL director disabled for skill={skill_key}")
+        return False
+    try:
+        if clock_utils.is_paused():
+            _append_debug(f"Sim: FAIL clock paused for skill={skill_key}")
+            return False
+    except Exception:
+        _append_debug(f"Sim: FAIL clock paused for skill={skill_key}")
+        return False
+    sim_name = getattr(sim, "full_name", None)
+    if callable(sim_name):
+        try:
+            sim_name = sim_name()
+        except Exception:
+            sim_name = None
+    sim_name = sim_name or getattr(sim, "first_name", None) or "Sim"
+    if try_push_skill_interaction(sim, skill_key):
+        action = f"{sim_name} -> {skill_key} (forced)"
+        _append_action(action)
+        last_director_time = now
+        return True
+    _append_debug(f"{sim_name}: FAIL forced push skill={skill_key}")
+    return False

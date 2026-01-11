@@ -7,7 +7,7 @@ from sims4.commands import BOOL_TRUE, CommandType
 from simulation_mode.settings import get_config_path, load_settings, save_settings, settings
 
 _FALSE_STRINGS = {"false", "f", "0", "off", "no", "n"}
-_TICK_MIN_SECONDS = 2
+_TICK_MIN_SECONDS = 1
 _TICK_MAX_SECONDS = 120
 _last_patch_error = None
 
@@ -120,6 +120,8 @@ def _apply_death_toggle(_connection, output):
 def _set_enabled(enabled: bool, _connection, output):
     settings.enabled = enabled
     if enabled:
+        daemon = importlib.import_module("simulation_mode.daemon")
+        daemon.set_connection(_connection)
         _apply_pregnancy_patch()
         _apply_death_toggle(_connection, output)
         _apply_auto_dialogs(_connection, output)
@@ -160,7 +162,8 @@ def _clock_speed_info():
 
 def _format_debug(enabled: bool, running: bool, last_error: str, tick_count: int = None,
                   seconds_since_last_tick: float = None, clock_speed: str = None,
-                  last_alarm_variant: str = None):
+                  last_alarm_variant: str = None, last_unpause_attempt_ts: float = None,
+                  last_unpause_result: str = None, last_pause_requests_count: int = None):
     output = [
         f"enabled={enabled}",
         f"daemon_running={running}",
@@ -177,6 +180,12 @@ def _format_debug(enabled: bool, running: bool, last_error: str, tick_count: int
         output.append(f"last_alarm_variant={last_alarm_variant}")
     if clock_speed:
         output.append(f"clock_speed={clock_speed}")
+    if last_unpause_attempt_ts is not None:
+        output.append(f"last_unpause_attempt_ts={last_unpause_attempt_ts:.1f}")
+    if last_unpause_result:
+        output.append(f"last_unpause_result={last_unpause_result}")
+    if last_pause_requests_count is not None:
+        output.append(f"last_pause_requests_count={last_pause_requests_count}")
     return " | ".join(output)
 
 
@@ -185,8 +194,9 @@ def _usage_lines():
         "simulation status",
         "simulation true|false",
         "simulation set <key> <value>",
+        "simulation set tick 1..120",
         "simulation reload",
-        "simulation preset <safe|chaos>",
+        "simulation preset <safe|risky>",
         "simulation help",
         "keys: auto_unpause, auto_dialogs, allow_death, allow_pregnancy, tick",
     ]
@@ -240,29 +250,27 @@ def _handle_set(key, value, _connection, output):
 
 def _apply_preset(name, _connection, output):
     preset = name.strip().lower() if name else ""
+    was_enabled = settings.enabled
+    settings.enabled = False
     if preset == "safe":
         settings.auto_dialogs = True
         settings.allow_death = False
         settings.allow_pregnancy = False
         settings.auto_unpause = True
         _set_tick_seconds(10)
-    elif preset == "chaos":
-        settings.auto_dialogs = False
+    elif preset == "risky":
+        settings.auto_dialogs = True
         settings.allow_death = True
         settings.allow_pregnancy = True
-        settings.auto_unpause = False
+        settings.auto_unpause = True
+        _set_tick_seconds(10)
     else:
+        settings.enabled = was_enabled
         output(f"Unknown preset: {name}")
         return False
 
+    _set_enabled(True, _connection, output)
     save_settings(settings)
-    if settings.enabled:
-        _apply_death_toggle(_connection, output)
-        if settings.allow_pregnancy:
-            _set_last_patch_error(None)
-        else:
-            _apply_pregnancy_patch()
-        _apply_auto_dialogs(_connection, output)
     return True
 
 
@@ -316,7 +324,10 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         return True
 
     if action_key == "preset":
-        _apply_preset(key, _connection, output)
+        preset_name = key.strip().lower() if key else ""
+        if not _apply_preset(key, _connection, output):
+            return False
+        output(f"Preset applied: {preset_name}")
         _emit_status(output)
         return True
 
@@ -327,11 +338,17 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         last_alarm_variant = None
         clock_speed = _clock_speed_info()
         daemon = importlib.import_module("simulation_mode.daemon")
+        last_unpause_attempt_ts = None
+        last_unpause_result = None
+        last_pause_requests_count = None
         try:
             tick_count = daemon.tick_count
             if daemon.last_tick_wallclock and daemon.last_tick_wallclock > 0:
                 seconds_since_last_tick = time.time() - daemon.last_tick_wallclock
             last_alarm_variant = daemon.last_alarm_variant
+            last_unpause_attempt_ts = daemon.last_unpause_attempt_ts
+            last_unpause_result = daemon.last_unpause_result
+            last_pause_requests_count = daemon.last_pause_requests_count
         except Exception:
             pass
         output(_format_debug(
@@ -342,6 +359,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             seconds_since_last_tick=seconds_since_last_tick,
             last_alarm_variant=last_alarm_variant,
             clock_speed=clock_speed,
+            last_unpause_attempt_ts=last_unpause_attempt_ts,
+            last_unpause_result=last_unpause_result,
+            last_pause_requests_count=last_pause_requests_count,
         ))
         return True
 

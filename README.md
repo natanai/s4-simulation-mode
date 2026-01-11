@@ -19,7 +19,7 @@ This is a minimal Sims 4 script mod kernel that registers the `simulation` cheat
 
 ## Prereqs
 
-* Python 3.7 is required to build a `.pyc` compatible with the game’s script environment and common Sims 4 script-mod toolchains.
+* Python 3 is required to build the `.ts4script` archive.
 
 ## Build
 
@@ -64,9 +64,11 @@ Open the cheat console and run:
 * `simulation set auto_dialogs true|false`
 * `simulation set allow_death true|false`
 * `simulation set allow_pregnancy true|false`
-* `simulation set tick <seconds>` (clamped to 2..120)
+* `simulation set tick 1..120`
 * `simulation reload`
-* `simulation preset safe|chaos`
+* `simulation preset safe`
+* `simulation preset risky`
+* `simulation debug` (includes auto-unpause diagnostics)
 
 Pregnancy is blocked by default while Simulation Mode is enabled. Motive protection only bumps critical motives upward when they dip below a floor; it does not max all needs.
 

@@ -43,7 +43,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: s4-simulation-mode
-          path: dist/s4-simulation-mode.ts4script
+          path: dist/s4-simulation-mode-v0.2.ts4script
 
       - name: Prepare release metadata
         if: ${{ inputs.publish_target == 'release' || inputs.publish_target == 'both' }}
@@ -67,7 +67,7 @@ jobs:
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           name: ${{ steps.release_meta.outputs.name }}
-          files: dist/s4-simulation-mode.ts4script
+          files: dist/s4-simulation-mode-v0.2.ts4script
           generate_release_notes: true
 
       - name: Commit build artifact to branch
@@ -75,7 +75,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f dist/s4-simulation-mode.ts4script
+          git add -f dist/s4-simulation-mode-v0.2.ts4script
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0

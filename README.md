@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.2)
+# Simulation Mode Kernel Mod (v0.2.1)
 
 ## What it is
 
@@ -8,7 +8,7 @@ This is a minimal Sims 4 script mod kernel that registers the `simulation` cheat
 * Block pregnancy unless explicitly allowed (to avoid naming dialogs during unattended play).
 * Optionally auto-unpause if the game clock is paused.
 
-## What it is not (v0.2 non-goals)
+## What it is not (v0.2.1 non-goals)
 
 * No action/event logging yet.
 * No complex autonomy rewrites or interaction injection beyond pregnancy blocking.
@@ -32,6 +32,9 @@ python tools/install_to_mods.py
 ```
 
 The `.ts4script` must be no deeper than one subfolder in your Mods folder.
+
+If the `simulation` command does not register, verify the archive contains a root
+`s4_simulation_mode.py` file alongside the `simulation_mode/` package.
 
 ## Enable script mods
 

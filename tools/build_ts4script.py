@@ -5,10 +5,11 @@ import zipfile
 import shutil
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = PROJECT_ROOT / "src" / "simulation_mode"
+SRC_ROOT = PROJECT_ROOT / "src"
+PACKAGE_DIR = SRC_ROOT / "simulation_mode"
 BUILD_DIR = PROJECT_ROOT / "build"
 DIST_DIR = PROJECT_ROOT / "dist"
-OUTPUT_ARCHIVE = DIST_DIR / "s4-simulation-mode-v0.2.ts4script"
+OUTPUT_ARCHIVE = DIST_DIR / "s4-simulation-mode-v0.2.1.ts4script"
 
 
 def _require_python_37():
@@ -23,7 +24,9 @@ def _require_python_37():
 
 
 def _iter_source_files():
-    return sorted(path for path in SRC_DIR.rglob("*.py") if path.is_file())
+    root_files = sorted(path for path in SRC_ROOT.glob("*.py") if path.is_file())
+    package_files = sorted(path for path in PACKAGE_DIR.rglob("*.py") if path.is_file())
+    return root_files + package_files
 
 
 def _compile_source(path: Path):
@@ -43,8 +46,8 @@ def _compile_source(path: Path):
 def main():
     _require_python_37()
 
-    if not SRC_DIR.exists():
-        print(f"Error: missing source directory at {SRC_DIR}.", file=sys.stderr)
+    if not PACKAGE_DIR.exists():
+        print(f"Error: missing source directory at {PACKAGE_DIR}.", file=sys.stderr)
         sys.exit(1)
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
@@ -52,7 +55,7 @@ def main():
 
     sources = _iter_source_files()
     if not sources:
-        print(f"Error: no source files found under {SRC_DIR}.", file=sys.stderr)
+        print(f"Error: no source files found under {SRC_ROOT}.", file=sys.stderr)
         sys.exit(1)
 
     compiled = [

@@ -18,7 +18,7 @@ last_error = None
 last_alarm_variant = None
 last_tick_wallclock = 0.0
 tick_count = 0
-_daemon_connection = None
+_DAEMON_CONNECTION = None
 last_unpause_attempt_ts = None
 last_unpause_result = None
 last_pause_requests_count = None
@@ -31,8 +31,29 @@ def _set_last_error(error):
 
 
 def set_connection(conn):
-    global _daemon_connection
-    _daemon_connection = conn
+    global _DAEMON_CONNECTION
+    _DAEMON_CONNECTION = conn
+
+
+def _safe_set_clock_speed(clock_service, speed, source=None):
+    # Try the most specific form first, then degrade gracefully.
+    try:
+        if source is not None:
+            # Some builds accept keyword, some accept positional, some accept only speed.
+            try:
+                clock_service.set_clock_speed(speed, change_source=source)
+                return True
+            except TypeError:
+                try:
+                    clock_service.set_clock_speed(speed, source)
+                    return True
+                except TypeError:
+                    pass
+        clock_service.set_clock_speed(speed)
+        return True
+    except Exception as exc:
+        _set_last_error(str(exc))
+        return False
 
 
 def _pause_requests_count(clock_service):
@@ -93,25 +114,28 @@ def _try_unpause():
             return
 
         _GameSpeedChangeSource = getattr(clock_module, "GameSpeedChangeSource", None)
-        _change_source = _GameSpeedChangeSource.GAMEPLAY if _GameSpeedChangeSource is not None else None
-
+        _change_source = None
         if _GameSpeedChangeSource is not None:
-            clock_service.set_clock_speed(_ClockSpeed.NORMAL, change_source=_change_source)
-        else:
-            clock_service.set_clock_speed(_ClockSpeed.NORMAL)
+            _change_source = getattr(_GameSpeedChangeSource, "USER", _GameSpeedChangeSource.GAMEPLAY)
+
+        ok = _safe_set_clock_speed(clock_service, _ClockSpeed.NORMAL, _change_source)
+        if ok:
+            _set_last_error(None)
 
         if not _is_paused(clock_service, clock_module):
             last_unpause_result = "clock_service_ok"
             return
 
-        if _daemon_connection is not None:
-            sims4_commands.client_cheat("|clock.toggle_pause_unpause", _daemon_connection)
+        if _DAEMON_CONNECTION is not None:
+            sims4_commands.client_cheat("|clock.toggle_pause_unpause", _DAEMON_CONNECTION)
             if not _is_paused(clock_service, clock_module):
+                _set_last_error(None)
                 last_unpause_result = "toggle_used"
                 return
 
-            sims4_commands.client_cheat("|clock.setspeed one", _daemon_connection)
+            sims4_commands.client_cheat("|clock.setspeed one", _DAEMON_CONNECTION)
             if not _is_paused(clock_service, clock_module):
+                _set_last_error(None)
                 last_unpause_result = "setspeed_used"
                 return
 

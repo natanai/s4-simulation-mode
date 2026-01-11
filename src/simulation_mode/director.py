@@ -150,13 +150,7 @@ def _sim_identifier(sim_info):
 def _is_sim_busy(sim):
     queue = getattr(sim, "queue", None)
     if queue is None:
-        return None
-    try:
-        running = getattr(queue, "running", None)
-        if running:
-            return True
-    except Exception:
-        pass
+        return False
     try:
         queued = getattr(queue, "_queue", None)
         if queued is not None and hasattr(queued, "__len__"):
@@ -698,14 +692,9 @@ def _evaluate(now: float):
                 _append_debug(f"{sim_name}: SKIP motives unreadable (no motive stats found)")
                 continue
 
-            busy_state = _is_sim_busy(sim)
-            if busy_state is True:
+            if _is_sim_busy(sim):
                 _append_debug(f"{sim_name}: SKIP busy")
                 continue
-            if busy_state is None and min_motive is not None:
-                if min_motive < settings.director_min_safe_motive + _BUSY_BUFFER:
-                    _append_debug(f"{sim_name}: SKIP busy")
-                    continue
 
             if not _can_push_for_sim(sim_id, now):
                 _append_debug(f"{sim_name}: SKIP cooldown")

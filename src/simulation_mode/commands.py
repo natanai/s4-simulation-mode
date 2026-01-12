@@ -34,6 +34,32 @@ def _daemon_snapshot():
     return daemon.is_running(), daemon.daemon_error, daemon.tick_count
 
 
+def _safe_get(obj, name, default=None):
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return default
+
+
+def _safe_call(obj, name, *args, **kwargs):
+    fn = _safe_get(obj, name, None)
+    if not callable(fn):
+        return False, None, f"not callable: {name}"
+    try:
+        return True, fn(*args, **kwargs), None
+    except Exception as e:
+        return False, None, f"{type(e).__name__}: {e}"
+
+
+def _filter_names(obj, contains):
+    out = []
+    for name in dir(obj):
+        lower_name = name.lower()
+        if any(token in lower_name for token in contains):
+            out.append(name)
+    return sorted(set(out))
+
+
 def _status_lines():
     running, daemon_error, daemon_tick_count = _daemon_snapshot()
     return [
@@ -141,6 +167,312 @@ def _get_active_sim(services):
     except Exception:
         return None
     return None
+
+
+def _append_probe_log(lines):
+    logging_utils = importlib.import_module("simulation_mode.logging_utils")
+    logging_utils.append_lines(lines)
+
+
+def _probe_item_ids(item):
+    ids = []
+    for key in ("guid64", "tuning_guid", "instance_id"):
+        value = _safe_get(item, key)
+        if value is not None:
+            ids.append(f"{key}={value}")
+    return ids
+
+
+def _probe_wants(output):
+    services = importlib.import_module("services")
+    sim = _get_active_sim(services)
+    sim_info = _active_sim_info()
+    lines = [
+        "=" * 60,
+        "PROBE WANTS",
+    ]
+    if sim is None and sim_info is None:
+        lines.append("active_sim= (none)")
+        _append_probe_log(lines)
+        output("probe_wants complete; run simulation dump_log")
+        return True
+    lines.append(f"active_sim={sim!r}")
+    lines.append(f"sim_info={sim_info!r}")
+
+    tracker = None
+    tracker_attr = None
+    for attr in ("wants_tracker", "wants_and_fears_tracker", "whim_tracker"):
+        candidate = _safe_get(sim_info, attr)
+        if candidate is not None:
+            tracker = candidate
+            tracker_attr = attr
+            break
+    if tracker is None:
+        lines.append("tracker= (not found)")
+        _append_probe_log(lines)
+        output("probe_wants complete; run simulation dump_log")
+        return True
+
+    lines.append(f"tracker_attr={tracker_attr}")
+    lines.append(f"tracker_type={type(tracker)}")
+    names = _filter_names(
+        tracker,
+        ("want", "whim", "fear", "active", "slot", "refresh", "roll", "tracker"),
+    )
+    if names:
+        lines.append("tracker_members:")
+        for name in names:
+            lines.append(f"- {name}")
+    else:
+        lines.append("tracker_members=")
+
+    want_sources = (
+        ("call", "get_active_wants"),
+        ("call", "get_wants"),
+        ("attr", "active_wants"),
+        ("attr", "wants"),
+    )
+    wants_value = None
+    for kind, name in want_sources:
+        if kind == "call":
+            ok, result, error = _safe_call(tracker, name)
+            if ok and result is not None:
+                wants_value = result
+                lines.append(f"wants_source={name}()")
+                break
+            if not ok:
+                lines.append(f"wants_source_error={name}(): {error}")
+        else:
+            result = _safe_get(tracker, name)
+            if result is not None:
+                wants_value = result
+                lines.append(f"wants_source={name}")
+                break
+
+    if wants_value is None:
+        lines.append("active_wants= (none)")
+        _append_probe_log(lines)
+        output("probe_wants complete; run simulation dump_log")
+        return True
+
+    lines.append(f"active_wants_type={type(wants_value)}")
+    if isinstance(wants_value, (list, tuple)):
+        if not wants_value:
+            lines.append("active_wants=[]")
+        else:
+            lines.append("active_wants:")
+            for item in wants_value:
+                lines.append(f"- item={item!r}")
+                lines.append(f"  type={type(item)}")
+                ids = _probe_item_ids(item)
+                if ids:
+                    lines.append(f"  ids={' '.join(ids)}")
+    else:
+        lines.append(f"active_wants_value={wants_value!r}")
+
+    _append_probe_log(lines)
+    output("probe_wants complete; run simulation dump_log")
+    return True
+
+
+def _probe_career(output):
+    services = importlib.import_module("services")
+    sim = _get_active_sim(services)
+    sim_info = _active_sim_info()
+    lines = [
+        "=" * 60,
+        "PROBE CAREER",
+    ]
+    if sim is None and sim_info is None:
+        lines.append("active_sim= (none)")
+        _append_probe_log(lines)
+        output("probe_career complete; run simulation dump_log")
+        return True
+    lines.append(f"active_sim={sim!r}")
+    lines.append(f"sim_info={sim_info!r}")
+
+    tracker = _safe_get(sim_info, "career_tracker")
+    if tracker is None:
+        lines.append("career_tracker= (not found)")
+        _append_probe_log(lines)
+        output("probe_career complete; run simulation dump_log")
+        return True
+
+    lines.append(f"career_tracker_type={type(tracker)}")
+    names = _filter_names(
+        tracker,
+        (
+            "career",
+            "current",
+            "active",
+            "level",
+            "promotion",
+            "task",
+            "performance",
+            "require",
+            "skill",
+        ),
+    )
+    if names:
+        lines.append("career_tracker_members:")
+        for name in names:
+            lines.append(f"- {name}")
+    else:
+        lines.append("career_tracker_members=")
+
+    career_obj = None
+    ok, result, error = _safe_call(tracker, "get_current_career")
+    if ok and result is not None:
+        career_obj = result
+        lines.append("current_career_source=get_current_career()")
+    elif not ok:
+        lines.append(f"current_career_error=get_current_career(): {error}")
+
+    if career_obj is None:
+        career_obj = _safe_get(tracker, "current_career")
+        if career_obj is not None:
+            lines.append("current_career_source=current_career")
+
+    if career_obj is None:
+        career_obj = _safe_get(tracker, "career")
+        if career_obj is not None:
+            lines.append("current_career_source=career")
+
+    if career_obj is None:
+        lines.append("current_career= (none)")
+        _append_probe_log(lines)
+        output("probe_career complete; run simulation dump_log")
+        return True
+
+    lines.append(f"current_career={career_obj!r}")
+    lines.append(f"current_career_type={type(career_obj)}")
+
+    level_names = _filter_names(career_obj, ("level", "rank"))
+    if level_names:
+        lines.append("career_level_attrs:")
+        for name in level_names:
+            value = _safe_get(career_obj, name)
+            lines.append(f"- {name}={value!r}")
+    else:
+        lines.append("career_level_attrs=")
+
+    performance_names = _filter_names(career_obj, ("performance",))
+    if performance_names:
+        lines.append("career_performance_attrs:")
+        for name in performance_names:
+            value = _safe_get(career_obj, name)
+            lines.append(f"- {name}={value!r}")
+    else:
+        lines.append("career_performance_attrs=")
+
+    allow_calls = (
+        "get_daily_tasks",
+        "get_current_tasks",
+        "get_promotion_requirements",
+        "get_promotion_tasks",
+        "get_required_skills",
+    )
+    for name in allow_calls:
+        if callable(_safe_get(career_obj, name)):
+            ok, result, error = _safe_call(career_obj, name)
+            if ok:
+                lines.append(f"{name}()={result!r}")
+            else:
+                lines.append(f"{name}()=error {error}")
+
+    _append_probe_log(lines)
+    output("probe_career complete; run simulation dump_log")
+    return True
+
+
+def _probe_aspiration(output):
+    services = importlib.import_module("services")
+    sim = _get_active_sim(services)
+    sim_info = _active_sim_info()
+    lines = [
+        "=" * 60,
+        "PROBE ASPIRATION",
+    ]
+    if sim is None and sim_info is None:
+        lines.append("active_sim= (none)")
+        _append_probe_log(lines)
+        output("probe_aspiration complete; run simulation dump_log")
+        return True
+    lines.append(f"active_sim={sim!r}")
+    lines.append(f"sim_info={sim_info!r}")
+
+    tracker = _safe_get(sim_info, "aspiration_tracker")
+    if tracker is None:
+        lines.append("aspiration_tracker= (not found)")
+        _append_probe_log(lines)
+        output("probe_aspiration complete; run simulation dump_log")
+        return True
+
+    lines.append(f"aspiration_tracker_type={type(tracker)}")
+    names = _filter_names(
+        tracker,
+        (
+            "aspiration",
+            "milestone",
+            "objective",
+            "current",
+            "track",
+            "complete",
+        ),
+    )
+    if names:
+        lines.append("aspiration_tracker_members:")
+        for name in names:
+            lines.append(f"- {name}")
+    else:
+        lines.append("aspiration_tracker_members=")
+
+    aspiration_obj = None
+    ok, result, error = _safe_call(tracker, "get_active_aspiration")
+    if ok and result is not None:
+        aspiration_obj = result
+        lines.append("active_aspiration_source=get_active_aspiration()")
+    elif not ok:
+        lines.append(f"active_aspiration_error=get_active_aspiration(): {error}")
+
+    if aspiration_obj is None:
+        aspiration_obj = _safe_get(tracker, "active_aspiration")
+        if aspiration_obj is not None:
+            lines.append("active_aspiration_source=active_aspiration")
+
+    if aspiration_obj is None:
+        aspiration_obj = _safe_get(tracker, "aspiration")
+        if aspiration_obj is not None:
+            lines.append("active_aspiration_source=aspiration")
+
+    if aspiration_obj is None:
+        lines.append("active_aspiration= (none)")
+        _append_probe_log(lines)
+        output("probe_aspiration complete; run simulation dump_log")
+        return True
+
+    lines.append(f"active_aspiration={aspiration_obj!r}")
+    lines.append(f"active_aspiration_type={type(aspiration_obj)}")
+    ids = _probe_item_ids(aspiration_obj)
+    if ids:
+        lines.append(f"active_aspiration_ids={' '.join(ids)}")
+
+    allow_calls = (
+        "get_current_milestone",
+        "get_objectives",
+        "get_current_objectives",
+    )
+    for name in allow_calls:
+        if callable(_safe_get(tracker, name)):
+            ok, result, error = _safe_call(tracker, name)
+            if ok:
+                lines.append(f"{name}()={result!r}")
+            else:
+                lines.append(f"{name}()=error {error}")
+
+    _append_probe_log(lines)
+    output("probe_aspiration complete; run simulation dump_log")
+    return True
 
 
 def _emit_director_motive_snapshot(output, sim_info):
@@ -270,6 +602,9 @@ def _usage_lines():
         "simulation director_takeover <skill_key>",
         "simulation configpath",
         "simulation dump_log",
+        "simulation probe_wants",
+        "simulation probe_career",
+        "simulation probe_aspiration",
         "simulation help",
         "keys: auto_unpause, allow_death, allow_pregnancy, tick, guardian_enabled, guardian_check_seconds, "
         "guardian_min_motive, guardian_red_motive, guardian_per_sim_cooldown_seconds, "
@@ -552,6 +887,15 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         output(f"config_path={config_path}")
         output(f"exists={os.path.exists(config_path)}")
         return True
+
+    if action_key == "probe_wants":
+        return _probe_wants(output)
+
+    if action_key == "probe_career":
+        return _probe_career(output)
+
+    if action_key == "probe_aspiration":
+        return _probe_aspiration(output)
 
     if action_key == "dump_log":
         dumper = importlib.import_module("simulation_mode.log_dump")

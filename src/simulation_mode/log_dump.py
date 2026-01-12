@@ -54,8 +54,8 @@ def dump_state_to_file(extra_note: str = ""):
 
         lines.append("")
         lines.append("DIRECTOR DEBUG:")
-        for debug in list(getattr(director, "last_director_debug", [])):
-            lines.append(f"- {debug}")
+        debug_text = getattr(settings, "last_director_debug", "")
+        lines.append(f"last_director_debug={debug_text}")
 
         try:
             services = importlib.import_module("services")

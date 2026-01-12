@@ -471,16 +471,75 @@ def _push_want(sim, rule_key, want_name, force=False):
     return pushed, f"WANT {want_name}"
 
 
+def _iter_objects_from_manager(object_manager):
+    if object_manager is None:
+        return []
+
+    for attr in ("objects", "_objects"):
+        mapping = getattr(object_manager, attr, None)
+        if mapping is None:
+            continue
+        try:
+            values = getattr(mapping, "values", None)
+            if callable(values):
+                return list(values())
+        except Exception:
+            pass
+
+    try:
+        values = getattr(object_manager, "values", None)
+        if callable(values):
+            return list(values())
+    except Exception:
+        pass
+
+    get_objects = getattr(object_manager, "get_objects", None)
+    if callable(get_objects):
+        try:
+            sig = inspect.signature(get_objects)
+            required = [
+                p
+                for p in sig.parameters.values()
+                if p.default is inspect._empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            ]
+            if len(required) == 0:
+                return list(get_objects())
+        except Exception:
+            try:
+                return list(get_objects())
+            except TypeError:
+                pass
+            except Exception:
+                pass
+
+    try:
+        return list(iter(object_manager))
+    except Exception:
+        return []
+
+
 def _iter_objects():
     try:
         object_manager = services.object_manager()
-        if object_manager is None:
-            return []
-        get_objects = getattr(object_manager, "get_objects", None)
-        if callable(get_objects):
-            return list(get_objects())
     except Exception:
-        return []
+        object_manager = None
+
+    objs = _iter_objects_from_manager(object_manager)
+    if objs:
+        return objs
+
+    try:
+        zone = services.current_zone()
+        zone_object_manager = getattr(zone, "object_manager", None)
+    except Exception:
+        zone_object_manager = None
+
+    if zone_object_manager and zone_object_manager is not object_manager:
+        objs = _iter_objects_from_manager(zone_object_manager)
+        if objs:
+            return objs
+
     return []
 
 
@@ -740,8 +799,10 @@ def try_push_skill_interaction(sim, skill_key):
         return False
     target_obj = _find_target_object(sim, rule)
     if target_obj is None:
+        count = len(_iter_objects())
         _append_debug(
-            f"{sim_name}: FAIL no object for skill={skill_key} keywords={rule.get('object_keywords')}"
+            f"{sim_name}: FAIL no object for skill={skill_key} "
+            f"(iter_objects={count}) keywords={rule.get('object_keywords')}"
         )
         return False
     affordance = _find_affordance(sim, target_obj, rule)

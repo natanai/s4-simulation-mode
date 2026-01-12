@@ -1,3 +1,4 @@
+import inspect
 import re
 import time
 from collections import deque
@@ -154,6 +155,8 @@ _last_motive_snapshot_by_sim = {}
 
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
+
+_PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS = None
 
 
 def _norm(s: str) -> str:
@@ -387,25 +390,27 @@ def _extract_whim_name(whim):
     return str(whim) if whim is not None else ""
 
 
-def get_active_whim_targets(sim_info):
+def get_active_want_targets(sim_info):
     sim = sim_info.get_sim_instance() if sim_info else None
     for source in (sim_info, sim):
         if source is None:
             continue
-        tracker = getattr(source, "whim_tracker", None)
+        tracker = getattr(source, "wants_tracker", None)
         if tracker is None:
-            tracker = getattr(source, "whims_tracker", None)
+            tracker = getattr(source, "wants_and_fears_tracker", None)
+        if tracker is None:
+            tracker = getattr(source, "whim_tracker", None)
         if tracker is None:
             continue
-        for attr in ("get_whims", "get_active_whims", "get_current_whims"):
+        for attr in ("get_active_wants", "get_wants"):
             getter = getattr(tracker, attr, None)
             if callable(getter):
                 try:
-                    whims = list(getter())
+                    wants = list(getter())
                 except Exception:
-                    whims = []
-                return [whim for whim in whims if whim]
-        active = getattr(tracker, "active_whims", None)
+                    wants = []
+                return [want for want in wants if want]
+        active = getattr(tracker, "active_wants", None)
         if active is not None:
             try:
                 return list(active)
@@ -425,45 +430,45 @@ def _resolve_whim_rule(whim_name: str):
     return None
 
 
-def _select_whim_target(sim_info):
-    whims = get_active_whim_targets(sim_info)
-    if not whims:
-        return None, "WHIM unavailable (API not found)"
+def _select_want_target(sim_info):
+    wants = get_active_want_targets(sim_info)
+    if not wants:
+        return None, "WANT unavailable (API not found)"
     non_social_rule = None
     social_rule = None
-    for whim in whims:
-        whim_name = _extract_whim_name(whim)
-        rule_key = _resolve_whim_rule(whim_name)
+    for want in wants:
+        want_name = _extract_whim_name(want)
+        rule_key = _resolve_whim_rule(want_name)
         if rule_key is None:
             continue
         if rule_key == "social":
-            social_rule = (rule_key, whim_name)
+            social_rule = (rule_key, want_name)
             continue
         if non_social_rule is None:
-            non_social_rule = (rule_key, whim_name)
+            non_social_rule = (rule_key, want_name)
     selected = non_social_rule or social_rule
     if selected is None:
-        return None, "WHIM no supported target"
+        return None, "WANT no supported target"
     return selected, None
 
 
-def _push_whim(sim, rule_key, whim_name, force=False):
+def _push_want(sim, rule_key, want_name, force=False):
     global _LAST_WANT_DETAILS
     if rule_key == "social" and not settings.director_allow_social_goals:
-        return False, "WHIM social disabled"
+        return False, "WANT social disabled"
     rule = _WHIM_RULES.get(rule_key)
     if rule is None:
-        return False, "WHIM no rule"
+        return False, "WANT no rule"
     target_obj = _find_target_object(sim, rule)
     if target_obj is None:
-        return False, f"WHIM no object for {rule_key}"
+        return False, f"WANT no object for {rule_key}"
     affordance = _find_affordance(sim, target_obj, rule)
     if affordance is None:
-        return False, f"WHIM no affordance for {rule_key}"
+        return False, f"WANT no affordance for {rule_key}"
     pushed = _push_affordance(sim, target_obj, affordance, reason=rule_key, force=force)
     if pushed:
-        _LAST_WANT_DETAILS = (whim_name, _get_object_label(target_obj), _get_affordance_label(affordance))
-    return pushed, f"WHIM {whim_name}"
+        _LAST_WANT_DETAILS = (want_name, _get_object_label(target_obj), _get_affordance_label(affordance))
+    return pushed, f"WANT {want_name}"
 
 
 def _iter_objects():
@@ -631,34 +636,92 @@ def _make_context(sim, force=False):
 
     prio = priority.Priority.Critical if force else priority.Priority.High
 
+    client = None
+    try:
+        client_manager = services.client_manager()
+        if client_manager is not None:
+            client = client_manager.get_first_client()
+    except Exception:
+        client = None
+
     try:
         insert = QueueInsertStrategy.FIRST if force else QueueInsertStrategy.NEXT
     except Exception:
         insert = QueueInsertStrategy.NEXT
 
-    # bucket argument is important in many EA scripts; include when available
+    kwargs = {"insert_strategy": insert}
     try:
-        return InteractionContext(sim, src, prio, insert_strategy=insert, bucket=InteractionBucketType.DEFAULT)
+        kwargs["bucket"] = InteractionBucketType.DEFAULT
     except Exception:
-        # fallback if signature differs
+        pass
+
+    if client is not None:
         try:
-            return InteractionContext(sim, src, prio, insert_strategy=insert)
+            return InteractionContext(sim, src, prio, client=client, **kwargs), True
+        except TypeError:
+            try:
+                kwargs.pop("bucket", None)
+                return InteractionContext(sim, src, prio, client=client, **kwargs), True
+            except TypeError:
+                pass
+
+    try:
+        return InteractionContext(sim, src, prio, **kwargs), False
+    except TypeError:
+        try:
+            kwargs.pop("bucket", None)
+            return InteractionContext(sim, src, prio, **kwargs), False
         except Exception:
-            return InteractionContext(sim, src, prio)
+            return InteractionContext(sim, src, prio), False
 
 
 def _push_affordance(sim, target_obj, affordance, reason=None, force=False):
     global _LAST_ACTION_DETAILS
-    context = _make_context(sim, force=force)
-    try:
-        result = sim.push_super_affordance(affordance, target_obj, context)
-    except TypeError:
-        result = sim.push_super_affordance(affordance, target_obj)
+    global _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS
+    context, client_attached = _make_context(sim, force=force)
+    if _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS is None:
+        try:
+            signature = inspect.signature(sim.push_super_affordance)
+            param_count = len(signature.parameters)
+            _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS = param_count >= 4
+        except Exception:
+            _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS = False
+    if _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS:
+        try:
+            result = sim.push_super_affordance(affordance, target_obj, None, context)
+        except Exception:
+            mode = "4-arg"
+            if force:
+                _append_debug(
+                    "Forced push failed "
+                    f"obj={_get_object_label(target_obj)} aff={_get_affordance_label(affordance)} "
+                    f"client_attached={client_attached} push_signature={mode}"
+                )
+            raise
+    else:
+        try:
+            result = sim.push_super_affordance(affordance, target_obj, context)
+        except Exception:
+            mode = "3-arg"
+            if force:
+                _append_debug(
+                    "Forced push failed "
+                    f"obj={_get_object_label(target_obj)} aff={_get_affordance_label(affordance)} "
+                    f"client_attached={client_attached} push_signature={mode}"
+                )
+            raise
     success = bool(getattr(result, "result", result))
     if success:
         _LAST_ACTION_DETAILS = (
             _get_object_label(target_obj),
             _get_affordance_label(affordance),
+        )
+    elif force:
+        mode = "4-arg" if _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS else "3-arg"
+        _append_debug(
+            "Forced push failed "
+            f"obj={_get_object_label(target_obj)} aff={_get_affordance_label(affordance)} "
+            f"client_attached={client_attached} push_signature={mode}"
         )
     return success
 
@@ -826,35 +889,35 @@ def _evaluate(now: float, force: bool = False):
                 _dbg(f"{sim_name}: SKIP cooldown")
                 continue
 
-            whim_target, whim_reason = _select_whim_target(sim_info)
+            want_target, want_reason = _select_want_target(sim_info)
             goal = None
-            if whim_target is not None:
-                whim_key, whim_name = whim_target
-                if whim_key == "social":
+            if want_target is not None:
+                want_key, want_name = want_target
+                if want_key == "social":
                     if not settings.director_allow_social_goals:
-                        _dbg(f"{sim_name}: WHIM social disabled")
+                        _dbg(f"{sim_name}: WANT social disabled")
                     else:
                         goal = choose_skill_goal(sim_info)
                         if goal is None:
-                            pushed, whim_message = _push_whim(sim, whim_key, whim_name, force=force)
+                            pushed, want_message = _push_want(sim, want_key, want_name, force=force)
                             if pushed:
                                 _record_push(sim_id, now)
-                                action = f"{sim_name} -> WHIM {whim_name}"
+                                action = f"{sim_name} -> WANT {want_name}"
                                 _append_action(action)
                                 last_director_time = now
                                 continue
-                            _dbg(f"{sim_name}: {whim_message}")
+                            _dbg(f"{sim_name}: {want_message}")
                 else:
-                    pushed, whim_message = _push_whim(sim, whim_key, whim_name, force=force)
+                    pushed, want_message = _push_want(sim, want_key, want_name, force=force)
                     if pushed:
                         _record_push(sim_id, now)
-                        action = f"{sim_name} -> WHIM {whim_name}"
+                        action = f"{sim_name} -> WANT {want_name}"
                         _append_action(action)
                         last_director_time = now
                         continue
-                    _dbg(f"{sim_name}: {whim_message}")
-            elif whim_reason:
-                _dbg(f"{sim_name}: {whim_reason}")
+                    _dbg(f"{sim_name}: {want_message}")
+            elif want_reason:
+                _dbg(f"{sim_name}: {want_reason}")
 
             if goal is None:
                 goal = choose_skill_goal(sim_info)

@@ -4,6 +4,7 @@ import time
 import traceback
 
 from simulation_mode import director
+from simulation_mode import logging_utils
 from simulation_mode.settings import get_config_path, settings
 
 
@@ -56,6 +57,14 @@ def dump_state_to_file(extra_note: str = ""):
         lines.append("DIRECTOR DEBUG:")
         debug_text = getattr(settings, "last_director_debug", "")
         lines.append(f"last_director_debug={debug_text}")
+
+        lines.append("")
+        lines.append("PROBE LOG:")
+        probe_lines = logging_utils.get_lines()
+        if probe_lines:
+            lines.extend(probe_lines)
+        else:
+            lines.append("probe_log=")
 
         try:
             services = importlib.import_module("services")

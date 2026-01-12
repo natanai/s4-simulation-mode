@@ -1,13 +1,13 @@
 import time
 
-from interactions.context import InteractionContext, QueueInsertStrategy, InteractionBucketType
-import interactions.priority as priority
+from interactions.context import InteractionSource
 import services
 from server_commands.argument_helpers import get_tunable_instance
 import sims4.log
 import sims4.resources
 
 from simulation_mode import clock_utils
+from simulation_mode.push_utils import iter_objects, push_best_affordance
 from simulation_mode.settings import settings
 
 logger = sims4.log.Logger("SimulationModeGuardian")
@@ -158,6 +158,11 @@ def _object_label(obj):
     return " ".join(part for part in parts if part).lower()
 
 
+def _norm(s: str) -> str:
+    s = (s or "").lower()
+    return "".join(ch for ch in s if ch.isalnum())
+
+
 def _distance(sim, obj):
     sim_pos = getattr(sim, "position", None)
     obj_pos = getattr(obj, "position", None)
@@ -185,15 +190,25 @@ def _find_target_object(sim, motive_key):
     keywords = _OBJECT_KEYWORDS.get(motive_key)
     if not keywords:
         return None
-    object_manager = services.object_manager()
-    if object_manager is None:
-        return None
     best = None
     best_distance = None
-    for obj in object_manager.get_objects():
+    for obj in iter_objects():
         try:
+            in_inventory = getattr(obj, "is_in_inventory", None)
+            if in_inventory is True:
+                continue
+            if callable(in_inventory) and in_inventory():
+                continue
+            hidden = getattr(obj, "is_hidden", None)
+            if hidden is True:
+                continue
+            if callable(hidden) and hidden():
+                continue
+            if getattr(obj, "is_deleted", False):
+                continue
             label = _object_label(obj)
-            if not any(keyword in label for keyword in keywords):
+            norm_label = _norm(label)
+            if not any(_norm(keyword) in norm_label for keyword in keywords):
                 continue
             distance = _distance(sim, obj)
             if distance is None:
@@ -206,41 +221,6 @@ def _find_target_object(sim, motive_key):
         except Exception:
             continue
     return best
-
-
-def _find_affordance(obj, motive_key):
-    keywords = _AFFORDANCE_KEYWORDS.get(motive_key)
-    if not keywords:
-        return None
-    affordances = getattr(obj, "super_affordances", None)
-    if affordances is None:
-        affordances = getattr(obj, "_super_affordances", None)
-    if not affordances:
-        return None
-    for keyword in keywords:
-        for affordance in affordances:
-            try:
-                name = (
-                    getattr(affordance, "__name__", None)
-                    or getattr(affordance, "__qualname__", None)
-                    or str(affordance)
-                )
-                if keyword in name.lower():
-                    return affordance
-            except Exception:
-                continue
-    return None
-
-
-def _push_interaction(sim, affordance, target_obj):
-    context = InteractionContext(
-        sim,
-        InteractionContext.SOURCE_SCRIPT,
-        priority.Priority.High,
-        insert_strategy=QueueInsertStrategy.NEXT,
-        bucket=InteractionBucketType.DEFAULT,
-    )
-    return sim.push_super_affordance(affordance, target_obj, context)
 
 
 def _log_once_per_hour(message, last_timestamp_attr):
@@ -322,14 +302,6 @@ def _snapshot_dict(snapshot):
     return {key: value for key, value in snapshot}
 
 
-def _affordance_label(affordance):
-    return (
-        getattr(affordance, "__name__", None)
-        or getattr(affordance, "__qualname__", None)
-        or str(affordance)
-    )
-
-
 def pick_care_goal(sim_info, snapshot: dict, green_percent: float):
     lowest_key = None
     lowest_value = None
@@ -346,29 +318,44 @@ def pick_care_goal(sim_info, snapshot: dict, green_percent: float):
     return lowest_key, lowest_value, care_kind
 
 
-def _attempt_care_push(sim, motive_key):
+def _attempt_care_push(sim, motive_key, force=False):
     target_obj = _find_target_object(sim, motive_key)
     if target_obj is None:
         if _maybe_run_autonomy(sim):
-            return False, f"no object for {motive_key}; autonomy refresh attempted"
-        return False, f"no object for {motive_key}; autonomy refresh unavailable"
-    affordance = _find_affordance(target_obj, motive_key)
-    if affordance is None:
-        if _maybe_run_autonomy(sim):
-            return False, f"no affordance for {motive_key}; autonomy refresh attempted"
-        return False, f"no affordance for {motive_key}; autonomy refresh unavailable"
-    try:
-        result = _push_interaction(sim, affordance, target_obj)
-    except Exception as exc:
-        return False, f"push failed for {motive_key}: {exc}"
-    if result:
+            return False, f"motive={motive_key} obj=none; autonomy refresh attempted"
+        return False, f"motive={motive_key} obj=none; autonomy refresh unavailable"
+
+    keywords = _AFFORDANCE_KEYWORDS.get(motive_key)
+    if not keywords:
+        return False, f"motive={motive_key} obj={_object_label(target_obj)} no keywords"
+
+    debug_lines = []
+    ok, affordance_label, reason = push_best_affordance(
+        sim,
+        target_obj,
+        keywords,
+        force=force,
+        source=InteractionSource.AUTONOMY,
+        debug_append=debug_lines.append,
+    )
+    if ok:
         global _LAST_CARE_DETAILS
         _LAST_CARE_DETAILS = (
             motive_key,
-            f"{_object_label(target_obj)}:{_affordance_label(affordance)}",
+            f"{_object_label(target_obj)}:{affordance_label}",
         )
-        return True, f"pushed {motive_key} via {_object_label(target_obj)}"
-    return False, f"push failed for {motive_key}"
+        return (
+            True,
+            f"motive={motive_key} obj={_object_label(target_obj)} aff={affordance_label}",
+        )
+
+    detail = debug_lines[-1] if debug_lines else "sig_names=[]"
+    fail_reason = reason or "push failed"
+    return (
+        False,
+        f"motive={motive_key} obj={_object_label(target_obj)} "
+        f"push_failed={fail_reason}; {detail}",
+    )
 
 
 def push_self_care(sim_info, now: float, green_percent: float):
@@ -406,13 +393,17 @@ def push_self_care(sim_info, now: float, green_percent: float):
         for key in non_social_keys:
             attempted.append(key)
             attempted_non_social = True
-            pushed, message = _attempt_care_push(sim, key)
+            value = snapshot_dict.get(key)
+            force = value is not None and value <= settings.guardian_red_motive
+            pushed, message = _attempt_care_push(sim, key, force=force)
             if pushed:
                 _record_push(sim_id, now)
                 return True, message
     else:
         attempted.append(lowest_key)
-        pushed, message = _attempt_care_push(sim, lowest_key)
+        value = snapshot_dict.get(lowest_key)
+        force = value is not None and value <= settings.guardian_red_motive
+        pushed, message = _attempt_care_push(sim, lowest_key, force=force)
         if pushed:
             _record_push(sim_id, now)
             return True, message
@@ -425,7 +416,9 @@ def push_self_care(sim_info, now: float, green_percent: float):
             or not non_social_keys
         )
         if allow_social and "motive_social" not in attempted:
-            pushed, message = _attempt_care_push(sim, "motive_social")
+            value = snapshot_dict.get("motive_social")
+            force = value is not None and value <= settings.guardian_red_motive
+            pushed, message = _attempt_care_push(sim, "motive_social", force=force)
             if pushed:
                 _record_push(sim_id, now)
                 return True, message
@@ -487,28 +480,35 @@ def _process_sim(sim_info, now):
     if not _can_push_for_sim(sim_id, now):
         return
 
-    target_obj = _find_target_object(sim, motive_key)
-    if target_obj is None:
-        if _maybe_run_autonomy(sim):
-            _log_once_per_hour("No guardian object found; autonomy refresh attempted.", "_LAST_AUTONOMY_LOG")
+    force = motive_value <= settings.guardian_red_motive
+    pushed, message = _attempt_care_push(sim, motive_key, force=force)
+    if pushed:
+        _record_push(sim_id, now)
+    else:
+        if "obj=none" in message:
+            if "autonomy refresh attempted" in message:
+                _log_once_per_hour(
+                    "No guardian object found; autonomy refresh attempted.",
+                    "_LAST_AUTONOMY_LOG",
+                )
+            else:
+                _log_once_per_hour(
+                    "No guardian object found; autonomy refresh unavailable.",
+                    "_LAST_NO_OBJECT_LOG",
+                )
+        elif "no affordance candidates" in message or "no keywords" in message:
+            if "autonomy refresh attempted" in message:
+                _log_once_per_hour(
+                    "No guardian affordance found; autonomy refresh attempted.",
+                    "_LAST_AUTONOMY_LOG",
+                )
+            else:
+                _log_once_per_hour(
+                    "No guardian affordance found; autonomy refresh unavailable.",
+                    "_LAST_NO_OBJECT_LOG",
+                )
         else:
-            _log_once_per_hour("No guardian object found; autonomy refresh unavailable.", "_LAST_NO_OBJECT_LOG")
-        return
-
-    affordance = _find_affordance(target_obj, motive_key)
-    if affordance is None:
-        if _maybe_run_autonomy(sim):
-            _log_once_per_hour("No guardian affordance found; autonomy refresh attempted.", "_LAST_AUTONOMY_LOG")
-        else:
-            _log_once_per_hour("No guardian affordance found; autonomy refresh unavailable.", "_LAST_NO_OBJECT_LOG")
-        return
-
-    try:
-        result = _push_interaction(sim, affordance, target_obj)
-        if result:
-            _record_push(sim_id, now)
-    except Exception as exc:
-        logger.warn(f"Failed to push guardian interaction: {exc}")
+            logger.warn(f"Guardian push failed: {message}")
 
 
 def run_guardian():

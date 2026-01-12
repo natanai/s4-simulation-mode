@@ -156,7 +156,45 @@ _last_motive_snapshot_by_sim = {}
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
 
-_PUSH_SUPER_AFFORDANCE_SIGNATURE = None
+def _call_push_super_affordance(sim, super_affordance, target, context):
+    """
+    Call sim.push_super_affordance using the *actual* signature of this game build.
+    Prefer keyword args to avoid positional mismatch across patches.
+    """
+    fn = getattr(sim, "push_super_affordance", None)
+    if fn is None:
+        return False, "no push_super_affordance on sim"
+
+    try:
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+
+        if params and params[0].name == "self":
+            params = params[1:]
+
+        names = [p.name for p in params]
+        kwargs = {}
+
+        if "context" in names:
+            kwargs["context"] = context
+        elif "interaction_context" in names:
+            kwargs["interaction_context"] = context
+
+        if "picked_item_ids" in names:
+            kwargs["picked_item_ids"] = None
+
+        result = (
+            fn(super_affordance, target, **kwargs)
+            if kwargs
+            else fn(super_affordance, target, context)
+        )
+        if not bool(result):
+            param_names = ",".join(names) if names else "unknown"
+            return False, f"push_super_affordance returned False (params={param_names})"
+        return True, None
+    except Exception as e:
+        param_names = ",".join(names) if "names" in locals() and names else "unknown"
+        return False, f"exception calling push_super_affordance (params={param_names}): {e!r}"
 
 
 def _norm(s: str) -> str:
@@ -433,7 +471,7 @@ def _resolve_whim_rule(whim_name: str):
 def _select_want_target(sim_info):
     wants = get_active_want_targets(sim_info)
     if not wants:
-        return None, "WANT unavailable (API not found)"
+        return None, "WANT unavailable (no active wants or wants disabled)"
     non_social_rule = None
     social_rule = None
     for want in wants:
@@ -462,9 +500,10 @@ def _push_want(sim, rule_key, want_name, force=False):
     target_obj = _find_target_object(sim, rule)
     if target_obj is None:
         return False, f"WANT no object for {rule_key}"
-    affordance = _find_affordance(sim, target_obj, rule)
-    if affordance is None:
+    candidates = _find_affordance_candidates(sim, target_obj, rule)
+    if not candidates:
         return False, f"WANT no affordance for {rule_key}"
+    affordance = candidates[0]
     pushed = _push_affordance(sim, target_obj, affordance, reason=rule_key, force=force)
     if pushed:
         _LAST_WANT_DETAILS = (want_name, _get_object_label(target_obj), _get_affordance_label(affordance))
@@ -600,6 +639,43 @@ def _get_affordance_label(affordance):
     ).lower()
 
 
+def _aff_name(affordance):
+    return (
+        getattr(affordance, "__name__", None)
+        or getattr(affordance, "__qualname__", None)
+        or str(affordance)
+    ).lower()
+
+
+_MOOD_LOCK_TOKENS = (
+    "energetic",
+    "focused",
+    "confident",
+    "inspired",
+    "playful",
+    "flirty",
+    "angry",
+    "sad",
+    "tense",
+    "uncomfortable",
+    "scared",
+    "dazed",
+)
+
+
+def _score_affordance(affordance, keywords):
+    name = _aff_name(affordance)
+    score = 0
+    if any(token in name for token in _MOOD_LOCK_TOKENS):
+        score -= 20
+    for keyword in keywords:
+        if keyword and keyword.lower() in name:
+            score += 10
+    if "workout" in name:
+        score += 5
+    return score
+
+
 def _aff_label(affordance):
     try:
         return getattr(affordance, "__name__", None) or str(affordance)
@@ -667,22 +743,26 @@ def _find_target_object(sim, rule):
     return best
 
 
-def _find_affordance(sim, obj, rule):
+def _find_affordance_candidates(sim, obj, rule):
     keywords = rule.get("affordance_keywords", [])
     if not keywords:
-        return None
+        return []
     affordances = _iter_super_affordances(obj, sim)
     if not affordances:
-        return None
-    for keyword in keywords:
-        for affordance in affordances:
-            try:
-                name = _get_affordance_label(affordance)
-                if _norm(keyword) in _norm(name):
-                    return affordance
-            except Exception:
-                continue
-    return None
+        return []
+    candidates = []
+    lowered_keywords = [keyword.lower() for keyword in keywords if keyword]
+    for affordance in affordances:
+        try:
+            name = _aff_name(affordance)
+            if any(keyword in name for keyword in lowered_keywords):
+                candidates.append(affordance)
+        except Exception:
+            continue
+    candidates.sort(
+        key=lambda affordance: _score_affordance(affordance, lowered_keywords), reverse=True
+    )
+    return candidates
 
 
 def _make_context(sim, force=False):
@@ -736,56 +816,35 @@ def _make_context(sim, force=False):
 
 def _push_affordance(sim, target_obj, affordance, reason=None, force=False):
     global _LAST_ACTION_DETAILS
-    global _PUSH_SUPER_AFFORDANCE_SIGNATURE
     context, client_attached = _make_context(sim, force=force)
-    if _PUSH_SUPER_AFFORDANCE_SIGNATURE is None:
-        try:
-            signature = inspect.signature(sim.push_super_affordance)
-            param_names = list(signature.parameters)
-            _PUSH_SUPER_AFFORDANCE_SIGNATURE = {
-                "count": len(param_names),
-                "names": param_names,
-            }
-        except Exception:
-            _PUSH_SUPER_AFFORDANCE_SIGNATURE = {"count": None, "names": None}
-    signature = _PUSH_SUPER_AFFORDANCE_SIGNATURE or {"count": None, "names": None}
-    param_count = signature.get("count")
-    param_names = signature.get("names") or []
-    param_names_label = ",".join(param_names) if param_names else "unknown"
-    if param_count == 3:
-        mode = "3-arg"
-    elif param_count is None:
-        mode = "unknown-arg"
-    else:
-        mode = f"{param_count}-arg"
-    try:
-        result = sim.push_super_affordance(affordance, target_obj, context)
-    except Exception:
-        if force:
-            _append_debug(
-                "Forced push failed "
-                f"obj={_get_object_label(target_obj)} aff={_get_affordance_label(affordance)} "
-                f"client_attached={client_attached} push_signature={mode} "
-                f"push_param_count={param_count} push_param_names={param_names_label}"
-            )
-        raise
-    success = bool(getattr(result, "result", result))
+    success, failure_reason = _call_push_super_affordance(
+        sim, affordance, target_obj, context
+    )
     if success:
         _LAST_ACTION_DETAILS = (
             _get_object_label(target_obj),
             _get_affordance_label(affordance),
         )
-    elif force:
-        _append_debug(
-            "Forced push failed "
-            f"obj={_get_object_label(target_obj)} aff={_get_affordance_label(affordance)} "
-            f"client_attached={client_attached} push_signature={mode} "
-            f"push_param_count={param_count} push_param_names={param_names_label}"
-        )
-    return success
+        return True
+
+    sim_name = getattr(sim, "full_name", None)
+    if callable(sim_name):
+        try:
+            sim_name = sim_name()
+        except Exception:
+            sim_name = None
+    sim_name = sim_name or getattr(sim, "first_name", None) or "Sim"
+    target_class = getattr(target_obj.__class__, "__name__", "unknown")
+    aff_label = _get_affordance_label(affordance)
+    failure_reason = failure_reason or "unknown failure"
+    _append_debug(
+        f"{sim_name}: push failed obj_class={target_class} "
+        f"aff={aff_label} reason={failure_reason} client_attached={client_attached}"
+    )
+    return False
 
 
-def try_push_skill_interaction(sim, skill_key):
+def try_push_skill_interaction(sim, skill_key, force=False):
     sim_name = getattr(sim, "full_name", None)
     if callable(sim_name):
         try:
@@ -805,24 +864,24 @@ def try_push_skill_interaction(sim, skill_key):
             f"(iter_objects={count}) keywords={rule.get('object_keywords')}"
         )
         return False
-    affordance = _find_affordance(sim, target_obj, rule)
-    if affordance is None:
+    candidates = _find_affordance_candidates(sim, target_obj, rule)
+    if not candidates:
         _append_debug(
             f"{sim_name}: FAIL no affordance for skill={skill_key} "
             f"object={_get_object_label(target_obj)} keywords={rule.get('affordance_keywords')}"
         )
         return False
-    try:
-        pushed = _push_affordance(sim, target_obj, affordance, reason=skill_key, force=True)
-    except Exception as exc:
+    for affordance in candidates[:8]:
+        if _push_affordance(sim, target_obj, affordance, reason=skill_key, force=force):
+            _append_debug(
+                f"{sim_name}: SUCCESS push skill={skill_key} aff={_aff_label(affordance)}"
+            )
+            return True
         _append_debug(
-            f"{sim_name}: FAIL push exception for skill={skill_key} exc={type(exc).__name__}:{exc}"
+            f"{sim_name}: candidate failed skill={skill_key} aff={_aff_label(affordance)}"
         )
-        return False
-    if not pushed:
-        _append_debug(f"{sim_name}: FAIL push returned false for skill={skill_key}")
-        return False
-    return True
+    _append_debug(f"{sim_name}: FAIL all candidates failed for skill={skill_key}")
+    return False
 
 
 def _sim_display_name(sim_info):
@@ -995,13 +1054,14 @@ def _evaluate(now: float, force: bool = False):
             if target_obj is None:
                 _dbg(f"{sim_name}: FAIL no object for skill={skill_key}")
                 continue
-            affordance = _find_affordance(sim, target_obj, rule)
-            if affordance is None:
+            candidates = _find_affordance_candidates(sim, target_obj, rule)
+            if not candidates:
                 _dbg(
                     f"{sim_name}: FAIL no affordance on object={_get_object_label(target_obj)} "
                     f"for skill={skill_key}"
                 )
                 continue
+            affordance = candidates[0]
             try:
                 pushed = _push_affordance(sim, target_obj, affordance, reason=skill_key, force=force)
             except Exception as exc:
@@ -1081,7 +1141,7 @@ def push_skill_now(sim, skill_key: str, now: float) -> bool:
         except Exception:
             sim_name = None
     sim_name = sim_name or getattr(sim, "first_name", None) or "Sim"
-    if try_push_skill_interaction(sim, skill_key):
+    if try_push_skill_interaction(sim, skill_key, force=True):
         action = f"{sim_name} -> {skill_key} (forced)"
         _append_action(action)
         last_director_time = now

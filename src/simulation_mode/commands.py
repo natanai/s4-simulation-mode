@@ -398,6 +398,7 @@ def _probe_aspiration(output, emit_output=True):
 
     milestone = None
     milestone_source = None
+    milestone_candidates = []
     for attr in (
         "get_current_milestone",
         "get_active_milestone",
@@ -426,10 +427,43 @@ def _probe_aspiration(output, emit_output=True):
     lines.append(f"milestone_source={milestone_source}")
     lines.append(f"milestone={milestone!r}")
     lines.append(f"milestone_type={type(milestone)}")
+    if milestone is not None:
+        milestone_candidates.append(milestone)
+
+    for name in dir(tracker):
+        if "milestone" not in name.lower():
+            continue
+        val = _safe_get(tracker, name)
+        lines.append(f"tracker.{name}={val!r} type={type(val)}")
+        if isinstance(val, (list, tuple)) and val:
+            lines.append(f"tracker.{name}[0]={val[0]!r} type={type(val[0])}")
+            milestone_candidates.append(val[0])
+        elif val is not None:
+            milestone_candidates.append(val)
+
+    if active is not None:
+        for name in dir(active):
+            if "milestone" not in name.lower():
+                continue
+            val = _safe_get(active, name)
+            lines.append(f"active.{name}={val!r} type={type(val)}")
+            if isinstance(val, (list, tuple)) and val:
+                lines.append(f"active.{name}[0]={val[0]!r} type={type(val[0])}")
+                milestone_candidates.append(val[0])
+            elif val is not None:
+                milestone_candidates.append(val)
 
     if callable(_safe_get(tracker, "get_objectives")):
-        if milestone is not None:
-            ok, result, error = _safe_call(tracker, "get_objectives", milestone)
+        milestone_arg = None
+        if milestone_candidates:
+            for candidate in milestone_candidates:
+                if candidate is not None:
+                    milestone_arg = candidate
+                    break
+        if milestone_arg is not None:
+            lines.append(f"get_objectives_milestone={milestone_arg!r}")
+            lines.append(f"get_objectives_milestone_type={type(milestone_arg)}")
+            ok, result, error = _safe_call(tracker, "get_objectives", milestone_arg)
         else:
             ok, result, error = _safe_call(tracker, "get_objectives")
         if ok and result is not None:
@@ -453,12 +487,12 @@ def _probe_aspiration(output, emit_output=True):
     latest_objective_attr = _safe_get(tracker, "latest_objective")
     if latest_objective_attr is not None:
         if callable(latest_objective_attr):
-            ok, result, error = _safe_call(tracker, "latest_objective")
-            if ok:
+            try:
+                result = latest_objective_attr()
                 lines.append(f"latest_objective={result!r}")
                 lines.append(f"latest_objective_type={type(result)}")
-            else:
-                lines.append(f"latest_objective=error {error}")
+            except Exception as exc:
+                lines.append(f"latest_objective=error {type(exc).__name__}: {exc}")
         else:
             lines.append(f"latest_objective={latest_objective_attr!r}")
             lines.append(f"latest_objective_type={type(latest_objective_attr)}")
@@ -615,7 +649,7 @@ def _usage_lines():
         "simulation director_why",
         "simulation director_push <skill_key>",
         "simulation director_takeover <skill_key>",
-        "simulation guardian_now",
+        "simulation guardian_now [force]",
         "simulation configpath",
         "simulation dump_log",
         "simulation probe_all",
@@ -883,17 +917,18 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             output("No active sim found.")
             return True
         now = time.time()
+        force = bool(key and key.strip().lower() == "force")
         ok, message = guardian.push_self_care(
-            sim_info, now, settings.director_green_motive_percent
+            sim_info, now, settings.director_green_motive_percent, bypass_cooldown=force
         )
         lines = [
             "=" * 60,
-            "GUARDIAN NOW",
-            f"result={ok}",
+            f"GUARDIAN NOW force={force}",
+            f"pushed={ok}",
             f"detail={message}",
         ]
         _append_simulation_log(lines)
-        output(f"guardian_now result={ok}")
+        output(f"guardian_now force={force} pushed={ok}")
         output(message)
         return True
 

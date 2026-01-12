@@ -4,7 +4,7 @@ import time
 import traceback
 
 from simulation_mode import director
-from simulation_mode import logging_utils
+from simulation_mode import probe_log
 from simulation_mode.settings import get_config_path, settings
 
 
@@ -60,11 +60,18 @@ def dump_state_to_file(extra_note: str = ""):
 
         lines.append("")
         lines.append("PROBE LOG:")
-        probe_lines = logging_utils.get_lines()
-        if probe_lines:
-            lines.extend(probe_lines)
-        else:
-            lines.append("probe_log=")
+        probe_path = probe_log.get_probe_log_path()
+        lines.append(f"probe_log_path={probe_path}")
+        try:
+            with open(probe_path, "r", encoding="utf-8") as handle:
+                probe_tail = handle.readlines()[-40:]
+            if probe_tail:
+                lines.append("probe_log_tail:")
+                lines.extend(line.rstrip("\n") for line in probe_tail)
+            else:
+                lines.append("probe_log_tail=")
+        except Exception as exc:
+            lines.append(f"probe_log_error={exc!r}")
 
         try:
             services = importlib.import_module("services")

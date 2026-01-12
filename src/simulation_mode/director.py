@@ -391,6 +391,54 @@ def _extract_whim_name(whim):
     return str(whim) if whim is not None else ""
 
 
+def _extract_whim_guid(whim):
+    for attr in ("guid64", "whim_guid", "guid", "tuning_guid"):
+        value = getattr(whim, attr, None)
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                value = None
+        if value:
+            return value
+    return None
+
+
+def _slot_flag(slot, attr: str) -> bool:
+    value = getattr(slot, attr, None)
+    if callable(value):
+        try:
+            return bool(value())
+        except Exception:
+            return False
+    return bool(value)
+
+
+def _iter_active_whims_from_tracker(tracker):
+    slots = None
+    slots_gen = getattr(tracker, "slots_gen", None)
+    if callable(slots_gen):
+        try:
+            slots = list(slots_gen())
+        except Exception:
+            slots = None
+    if slots is None:
+        slots = getattr(tracker, "_whim_slots", None)
+    if slots is None:
+        return None
+    active = []
+    for slot in slots:
+        is_empty = _slot_flag(slot, "is_empty")
+        is_locked = _slot_flag(slot, "is_locked")
+        if is_empty or is_locked:
+            continue
+        whim = getattr(slot, "whim", None)
+        if whim is None:
+            continue
+        active.append(whim)
+    return active
+
+
 def get_active_want_targets(sim_info):
     sim = sim_info.get_sim_instance() if sim_info else None
     for source in (sim_info, sim):
@@ -403,6 +451,9 @@ def get_active_want_targets(sim_info):
             tracker = getattr(source, "whim_tracker", None)
         if tracker is None:
             continue
+        active_slots = _iter_active_whims_from_tracker(tracker)
+        if active_slots is not None:
+            return active_slots
         for attr in ("get_active_wants", "get_wants"):
             getter = getattr(tracker, attr, None)
             if callable(getter):
@@ -443,10 +494,10 @@ def _select_want_target(sim_info):
         if rule_key is None:
             continue
         if rule_key == "social":
-            social_rule = (rule_key, want_name)
+            social_rule = (rule_key, want_name, want)
             continue
         if non_social_rule is None:
-            non_social_rule = (rule_key, want_name)
+            non_social_rule = (rule_key, want_name, want)
     selected = non_social_rule or social_rule
     if selected is None:
         return None, "WANT no supported target"
@@ -767,7 +818,13 @@ def _evaluate(now: float, force: bool = False):
             want_target, want_reason = _select_want_target(sim_info)
             goal = None
             if want_target is not None:
-                want_key, want_name = want_target
+                want_key, want_name, want_obj = want_target
+                debug_name = _extract_whim_name(want_obj)
+                debug_guid = _extract_whim_guid(want_obj)
+                if debug_guid is not None:
+                    _dbg(f"{sim_name}: WHIM picked __name__={debug_name} guid64={debug_guid}")
+                else:
+                    _dbg(f"{sim_name}: WHIM picked __name__={debug_name}")
                 if want_key == "social":
                     if not settings.director_allow_social_goals:
                         _dbg(f"{sim_name}: WANT social disabled")

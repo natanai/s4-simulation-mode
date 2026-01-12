@@ -156,7 +156,7 @@ _last_motive_snapshot_by_sim = {}
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
 
-_PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS = None
+_PUSH_SUPER_AFFORDANCE_SIGNATURE = None
 
 
 def _norm(s: str) -> str:
@@ -736,39 +736,39 @@ def _make_context(sim, force=False):
 
 def _push_affordance(sim, target_obj, affordance, reason=None, force=False):
     global _LAST_ACTION_DETAILS
-    global _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS
+    global _PUSH_SUPER_AFFORDANCE_SIGNATURE
     context, client_attached = _make_context(sim, force=force)
-    if _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS is None:
+    if _PUSH_SUPER_AFFORDANCE_SIGNATURE is None:
         try:
             signature = inspect.signature(sim.push_super_affordance)
-            param_count = len(signature.parameters)
-            _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS = param_count >= 4
+            param_names = list(signature.parameters)
+            _PUSH_SUPER_AFFORDANCE_SIGNATURE = {
+                "count": len(param_names),
+                "names": param_names,
+            }
         except Exception:
-            _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS = False
-    if _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS:
-        try:
-            result = sim.push_super_affordance(affordance, target_obj, None, context)
-        except Exception:
-            mode = "4-arg"
-            if force:
-                _append_debug(
-                    "Forced push failed "
-                    f"obj={_get_object_label(target_obj)} aff={_get_affordance_label(affordance)} "
-                    f"client_attached={client_attached} push_signature={mode}"
-                )
-            raise
+            _PUSH_SUPER_AFFORDANCE_SIGNATURE = {"count": None, "names": None}
+    signature = _PUSH_SUPER_AFFORDANCE_SIGNATURE or {"count": None, "names": None}
+    param_count = signature.get("count")
+    param_names = signature.get("names") or []
+    param_names_label = ",".join(param_names) if param_names else "unknown"
+    if param_count == 3:
+        mode = "3-arg"
+    elif param_count is None:
+        mode = "unknown-arg"
     else:
-        try:
-            result = sim.push_super_affordance(affordance, target_obj, context)
-        except Exception:
-            mode = "3-arg"
-            if force:
-                _append_debug(
-                    "Forced push failed "
-                    f"obj={_get_object_label(target_obj)} aff={_get_affordance_label(affordance)} "
-                    f"client_attached={client_attached} push_signature={mode}"
-                )
-            raise
+        mode = f"{param_count}-arg"
+    try:
+        result = sim.push_super_affordance(affordance, target_obj, context)
+    except Exception:
+        if force:
+            _append_debug(
+                "Forced push failed "
+                f"obj={_get_object_label(target_obj)} aff={_get_affordance_label(affordance)} "
+                f"client_attached={client_attached} push_signature={mode} "
+                f"push_param_count={param_count} push_param_names={param_names_label}"
+            )
+        raise
     success = bool(getattr(result, "result", result))
     if success:
         _LAST_ACTION_DETAILS = (
@@ -776,11 +776,11 @@ def _push_affordance(sim, target_obj, affordance, reason=None, force=False):
             _get_affordance_label(affordance),
         )
     elif force:
-        mode = "4-arg" if _PUSH_SUPER_AFFORDANCE_USES_PICKED_ITEM_IDS else "3-arg"
         _append_debug(
             "Forced push failed "
             f"obj={_get_object_label(target_obj)} aff={_get_affordance_label(affordance)} "
-            f"client_attached={client_attached} push_signature={mode}"
+            f"client_attached={client_attached} push_signature={mode} "
+            f"push_param_count={param_count} push_param_names={param_names_label}"
         )
     return success
 

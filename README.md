@@ -69,13 +69,29 @@ In-game: Options → Game Options → Other → enable “Enable Custom Content 
 
 Open the cheat console and run:
 
-* `simulation status`
-* `simulation true`
-* `simulation false`
-* `simulation reload`
-* `simulation director`
-* `simulation help`
-* `simulation debug` (includes auto-unpause diagnostics)
+All commands are exposed under `simulation` (and the alias `simulation_mode`) with the
+following behaviors:
+
+* `simulation status` — show current enablement and daemon status.
+* `simulation true` — enable Simulation Mode and start the daemon.
+* `simulation false` — disable Simulation Mode and stop the daemon.
+* `simulation reload` — reload `simulation-mode.txt` from disk and apply changes.
+* `simulation help` — print usage + available keys.
+* `simulation debug` — print daemon timing, alarm, and auto-unpause diagnostics.
+* `simulation set <key> <value>` — set a runtime setting (non-persistent).
+  * `simulation set tick 1..120` — set tick interval in seconds.
+* `simulation director` — show Life Director configuration, last run info, and motive snapshot.
+* `simulation director_gate` — print green-gate evaluation (safe-to-push check).
+* `simulation director_now` — force a Life Director run and print the last actions.
+* `simulation director_why` — dump the most recent Life Director debug lines.
+* `simulation director_push <skill_key>` — push a skill interaction on the active Sim.
+* `simulation director_takeover <skill_key>` — cancel current interactions, then push a skill.
+* `simulation configpath` — print the resolved `simulation-mode.txt` path and existence.
+* `simulation dump_log` — write a `simulation-mode.log` snapshot to disk.
+* `simulation allow_pregnancy <true|false>` — shorthand for `simulation set allow_pregnancy ...`.
+* `simulation auto_unpause <true|false>` — shorthand for `simulation set auto_unpause ...`.
+* `simulation allow_death <true|false>` — shorthand for `simulation set allow_death ...`.
+* `simulation tick <1..120>` — shorthand for `simulation set tick ...`.
 
 Settings are stored in the manually editable file:
 

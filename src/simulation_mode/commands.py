@@ -125,6 +125,24 @@ def _active_sim_info():
     return getattr(sim, "sim_info", None)
 
 
+def _get_active_sim(services):
+    getter = getattr(services, "active_sim", None)
+    if callable(getter):
+        try:
+            sim = getter()
+            if sim is not None:
+                return sim
+        except Exception:
+            pass
+    try:
+        client = services.client_manager().get_first_client()
+        if client is not None:
+            return client.active_sim
+    except Exception:
+        return None
+    return None
+
+
 def _emit_director_motive_snapshot(output, sim_info):
     director = importlib.import_module("simulation_mode.director")
     guardian = importlib.import_module("simulation_mode.guardian")
@@ -465,13 +483,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         if not skill_key:
             output("Missing skill_key")
             return True
-        sim = None
-        try:
-            client = services.client_manager().get_first_client()
-            if client is not None:
-                sim = client.active_sim
-        except Exception:
-            sim = None
+        sim = _get_active_sim(services)
         if sim is None:
             output("No active sim found.")
             return True
@@ -519,7 +531,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         if not skill_key:
             output("Missing skill_key")
             return True
-        sim = services.active_sim()
+        sim = _get_active_sim(services)
         if sim is None:
             output("No active sim found.")
             return True

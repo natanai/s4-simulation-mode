@@ -457,7 +457,7 @@ def _push_whim(sim, rule_key, whim_name, force=False):
     target_obj = _find_target_object(sim, rule)
     if target_obj is None:
         return False, f"WHIM no object for {rule_key}"
-    affordance = _find_affordance(target_obj, rule)
+    affordance = _find_affordance(sim, target_obj, rule)
     if affordance is None:
         return False, f"WHIM no affordance for {rule_key}"
     pushed = _push_affordance(sim, target_obj, affordance, reason=rule_key, force=force)
@@ -490,11 +490,41 @@ def _get_object_label(obj):
     return " ".join(part for part in parts if part).lower()
 
 
-def _iter_super_affordances(obj):
+def _iter_super_affordances(obj, sim=None):
+    result = []
     affordances = getattr(obj, "super_affordances", None)
-    if affordances is None:
-        affordances = getattr(obj, "_super_affordances", None)
-    return affordances or []
+    if callable(affordances):
+        try:
+            affordances = affordances()
+        except Exception:
+            affordances = None
+    if affordances:
+        result.extend(affordances)
+
+    affordances = getattr(obj, "_super_affordances", None)
+    if callable(affordances):
+        try:
+            affordances = affordances()
+        except Exception:
+            affordances = None
+    if affordances:
+        result.extend(affordances)
+
+    getter = getattr(obj, "get_super_affordances", None)
+    if callable(getter):
+        try:
+            result.extend(getter())
+        except Exception:
+            pass
+
+    target_getter = getattr(obj, "get_target_super_affordances", None)
+    if callable(target_getter) and sim is not None:
+        try:
+            result.extend(target_getter(sim))
+        except Exception:
+            pass
+
+    return list(dict.fromkeys(result))
 
 
 def _get_affordance_label(affordance):
@@ -573,11 +603,11 @@ def _find_target_object(sim, rule):
     return best
 
 
-def _find_affordance(obj, rule):
+def _find_affordance(sim, obj, rule):
     keywords = rule.get("affordance_keywords", [])
     if not keywords:
         return None
-    affordances = _iter_super_affordances(obj)
+    affordances = _iter_super_affordances(obj, sim)
     if not affordances:
         return None
     for keyword in keywords:
@@ -620,41 +650,55 @@ def _make_context(sim, force=False):
 def _push_affordance(sim, target_obj, affordance, reason=None, force=False):
     global _LAST_ACTION_DETAILS
     context = _make_context(sim, force=force)
-    result = sim.push_super_affordance(affordance, target_obj, context)
-    if result:
+    try:
+        result = sim.push_super_affordance(affordance, target_obj, context)
+    except TypeError:
+        result = sim.push_super_affordance(affordance, target_obj)
+    success = bool(getattr(result, "result", result))
+    if success:
         _LAST_ACTION_DETAILS = (
             _get_object_label(target_obj),
             _get_affordance_label(affordance),
         )
-    return bool(result)
+    return success
 
 
-def try_push_skill_interaction(sim, skill_key, force=False):
+def try_push_skill_interaction(sim, skill_key):
+    sim_name = getattr(sim, "full_name", None)
+    if callable(sim_name):
+        try:
+            sim_name = sim_name()
+        except Exception:
+            sim_name = None
+    sim_name = sim_name or getattr(sim, "first_name", None) or "Sim"
     rule = _SKILL_RULES.get(skill_key)
     if rule is None:
+        _append_debug(f"{sim_name}: FAIL no rule for skill={skill_key}")
         return False
-    try:
-        target_obj = _find_target_object(sim, rule)
-        if target_obj is None:
-            _dbg(f"{sim}: FAIL no target object for skill={skill_key}")
-            return False
-        affordance = _find_affordance(target_obj, rule)
-        if affordance is None:
-            _dbg(f"{sim}: FAIL no affordance for skill={skill_key} target={_get_object_label(target_obj)}")
-            return False
-        pushed = _push_affordance(sim, target_obj, affordance, reason=skill_key, force=force)
-        if not pushed:
-            _dbg(
-                f"{sim}: FAIL push returned False skill={skill_key} "
-                f"target={_get_object_label(target_obj)} aff={_aff_label(affordance)}"
-            )
-        return pushed
-    except Exception as exc:
-        _dbg(
-            f"{sim}: EXC push skill={skill_key} target={_get_object_label(target_obj)} "
-            f"aff={_aff_label(affordance) if 'affordance' in locals() else '<aff?>'} err={repr(exc)}"
+    target_obj = _find_target_object(sim, rule)
+    if target_obj is None:
+        _append_debug(
+            f"{sim_name}: FAIL no object for skill={skill_key} keywords={rule.get('object_keywords')}"
         )
         return False
+    affordance = _find_affordance(sim, target_obj, rule)
+    if affordance is None:
+        _append_debug(
+            f"{sim_name}: FAIL no affordance for skill={skill_key} "
+            f"object={_get_object_label(target_obj)} keywords={rule.get('affordance_keywords')}"
+        )
+        return False
+    try:
+        pushed = _push_affordance(sim, target_obj, affordance, reason=skill_key, force=True)
+    except Exception as exc:
+        _append_debug(
+            f"{sim_name}: FAIL push exception for skill={skill_key} exc={type(exc).__name__}:{exc}"
+        )
+        return False
+    if not pushed:
+        _append_debug(f"{sim_name}: FAIL push returned false for skill={skill_key}")
+        return False
+    return True
 
 
 def _sim_display_name(sim_info):
@@ -680,6 +724,10 @@ def _dbg(message):
     _DEBUG_RING.append(message)
     last_director_debug[:] = list(_DEBUG_RING)
     settings.last_director_debug = "\n".join(_DEBUG_RING)
+
+
+def _append_debug(message):
+    _dbg(message)
 
 
 def _append_action(action):
@@ -823,7 +871,7 @@ def _evaluate(now: float, force: bool = False):
             if target_obj is None:
                 _dbg(f"{sim_name}: FAIL no object for skill={skill_key}")
                 continue
-            affordance = _find_affordance(target_obj, rule)
+            affordance = _find_affordance(sim, target_obj, rule)
             if affordance is None:
                 _dbg(
                     f"{sim_name}: FAIL no affordance on object={_get_object_label(target_obj)} "
@@ -909,7 +957,7 @@ def push_skill_now(sim, skill_key: str, now: float) -> bool:
         except Exception:
             sim_name = None
     sim_name = sim_name or getattr(sim, "first_name", None) or "Sim"
-    if try_push_skill_interaction(sim, skill_key, force=True):
+    if try_push_skill_interaction(sim, skill_key):
         action = f"{sim_name} -> {skill_key} (forced)"
         _append_action(action)
         last_director_time = now

@@ -80,6 +80,7 @@ def _status_lines():
         f"director_green_motive_percent={settings.director_green_motive_percent}",
         f"director_green_min_commodities={settings.director_green_min_commodities}",
         f"director_allow_social_goals={settings.director_allow_social_goals}",
+        f"director_allow_social_wants={settings.director_allow_social_wants}",
         f"director_use_guardian_when_low={settings.director_use_guardian_when_low}",
         f"director_per_sim_cooldown_seconds={settings.director_per_sim_cooldown_seconds}",
         f"director_max_pushes_per_sim_per_hour={settings.director_max_pushes_per_sim_per_hour}",
@@ -398,103 +399,74 @@ def _probe_aspiration(output, emit_output=True):
 
     milestone = None
     milestone_source = None
-    milestone_candidates = []
-    for attr in (
-        "get_current_milestone",
-        "get_active_milestone",
-        "get_milestone",
-        "current_milestone",
-        "_current_milestone",
-        "selected_milestone",
-        "_selected_milestone",
-        "active_milestone",
-        "_active_milestone",
-        "milestone",
-        "_milestone",
-    ):
-        value = _safe_get(tracker, attr)
-        if callable(value):
-            ok, result, error = _safe_call(tracker, attr)
-            if ok and result is not None:
-                milestone = result
-                milestone_source = f"{attr}()"
-                break
-        elif value is not None:
-            milestone = value
-            milestone_source = attr
-            break
-
-    lines.append(f"milestone_source={milestone_source}")
-    lines.append(f"milestone={milestone!r}")
-    lines.append(f"milestone_type={type(milestone)}")
-    if milestone is not None:
-        milestone_candidates.append(milestone)
-
-    for name in dir(tracker):
-        if "milestone" not in name.lower():
-            continue
-        val = _safe_get(tracker, name)
-        lines.append(f"tracker.{name}={val!r} type={type(val)}")
-        if isinstance(val, (list, tuple)) and val:
-            lines.append(f"tracker.{name}[0]={val[0]!r} type={type(val[0])}")
-            milestone_candidates.append(val[0])
-        elif val is not None:
-            milestone_candidates.append(val)
+    milestone_list_candidates = []
 
     if active is not None:
         for name in dir(active):
-            if "milestone" not in name.lower():
+            try:
+                value = getattr(active, name)
+            except Exception:
                 continue
-            val = _safe_get(active, name)
-            lines.append(f"active.{name}={val!r} type={type(val)}")
-            if isinstance(val, (list, tuple)) and val:
-                lines.append(f"active.{name}[0]={val[0]!r} type={type(val[0])}")
-                milestone_candidates.append(val[0])
-            elif val is not None:
-                milestone_candidates.append(val)
+            if isinstance(value, (list, tuple)) and value:
+                first = value[0]
+                if hasattr(first, "objectives"):
+                    guid = getattr(first, "guid64", None)
+                    milestone_list_candidates.append(
+                        (name, value, len(value), type(first), guid)
+                    )
 
-    if callable(_safe_get(tracker, "get_objectives")):
-        milestone_arg = None
-        if milestone_candidates:
-            for candidate in milestone_candidates:
-                if candidate is not None:
-                    milestone_arg = candidate
-                    break
-        if milestone_arg is not None:
-            lines.append(f"get_objectives_milestone={milestone_arg!r}")
-            lines.append(f"get_objectives_milestone_type={type(milestone_arg)}")
-            ok, result, error = _safe_call(tracker, "get_objectives", milestone_arg)
-        else:
-            ok, result, error = _safe_call(tracker, "get_objectives")
+    for name, value, length, elem_type, guid in milestone_list_candidates:
+        guid_text = f" elem0_guid64={guid}" if guid is not None else ""
+        lines.append(
+            f"milestone_list_candidate=active_asp.{name} len={length} elem0_type={elem_type}{guid_text}"
+        )
+
+    if milestone_list_candidates:
+        list_name, milestone_list, _length, _elem_type, _guid = milestone_list_candidates[0]
+        idx = selected if isinstance(selected, int) else 0
+        if not isinstance(idx, int) or idx < 0 or idx >= len(milestone_list):
+            idx = 0
+        milestone = milestone_list[idx]
+        milestone_source = f"active_asp.{list_name}[{idx}]"
+
+    lines.append(f"milestone_source={milestone_source}")
+    lines.append(f"milestone_type={type(milestone)}")
+
+    if milestone is not None and callable(_safe_get(tracker, "get_objectives")):
+        lines.append(f"get_objectives_milestone_type={type(milestone)}")
+        ok, result, error = _safe_call(tracker, "get_objectives", milestone)
         if ok and result is not None:
+            lines.append(f"objectives_type={type(result)}")
             try:
                 objectives = list(result)
             except Exception:
-                objectives = result
-            if isinstance(objectives, list):
+                objectives = None
+            if objectives is not None:
                 lines.append(f"objectives_count={len(objectives)}")
-                for obj in objectives:
-                    lines.append(f"objective={obj!r}")
-                    lines.append(f"objective_type={type(obj)}")
-                    for attr in ("guid64", "tuning_guid", "completed", "progress", "_goal"):
-                        if hasattr(obj, attr):
-                            lines.append(f"  {attr}={_safe_get(obj, attr)!r}")
-            else:
-                lines.append(f"objectives={objectives!r}")
+                for obj in objectives[:10]:
+                    obj_name = (
+                        _safe_get(obj, "__name__")
+                        or _safe_get(obj, "__qualname__")
+                        or _safe_get(type(obj), "__name__")
+                        or str(obj)
+                    )
+                    lines.append(f"objective_name={obj_name}")
         elif not ok:
             lines.append(f"get_objectives()=error {error}")
 
-    latest_objective_attr = _safe_get(tracker, "latest_objective")
+    try:
+        latest_objective_attr = getattr(tracker, "latest_objective", None)
+    except Exception as exc:
+        lines.append(f"latest_objective=error {type(exc).__name__}: {exc}")
+        latest_objective_attr = None
     if latest_objective_attr is not None:
         if callable(latest_objective_attr):
             try:
                 result = latest_objective_attr()
-                lines.append(f"latest_objective={result!r}")
                 lines.append(f"latest_objective_type={type(result)}")
             except Exception as exc:
                 lines.append(f"latest_objective=error {type(exc).__name__}: {exc}")
         else:
-            lines.append(f"latest_objective={latest_objective_attr!r}")
             lines.append(f"latest_objective_type={type(latest_objective_attr)}")
 
     _append_probe_log(lines)
@@ -662,7 +634,7 @@ def _usage_lines():
         "guardian_max_pushes_per_sim_per_hour, director_enabled, director_check_seconds, "
         "director_min_safe_motive, director_per_sim_cooldown_seconds, "
         "director_green_motive_percent, director_green_min_commodities, "
-        "director_allow_social_goals, director_use_guardian_when_low, "
+        "director_allow_social_goals, director_allow_social_wants, director_use_guardian_when_low, "
         "director_max_pushes_per_sim_per_hour, director_prefer_career_skills, "
         "director_fallback_to_started_skills, director_skill_allow_list, "
         "director_skill_block_list, integrate_better_autonomy_trait, better_autonomy_trait_id",
@@ -682,7 +654,8 @@ def _handle_set(key, value, _connection, output):
 
     key = key.strip().lower()
     if key in {"auto_unpause", "allow_death", "allow_pregnancy", "guardian_enabled",
-               "director_allow_social_goals", "director_use_guardian_when_low",
+               "director_allow_social_goals", "director_allow_social_wants",
+               "director_use_guardian_when_low",
                "integrate_better_autonomy_trait"}:
         parsed = _parse_bool(value)
         if parsed is None:
@@ -795,6 +768,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         output(f"director_green_motive_percent={settings.director_green_motive_percent}")
         output(f"director_green_min_commodities={settings.director_green_min_commodities}")
         output(f"director_allow_social_goals={settings.director_allow_social_goals}")
+        output(f"director_allow_social_wants={settings.director_allow_social_wants}")
         output(f"director_use_guardian_when_low={settings.director_use_guardian_when_low}")
         output(f"last_director_called_time={last_called}")
         output(f"last_director_run_time={last_run}")

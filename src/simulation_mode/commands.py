@@ -170,8 +170,8 @@ def _get_active_sim(services):
 
 
 def _append_probe_log(lines):
-    logging_utils = importlib.import_module("simulation_mode.logging_utils")
-    logging_utils.append_lines(lines)
+    probe_log = importlib.import_module("simulation_mode.probe_log")
+    probe_log.append_probe_block(lines)
 
 
 def _probe_item_ids(item):
@@ -180,10 +180,21 @@ def _probe_item_ids(item):
         value = _safe_get(item, key)
         if value is not None:
             ids.append(f"{key}={value}")
+    name = _safe_get(item, "__name__")
+    if name is not None:
+        ids.append(f"__name__={name}")
     return ids
 
 
-def _probe_wants(output):
+def _probe_slot_attrs(slot, attrs):
+    lines = []
+    for attr in attrs:
+        if hasattr(slot, attr):
+            lines.append(f"  {attr}={_safe_get(slot, attr)!r}")
+    return lines
+
+
+def _probe_wants(output, emit_output=True):
     services = importlib.import_module("services")
     sim = _get_active_sim(services)
     sim_info = _active_sim_info()
@@ -199,83 +210,66 @@ def _probe_wants(output):
     lines.append(f"active_sim={sim!r}")
     lines.append(f"sim_info={sim_info!r}")
 
-    tracker = None
-    tracker_attr = None
-    for attr in ("wants_tracker", "wants_and_fears_tracker", "whim_tracker"):
-        candidate = _safe_get(sim_info, attr)
-        if candidate is not None:
-            tracker = candidate
-            tracker_attr = attr
-            break
+    tracker = _safe_get(sim_info, "whim_tracker")
     if tracker is None:
-        lines.append("tracker= (not found)")
+        lines.append("whim_tracker= (not found)")
         _append_probe_log(lines)
-        output("probe_wants complete; run simulation dump_log")
+        if emit_output:
+            output("probe_wants complete; run simulation dump_log")
         return True
 
-    lines.append(f"tracker_attr={tracker_attr}")
-    lines.append(f"tracker_type={type(tracker)}")
-    names = _filter_names(
-        tracker,
-        ("want", "whim", "fear", "active", "slot", "refresh", "roll", "tracker"),
-    )
-    if names:
-        lines.append("tracker_members:")
-        for name in names:
-            lines.append(f"- {name}")
-    else:
-        lines.append("tracker_members=")
-
-    want_sources = (
-        ("call", "get_active_wants"),
-        ("call", "get_wants"),
-        ("attr", "active_wants"),
-        ("attr", "wants"),
-    )
-    wants_value = None
-    for kind, name in want_sources:
-        if kind == "call":
-            ok, result, error = _safe_call(tracker, name)
-            if ok and result is not None:
-                wants_value = result
-                lines.append(f"wants_source={name}()")
-                break
-            if not ok:
-                lines.append(f"wants_source_error={name}(): {error}")
-        else:
-            result = _safe_get(tracker, name)
-            if result is not None:
-                wants_value = result
-                lines.append(f"wants_source={name}")
-                break
-
-    if wants_value is None:
-        lines.append("active_wants= (none)")
+    lines.append(f"whim_tracker_type={type(tracker)}")
+    if callable(_safe_get(tracker, "refresh_whims")):
+        lines.append("refresh_whims=available")
+    slots = None
+    slots_gen = _safe_get(tracker, "slots_gen")
+    if callable(slots_gen):
+        try:
+            slots = list(slots_gen())
+            lines.append("whim_slots_source=slots_gen()")
+        except Exception as exc:
+            lines.append(f"whim_slots_error=slots_gen(): {type(exc).__name__}: {exc}")
+    if slots is None:
+        slots = _safe_get(tracker, "_whim_slots")
+        if slots is not None:
+            lines.append("whim_slots_source=_whim_slots")
+    if slots is None:
+        lines.append("whim_slots= (none)")
         _append_probe_log(lines)
-        output("probe_wants complete; run simulation dump_log")
+        if emit_output:
+            output("probe_wants complete; run simulation dump_log")
         return True
 
-    lines.append(f"active_wants_type={type(wants_value)}")
-    if isinstance(wants_value, (list, tuple)):
-        if not wants_value:
-            lines.append("active_wants=[]")
-        else:
-            lines.append("active_wants:")
-            for item in wants_value:
-                lines.append(f"- item={item!r}")
-                lines.append(f"  type={type(item)}")
-                ids = _probe_item_ids(item)
+    lines.append(f"whim_slots_type={type(slots)}")
+    for idx, slot in enumerate(slots):
+        lines.append(f"slot[{idx}] type={type(slot)}")
+        lines.extend(_probe_slot_attrs(
+            slot,
+            ("whim", "goal", "whim_guid", "guid", "locked", "is_locked", "is_empty"),
+        ))
+        for obj_attr in ("whim", "goal"):
+            obj = _safe_get(slot, obj_attr)
+            if obj is not None:
+                lines.append(f"  {obj_attr}={obj!r}")
+                lines.append(f"  {obj_attr}_type={type(obj)}")
+                ids = _probe_item_ids(obj)
                 if ids:
-                    lines.append(f"  ids={' '.join(ids)}")
-    else:
-        lines.append(f"active_wants_value={wants_value!r}")
+                    lines.append(f"  {obj_attr}_ids={' '.join(ids)}")
+    if callable(_safe_get(tracker, "get_active_whimset_data")):
+        ok, result, error = _safe_call(tracker, "get_active_whimset_data")
+        if ok:
+            lines.append(f"active_whimset_data={result!r}")
+            lines.append(f"active_whimset_data_type={type(result)}")
+        else:
+            lines.append(f"active_whimset_data_error={error}")
 
     _append_probe_log(lines)
-    output("probe_wants complete; run simulation dump_log")
+    if emit_output:
+        output("probe_wants complete; run simulation dump_log")
     return True
 
 
-def _probe_career(output):
+def _probe_career(output, emit_output=True):
     services = importlib.import_module("services")
     sim = _get_active_sim(services)
     sim_info = _active_sim_info()
@@ -286,7 +280,8 @@ def _probe_career(output):
     if sim is None and sim_info is None:
         lines.append("active_sim= (none)")
         _append_probe_log(lines)
-        output("probe_career complete; run simulation dump_log")
+        if emit_output:
+            output("probe_career complete; run simulation dump_log")
         return True
     lines.append(f"active_sim={sim!r}")
     lines.append(f"sim_info={sim_info!r}")
@@ -295,97 +290,63 @@ def _probe_career(output):
     if tracker is None:
         lines.append("career_tracker= (not found)")
         _append_probe_log(lines)
-        output("probe_career complete; run simulation dump_log")
+        if emit_output:
+            output("probe_career complete; run simulation dump_log")
         return True
 
     lines.append(f"career_tracker_type={type(tracker)}")
-    names = _filter_names(
-        tracker,
-        (
-            "career",
-            "current",
-            "active",
-            "level",
-            "promotion",
-            "task",
-            "performance",
-            "require",
-            "skill",
-        ),
-    )
-    if names:
-        lines.append("career_tracker_members:")
-        for name in names:
-            lines.append(f"- {name}")
+    careers_attr = _safe_get(tracker, "careers")
+    if careers_attr is not None:
+        if callable(careers_attr):
+            ok, result, error = _safe_call(tracker, "careers")
+            if ok:
+                lines.append(f"careers()={result!r}")
+            else:
+                lines.append(f"careers()=error {error}")
+        else:
+            lines.append(f"careers={careers_attr!r}")
+
+    mapping = _safe_get(tracker, "_careers")
+    if mapping is not None:
+        lines.append(f"_careers_type={type(mapping)}")
+        if hasattr(mapping, "values"):
+            try:
+                for career in mapping.values():
+                    lines.append(f"career={career!r}")
+                    lines.append(f"career_type={type(career)}")
+                    for attr in (
+                        "career_level",
+                        "level",
+                        "current_track",
+                        "track",
+                        "performance",
+                        "uid",
+                        "guid64",
+                    ):
+                        if hasattr(career, attr):
+                            lines.append(f"  {attr}={_safe_get(career, attr)!r}")
+            except Exception as exc:
+                lines.append(f"_careers_error={type(exc).__name__}: {exc}")
+        else:
+            lines.append(f"_careers_value={mapping!r}")
     else:
-        lines.append("career_tracker_members=")
+        lines.append("_careers= (none)")
 
-    career_obj = None
-    ok, result, error = _safe_call(tracker, "get_current_career")
-    if ok and result is not None:
-        career_obj = result
-        lines.append("current_career_source=get_current_career()")
-    elif not ok:
-        lines.append(f"current_career_error=get_current_career(): {error}")
-
-    if career_obj is None:
-        career_obj = _safe_get(tracker, "current_career")
-        if career_obj is not None:
-            lines.append("current_career_source=current_career")
-
-    if career_obj is None:
-        career_obj = _safe_get(tracker, "career")
-        if career_obj is not None:
-            lines.append("current_career_source=career")
-
-    if career_obj is None:
-        lines.append("current_career= (none)")
-        _append_probe_log(lines)
-        output("probe_career complete; run simulation dump_log")
-        return True
-
-    lines.append(f"current_career={career_obj!r}")
-    lines.append(f"current_career_type={type(career_obj)}")
-
-    level_names = _filter_names(career_obj, ("level", "rank"))
-    if level_names:
-        lines.append("career_level_attrs:")
-        for name in level_names:
-            value = _safe_get(career_obj, name)
-            lines.append(f"- {name}={value!r}")
-    else:
-        lines.append("career_level_attrs=")
-
-    performance_names = _filter_names(career_obj, ("performance",))
-    if performance_names:
-        lines.append("career_performance_attrs:")
-        for name in performance_names:
-            value = _safe_get(career_obj, name)
-            lines.append(f"- {name}={value!r}")
-    else:
-        lines.append("career_performance_attrs=")
-
-    allow_calls = (
-        "get_daily_tasks",
-        "get_current_tasks",
-        "get_promotion_requirements",
-        "get_promotion_tasks",
-        "get_required_skills",
-    )
-    for name in allow_calls:
-        if callable(_safe_get(career_obj, name)):
-            ok, result, error = _safe_call(career_obj, name)
+    for name in ("currently_at_work", "has_work_career", "has_career"):
+        if callable(_safe_get(tracker, name)):
+            ok, result, error = _safe_call(tracker, name)
             if ok:
                 lines.append(f"{name}()={result!r}")
             else:
                 lines.append(f"{name}()=error {error}")
 
     _append_probe_log(lines)
-    output("probe_career complete; run simulation dump_log")
+    if emit_output:
+        output("probe_career complete; run simulation dump_log")
     return True
 
 
-def _probe_aspiration(output):
+def _probe_aspiration(output, emit_output=True):
     services = importlib.import_module("services")
     sim = _get_active_sim(services)
     sim_info = _active_sim_info()
@@ -396,7 +357,8 @@ def _probe_aspiration(output):
     if sim is None and sim_info is None:
         lines.append("active_sim= (none)")
         _append_probe_log(lines)
-        output("probe_aspiration complete; run simulation dump_log")
+        if emit_output:
+            output("probe_aspiration complete; run simulation dump_log")
         return True
     lines.append(f"active_sim={sim!r}")
     lines.append(f"sim_info={sim_info!r}")
@@ -405,73 +367,70 @@ def _probe_aspiration(output):
     if tracker is None:
         lines.append("aspiration_tracker= (not found)")
         _append_probe_log(lines)
-        output("probe_aspiration complete; run simulation dump_log")
+        if emit_output:
+            output("probe_aspiration complete; run simulation dump_log")
         return True
 
     lines.append(f"aspiration_tracker_type={type(tracker)}")
-    names = _filter_names(
-        tracker,
-        (
-            "aspiration",
-            "milestone",
-            "objective",
-            "current",
-            "track",
-            "complete",
-        ),
-    )
-    if names:
-        lines.append("aspiration_tracker_members:")
-        for name in names:
-            lines.append(f"- {name}")
-    else:
-        lines.append("aspiration_tracker_members=")
+    active = _safe_get(tracker, "_active_aspiration")
+    selected = _safe_get(tracker, "_selected_aspiration")
+    lines.append(f"_active_aspiration={active!r}")
+    lines.append(f"_active_aspiration_type={type(active)}")
+    lines.append(f"_selected_aspiration={selected!r}")
+    lines.append(f"_selected_aspiration_type={type(selected)}")
 
-    aspiration_obj = None
-    ok, result, error = _safe_call(tracker, "get_active_aspiration")
-    if ok and result is not None:
-        aspiration_obj = result
-        lines.append("active_aspiration_source=get_active_aspiration()")
-    elif not ok:
-        lines.append(f"active_aspiration_error=get_active_aspiration(): {error}")
-
-    if aspiration_obj is None:
-        aspiration_obj = _safe_get(tracker, "active_aspiration")
-        if aspiration_obj is not None:
-            lines.append("active_aspiration_source=active_aspiration")
-
-    if aspiration_obj is None:
-        aspiration_obj = _safe_get(tracker, "aspiration")
-        if aspiration_obj is not None:
-            lines.append("active_aspiration_source=aspiration")
-
-    if aspiration_obj is None:
-        lines.append("active_aspiration= (none)")
-        _append_probe_log(lines)
-        output("probe_aspiration complete; run simulation dump_log")
-        return True
-
-    lines.append(f"active_aspiration={aspiration_obj!r}")
-    lines.append(f"active_aspiration_type={type(aspiration_obj)}")
-    ids = _probe_item_ids(aspiration_obj)
-    if ids:
-        lines.append(f"active_aspiration_ids={' '.join(ids)}")
-
-    allow_calls = (
-        "get_current_milestone",
-        "get_objectives",
-        "get_current_objectives",
-    )
-    for name in allow_calls:
-        if callable(_safe_get(tracker, name)):
-            ok, result, error = _safe_call(tracker, name)
-            if ok:
-                lines.append(f"{name}()={result!r}")
+    if callable(_safe_get(tracker, "get_objectives")):
+        ok, result, error = _safe_call(tracker, "get_objectives")
+        if ok and result is not None:
+            try:
+                objectives = list(result)
+            except Exception:
+                objectives = result
+            if isinstance(objectives, list):
+                lines.append(f"objectives_count={len(objectives)}")
+                for obj in objectives:
+                    lines.append(f"objective={obj!r}")
+                    lines.append(f"objective_type={type(obj)}")
+                    for attr in ("guid64", "tuning_guid", "completed", "progress", "_goal"):
+                        if hasattr(obj, attr):
+                            lines.append(f"  {attr}={_safe_get(obj, attr)!r}")
             else:
-                lines.append(f"{name}()=error {error}")
+                lines.append(f"objectives={objectives!r}")
+        elif not ok:
+            lines.append(f"get_objectives()=error {error}")
+
+    if callable(_safe_get(tracker, "latest_objective")):
+        ok, result, error = _safe_call(tracker, "latest_objective")
+        if ok:
+            lines.append(f"latest_objective={result!r}")
+            lines.append(f"latest_objective_type={type(result)}")
+        else:
+            lines.append(f"latest_objective()=error {error}")
 
     _append_probe_log(lines)
-    output("probe_aspiration complete; run simulation dump_log")
+    if emit_output:
+        output("probe_aspiration complete; run simulation dump_log")
+    return True
+
+
+def _probe_all(output):
+    services = importlib.import_module("services")
+    sim = _get_active_sim(services)
+    sim_info = _active_sim_info()
+    header = [
+        "=" * 60,
+        "PROBE ALL",
+        f"active_sim={sim!r}",
+        f"sim_info={sim_info!r}",
+        "SECTION=WANTS",
+    ]
+    _append_probe_log(header)
+    _probe_wants(output, emit_output=False)
+    _append_probe_log(["SECTION=CAREER"])
+    _probe_career(output, emit_output=False)
+    _append_probe_log(["SECTION=ASPIRATION"])
+    _probe_aspiration(output, emit_output=False)
+    output("Probe complete. See simulation-mode-probe.log")
     return True
 
 
@@ -602,6 +561,7 @@ def _usage_lines():
         "simulation director_takeover <skill_key>",
         "simulation configpath",
         "simulation dump_log",
+        "simulation probe_all",
         "simulation probe_wants",
         "simulation probe_career",
         "simulation probe_aspiration",
@@ -896,6 +856,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "probe_aspiration":
         return _probe_aspiration(output)
+
+    if action_key == "probe_all":
+        return _probe_all(output)
 
     if action_key == "dump_log":
         dumper = importlib.import_module("simulation_mode.log_dump")

@@ -29,6 +29,7 @@ KNOWN_DEFAULTS = [
     ("director_green_motive_percent", "0.50"),
     ("director_green_min_commodities", "6"),
     ("director_allow_social_goals", "false"),
+    ("director_allow_social_wants", "true"),
     ("director_use_guardian_when_low", "true"),
     ("director_per_sim_cooldown_seconds", "300"),
     ("director_max_pushes_per_sim_per_hour", "12"),
@@ -81,6 +82,9 @@ def _build_default_template_text():
     )
     lines.append(
         "director_allow_social_goals={}".format(defaults["director_allow_social_goals"])
+    )
+    lines.append(
+        "director_allow_social_wants={}".format(defaults["director_allow_social_wants"])
     )
     lines.append(
         "director_use_guardian_when_low={}".format(defaults["director_use_guardian_when_low"])
@@ -234,6 +238,7 @@ class SimulationModeSettings:
         director_green_motive_percent=0.5,
         director_green_min_commodities=6,
         director_allow_social_goals=False,
+        director_allow_social_wants=True,
         director_use_guardian_when_low=True,
         director_per_sim_cooldown_seconds=300,
         director_max_pushes_per_sim_per_hour=12,
@@ -261,6 +266,7 @@ class SimulationModeSettings:
         self.director_green_motive_percent = director_green_motive_percent
         self.director_green_min_commodities = director_green_min_commodities
         self.director_allow_social_goals = director_allow_social_goals
+        self.director_allow_social_wants = director_allow_social_wants
         self.director_use_guardian_when_low = director_use_guardian_when_low
         self.director_per_sim_cooldown_seconds = director_per_sim_cooldown_seconds
         self.director_max_pushes_per_sim_per_hour = director_max_pushes_per_sim_per_hour
@@ -498,6 +504,11 @@ def load_settings(target):
             elif key == "director_allow_social_goals":
                 if isinstance(value, bool):
                     target.director_allow_social_goals = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_allow_social_wants":
+                if isinstance(value, bool):
+                    target.director_allow_social_wants = value
                 else:
                     _log_invalid_value(key, raw_value)
             elif key == "director_use_guardian_when_low":

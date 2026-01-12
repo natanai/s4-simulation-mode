@@ -97,6 +97,10 @@ _SKILL_RULES = {
         "object_keywords": ["computer"],
         "affordance_keywords": ["troll", "mischief", "prank"],
     },
+    "acting": {
+        "object_keywords": ["mirror", "computer"],
+        "affordance_keywords": ["practice acting", "acting", "research acting", "practice"],
+    },
 }
 
 _CAREER_TO_SKILLS = {
@@ -110,6 +114,7 @@ _CAREER_TO_SKILLS = {
     "Astronaut": ["fitness", "logic"],
     "Scientist": ["logic"],
     "Business": ["charisma"],
+    "ActorCareer": ["acting", "charisma"],
 }
 
 _WHIM_RULES = {
@@ -135,6 +140,14 @@ _WHIM_RULES = {
             "stationary",
         ],
         "affordance_keywords": ["workout", "practice", "train", "jog"],
+    },
+    "admire_art": {
+        "object_keywords": ["painting", "sculpture", "art", "museum", "gallery"],
+        "affordance_keywords": ["view", "admire", "appraise", "look", "study"],
+    },
+    "hug": {
+        "target_type": "sim",
+        "affordance_keywords": ["hug"],
     },
 }
 
@@ -306,9 +319,31 @@ def _choose_career_skill(sim_info):
     career_tracker = getattr(sim_info, "career_tracker", None)
     career = None
     if career_tracker is not None:
-        career = getattr(career_tracker, "career_current", None)
+        career = getattr(career_tracker, "career_current", None) or getattr(
+            career_tracker, "current_career", None
+        )
         if career is None:
-            career = getattr(career_tracker, "current_career", None)
+            careers_dict = getattr(career_tracker, "_careers", None)
+            if isinstance(careers_dict, dict) and careers_dict:
+                candidates = [candidate for candidate in careers_dict.values() if candidate is not None]
+                if any(
+                    callable(getattr(candidate, "is_work_career", None))
+                    for candidate in candidates
+                ):
+                    work_candidates = [
+                        candidate
+                        for candidate in candidates
+                        if candidate is not None
+                        and callable(getattr(candidate, "is_work_career", None))
+                        and candidate.is_work_career()
+                    ]
+                    if work_candidates:
+                        candidates = work_candidates
+                if candidates:
+                    career = max(
+                        candidates,
+                        key=lambda candidate: (getattr(candidate, "level", 0) or 0),
+                    )
     career_name = ""
     career_guid = None
     if career is not None:
@@ -473,6 +508,11 @@ def get_active_want_targets(sim_info):
 
 def _resolve_whim_rule(whim_name: str):
     lowered = (whim_name or "").lower()
+    normalized = _norm(whim_name)
+    if "hug" in normalized:
+        return "hug"
+    if "admireart" in normalized or ("admire" in normalized and "art" in normalized):
+        return "admire_art"
     if "fun" in lowered or "have fun" in lowered:
         return "fun"
     if "friendly" in lowered or "social" in lowered or "be friendly" in lowered:
@@ -482,26 +522,72 @@ def _resolve_whim_rule(whim_name: str):
     return None
 
 
-def _select_want_target(sim_info):
+def _select_want_targets(sim_info):
     wants = get_active_want_targets(sim_info)
     if not wants:
-        return None, "WANT unavailable (no active wants or wants disabled)"
-    non_social_rule = None
-    social_rule = None
+        return [], "WANT unavailable (no active wants or wants disabled)"
+    non_social_rules = []
+    social_rules = []
     for want in wants:
         want_name = _extract_whim_name(want)
         rule_key = _resolve_whim_rule(want_name)
         if rule_key is None:
             continue
-        if rule_key == "social":
-            social_rule = (rule_key, want_name, want)
+        if rule_key in {"social", "hug"}:
+            social_rules.append((rule_key, want_name, want))
             continue
-        if non_social_rule is None:
-            non_social_rule = (rule_key, want_name, want)
-    selected = non_social_rule or social_rule
-    if selected is None:
-        return None, "WANT no supported target"
-    return selected, None
+        non_social_rules.append((rule_key, want_name, want))
+    candidates = non_social_rules + social_rules
+    if not candidates:
+        return [], "WANT no supported target"
+    return candidates, None
+
+
+def _same_lot(sim, other_sim):
+    if sim is None or other_sim is None:
+        return False
+    sim_zone = getattr(sim, "zone_id", None)
+    other_zone = getattr(other_sim, "zone_id", None)
+    if sim_zone is None or other_zone is None:
+        return True
+    return sim_zone == other_zone
+
+
+def _find_target_sim(sim):
+    sim_info = getattr(sim, "sim_info", None)
+    household = getattr(sim_info, "household", None) if sim_info is not None else None
+    if household is not None:
+        try:
+            for other_info in list(household):
+                if other_info is None or other_info is sim_info:
+                    continue
+                other_sim = other_info.get_sim_instance()
+                if other_sim is None:
+                    continue
+                if _same_lot(sim, other_sim):
+                    return other_sim
+        except Exception:
+            pass
+
+    sim_manager = None
+    try:
+        sim_manager = services.sim_info_manager()
+    except Exception:
+        sim_manager = None
+    if sim_manager is None:
+        return None
+    try:
+        for other_info in sim_manager.get_all():
+            if other_info is None or other_info is sim_info:
+                continue
+            other_sim = other_info.get_sim_instance()
+            if other_sim is None:
+                continue
+            if _same_lot(sim, other_sim):
+                return other_sim
+    except Exception:
+        return None
+    return None
 
 
 def _push_want(sim, rule_key, want_name, force=False):
@@ -511,18 +597,43 @@ def _push_want(sim, rule_key, want_name, force=False):
     rule = _WHIM_RULES.get(rule_key)
     if rule is None:
         return False, "WANT no rule"
+    if rule.get("target_type") == "sim":
+        target_sim = _find_target_sim(sim)
+        if target_sim is None:
+            return False, f"WANT {rule_key} no target sim"
+        pushed, aff_name, reason = push_best_affordance(
+            sim,
+            target_sim,
+            rule.get("affordance_keywords", []),
+            force=force,
+        )
+        if not pushed:
+            if reason == "no affordance candidates":
+                return False, f"WANT {rule_key} no affordance candidates"
+            return False, f"WANT {rule_key} no affordance candidates"
+        _LAST_WANT_DETAILS = (
+            want_name,
+            _get_object_label(target_sim),
+            aff_name or "unknown",
+        )
+        return True, f"WANT {want_name}"
+
     target_obj = _find_target_object(sim, rule)
     if target_obj is None:
-        return False, f"WANT no object for {rule_key}"
+        return False, f"WANT {rule_key} no object match"
     candidates = find_affordance_candidates(
         target_obj, rule.get("affordance_keywords", []), sim=sim
     )
     if not candidates:
-        return False, f"WANT no affordance for {rule_key}"
+        return False, f"WANT {rule_key} no affordance candidates"
     affordance = candidates[0]
     pushed = _push_affordance(sim, target_obj, affordance, reason=rule_key, force=force)
     if pushed:
-        _LAST_WANT_DETAILS = (want_name, _get_object_label(target_obj), _get_affordance_label(affordance))
+        _LAST_WANT_DETAILS = (
+            want_name,
+            _get_object_label(target_obj),
+            _get_affordance_label(affordance),
+        )
     return pushed, f"WANT {want_name}"
 
 
@@ -815,39 +926,35 @@ def _evaluate(now: float, force: bool = False):
                 _dbg(f"{sim_name}: SKIP cooldown")
                 continue
 
-            want_target, want_reason = _select_want_target(sim_info)
+            want_targets, want_reason = _select_want_targets(sim_info)
             goal = None
-            if want_target is not None:
-                want_key, want_name, want_obj = want_target
-                debug_name = _extract_whim_name(want_obj)
-                debug_guid = _extract_whim_guid(want_obj)
-                if debug_guid is not None:
-                    _dbg(f"{sim_name}: WHIM picked __name__={debug_name} guid64={debug_guid}")
-                else:
+            if want_targets:
+                pushed_any = False
+                for want_key, want_name, want_obj in want_targets:
+                    debug_name = getattr(want_obj, "__name__", None) or str(want_obj)
                     _dbg(f"{sim_name}: WHIM picked __name__={debug_name}")
-                if want_key == "social":
-                    if not settings.director_allow_social_goals:
-                        _dbg(f"{sim_name}: WANT social disabled")
-                    else:
-                        goal = choose_skill_goal(sim_info)
-                        if goal is None:
-                            pushed, want_message = _push_want(sim, want_key, want_name, force=force)
-                            if pushed:
-                                _record_push(sim_id, now)
-                                action = f"{sim_name} -> WANT {want_name}"
-                                _append_action(action)
-                                last_director_time = now
-                                continue
-                            _dbg(f"{sim_name}: {want_message}")
-                else:
+                    if want_key == "social":
+                        if not settings.director_allow_social_goals:
+                            _dbg(f"{sim_name}: WANT social disabled")
+                            continue
+                    if want_key == "hug":
+                        if (
+                            hasattr(settings, "director_allow_social_wants")
+                            and not settings.director_allow_social_wants
+                        ):
+                            _dbg(f"{sim_name}: WANT hug disabled")
+                            continue
                     pushed, want_message = _push_want(sim, want_key, want_name, force=force)
                     if pushed:
                         _record_push(sim_id, now)
                         action = f"{sim_name} -> WANT {want_name}"
                         _append_action(action)
                         last_director_time = now
-                        continue
+                        pushed_any = True
+                        break
                     _dbg(f"{sim_name}: {want_message}")
+                if pushed_any:
+                    continue
             elif want_reason:
                 _dbg(f"{sim_name}: {want_reason}")
 

@@ -174,6 +174,15 @@ def _append_probe_log(lines):
     probe_log.append_probe_block(lines)
 
 
+def _append_simulation_log(lines):
+    log_dump = importlib.import_module("simulation_mode.log_dump")
+    path = log_dump.get_log_path()
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("\n".join(f"[{timestamp}] {line}" for line in lines))
+        handle.write("\n")
+
+
 def _probe_item_ids(item):
     ids = []
     for key in ("guid64", "tuning_guid", "instance_id"):
@@ -190,7 +199,15 @@ def _probe_slot_attrs(slot, attrs):
     lines = []
     for attr in attrs:
         if hasattr(slot, attr):
-            lines.append(f"  {attr}={_safe_get(slot, attr)!r}")
+            value = _safe_get(slot, attr)
+            if callable(value) and attr in {"is_locked", "is_empty"}:
+                ok, result, error = _safe_call(slot, attr)
+                if ok:
+                    lines.append(f"  {attr}={result!r}")
+                else:
+                    lines.append(f"  {attr}=error {error}")
+            else:
+                lines.append(f"  {attr}={value!r}")
     return lines
 
 
@@ -379,8 +396,42 @@ def _probe_aspiration(output, emit_output=True):
     lines.append(f"_selected_aspiration={selected!r}")
     lines.append(f"_selected_aspiration_type={type(selected)}")
 
+    milestone = None
+    milestone_source = None
+    for attr in (
+        "get_current_milestone",
+        "get_active_milestone",
+        "get_milestone",
+        "current_milestone",
+        "_current_milestone",
+        "selected_milestone",
+        "_selected_milestone",
+        "active_milestone",
+        "_active_milestone",
+        "milestone",
+        "_milestone",
+    ):
+        value = _safe_get(tracker, attr)
+        if callable(value):
+            ok, result, error = _safe_call(tracker, attr)
+            if ok and result is not None:
+                milestone = result
+                milestone_source = f"{attr}()"
+                break
+        elif value is not None:
+            milestone = value
+            milestone_source = attr
+            break
+
+    lines.append(f"milestone_source={milestone_source}")
+    lines.append(f"milestone={milestone!r}")
+    lines.append(f"milestone_type={type(milestone)}")
+
     if callable(_safe_get(tracker, "get_objectives")):
-        ok, result, error = _safe_call(tracker, "get_objectives")
+        if milestone is not None:
+            ok, result, error = _safe_call(tracker, "get_objectives", milestone)
+        else:
+            ok, result, error = _safe_call(tracker, "get_objectives")
         if ok and result is not None:
             try:
                 objectives = list(result)
@@ -399,13 +450,18 @@ def _probe_aspiration(output, emit_output=True):
         elif not ok:
             lines.append(f"get_objectives()=error {error}")
 
-    if callable(_safe_get(tracker, "latest_objective")):
-        ok, result, error = _safe_call(tracker, "latest_objective")
-        if ok:
-            lines.append(f"latest_objective={result!r}")
-            lines.append(f"latest_objective_type={type(result)}")
+    latest_objective_attr = _safe_get(tracker, "latest_objective")
+    if latest_objective_attr is not None:
+        if callable(latest_objective_attr):
+            ok, result, error = _safe_call(tracker, "latest_objective")
+            if ok:
+                lines.append(f"latest_objective={result!r}")
+                lines.append(f"latest_objective_type={type(result)}")
+            else:
+                lines.append(f"latest_objective=error {error}")
         else:
-            lines.append(f"latest_objective()=error {error}")
+            lines.append(f"latest_objective={latest_objective_attr!r}")
+            lines.append(f"latest_objective_type={type(latest_objective_attr)}")
 
     _append_probe_log(lines)
     if emit_output:
@@ -559,6 +615,7 @@ def _usage_lines():
         "simulation director_why",
         "simulation director_push <skill_key>",
         "simulation director_takeover <skill_key>",
+        "simulation guardian_now",
         "simulation configpath",
         "simulation dump_log",
         "simulation probe_all",
@@ -817,6 +874,27 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
                 output(f"- {line}")
         else:
             output("last_director_debug=")
+        return True
+
+    if action_key == "guardian_now":
+        guardian = importlib.import_module("simulation_mode.guardian")
+        sim_info = _active_sim_info()
+        if sim_info is None:
+            output("No active sim found.")
+            return True
+        now = time.time()
+        ok, message = guardian.push_self_care(
+            sim_info, now, settings.director_green_motive_percent
+        )
+        lines = [
+            "=" * 60,
+            "GUARDIAN NOW",
+            f"result={ok}",
+            f"detail={message}",
+        ]
+        _append_simulation_log(lines)
+        output(f"guardian_now result={ok}")
+        output(message)
         return True
 
     if action_key == "director_push":

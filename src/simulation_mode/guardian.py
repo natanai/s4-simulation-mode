@@ -358,7 +358,7 @@ def _attempt_care_push(sim, motive_key, force=False):
     )
 
 
-def push_self_care(sim_info, now: float, green_percent: float):
+def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: bool = False):
     sim = sim_info.get_sim_instance() if sim_info else None
     if sim is None:
         return False, "no sim instance"
@@ -377,7 +377,7 @@ def push_self_care(sim_info, now: float, green_percent: float):
         return False, "no care goal found"
 
     sim_id = _sim_identifier(sim_info)
-    if not _can_push_for_sim(sim_id, now):
+    if not _can_push_for_sim(sim_id, now, bypass_cooldown=bypass_cooldown):
         return False, "guardian cooldown"
 
     busy_state = _is_sim_busy(sim)
@@ -430,10 +430,10 @@ def last_care_details():
     return _LAST_CARE_DETAILS
 
 
-def _can_push_for_sim(sim_id, now):
+def _can_push_for_sim(sim_id, now, bypass_cooldown: bool = False):
     cooldown = settings.guardian_per_sim_cooldown_seconds
     last_push = _PER_SIM_LAST_PUSH.get(sim_id)
-    if last_push is not None and now - last_push < cooldown:
+    if not bypass_cooldown and last_push is not None and now - last_push < cooldown:
         return False
 
     history = _PER_SIM_PUSH_HISTORY.setdefault(sim_id, [])

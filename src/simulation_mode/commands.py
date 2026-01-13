@@ -572,7 +572,10 @@ def _probe_specific_want_slot(sim_info, index):
     if goal_attr:
         lines.append(f"goal_attr_source={goal_attr}")
     return lines
+
+
 def _probe_wants(output, emit_output=True):
+    director = importlib.import_module("simulation_mode.director")
     services = importlib.import_module("services")
     sim = _get_active_sim(services)
     sim_info = _active_sim_info()
@@ -588,58 +591,24 @@ def _probe_wants(output, emit_output=True):
     lines.append(f"active_sim={sim!r}")
     lines.append(f"sim_info={sim_info!r}")
 
-    tracker = _safe_get(sim_info, "whim_tracker")
-    if tracker is None:
-        lines.append("whim_tracker= (not found)")
-        _append_probe_log(None, lines)
-        if emit_output:
-            output("probe_wants complete; run simulation dump_log")
-        return True
-
-    lines.append(f"whim_tracker_type={type(tracker)}")
-    if callable(_safe_get(tracker, "refresh_whims")):
-        lines.append("refresh_whims=available")
-    slots = None
-    slots_gen = _safe_get(tracker, "slots_gen")
-    if callable(slots_gen):
-        try:
-            slots = list(slots_gen())
-            lines.append("whim_slots_source=slots_gen()")
-        except Exception as exc:
-            lines.append(f"whim_slots_error=slots_gen(): {type(exc).__name__}: {exc}")
-    if slots is None:
-        slots = _safe_get(tracker, "_whim_slots")
-        if slots is not None:
-            lines.append("whim_slots_source=_whim_slots")
-    if slots is None:
-        lines.append("whim_slots= (none)")
-        _append_probe_log(None, lines)
-        if emit_output:
-            output("probe_wants complete; run simulation dump_log")
-        return True
-
-    lines.append(f"whim_slots_type={type(slots)}")
-    for idx, slot in enumerate(slots):
-        lines.append(f"slot[{idx}] type={type(slot)}")
-        lines.extend(_probe_slot_attrs(
-            slot,
-            ("whim", "goal", "whim_guid", "guid", "locked", "is_locked", "is_empty"),
-        ))
-        for obj_attr in ("whim", "goal"):
-            obj = _safe_get(slot, obj_attr)
-            if obj is not None:
-                lines.append(f"  {obj_attr}={obj!r}")
-                lines.append(f"  {obj_attr}_type={type(obj)}")
-                ids = _probe_item_ids(obj)
-                if ids:
-                    lines.append(f"  {obj_attr}_ids={' '.join(ids)}")
-    if callable(_safe_get(tracker, "get_active_whimset_data")):
-        ok, result, error = _safe_call(tracker, "get_active_whimset_data")
-        if ok:
-            lines.append(f"active_whimset_data={result!r}")
-            lines.append(f"active_whimset_data_type={type(result)}")
-        else:
-            lines.append(f"active_whimset_data_error={error}")
+    wants = director.get_active_want_targets(sim_info)
+    lines.append(f"wants_count={len(wants)}")
+    for idx, want in enumerate(wants[:6]):
+        lines.append(f"want[{idx}] type={type(want).__name__}")
+        lines.append(f"want[{idx}] name={director._extract_whim_name(want)}")
+        for attr in ("goal", "objective", "affordance", "super_affordance", "tuning", "guid", "guid64"):
+            try:
+                value = getattr(want, attr)
+            except Exception as exc:
+                lines.append(f"  {attr}=error {type(exc).__name__}: {exc}")
+                continue
+            if callable(value):
+                try:
+                    value = value()
+                except Exception as exc:
+                    lines.append(f"  {attr}=error {type(exc).__name__}: {exc}")
+                    continue
+            lines.append(f"  {attr}={_trim_repr(value)}")
 
     _append_probe_log(None, lines)
     if emit_output:
@@ -1005,6 +974,7 @@ def _usage_lines():
         "simulation director_push <skill_key>",
         "simulation director_takeover <skill_key>",
         "simulation guardian_now [force]",
+        "simulation want_now",
         "simulation configpath",
         "simulation dump_log",
         "simulation probe_all",
@@ -1288,6 +1258,16 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _append_simulation_log(lines)
         output(f"guardian_now force={force} pushed={ok}")
         output(message)
+        return True
+
+    if action_key == "want_now":
+        director = importlib.import_module("simulation_mode.director")
+        sim_info = _active_sim_info()
+        if sim_info is None:
+            output("No active sim found.")
+            return True
+        ok, message = director._try_resolve_wants(sim_info, force=True)
+        output(f"want_now pushed={ok} detail={message}")
         return True
 
     if action_key == "director_push":

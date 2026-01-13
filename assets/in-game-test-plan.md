@@ -55,9 +55,11 @@ executes guardian/director behavior safely during live gameplay.
    * **Expected:** `last_director_actions` prints and an interaction may be queued.
 4. Run `simulation director_why`.
    * **Expected:** recent director debug lines or an empty set message.
-5. Optional: run `simulation director_push <skill_key>` on a known skill.
+5. Run `simulation want_now`.
+   * **Expected:** console prints `want_now pushed=<True|False>` and a one-line detail message.
+6. Optional: run `simulation director_push <skill_key>` on a known skill.
    * **Expected:** success/failure message plus last action/debug.
-6. Optional: run `simulation director_takeover <skill_key>` to cancel current interactions and push.
+7. Optional: run `simulation director_takeover <skill_key>` to cancel current interactions and push.
 
 ## Settings reload
 

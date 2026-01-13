@@ -94,10 +94,11 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 | `simulation director_push <skill_key>` | Push a skill interaction on the active Sim. |
 | `simulation director_takeover <skill_key>` | Cancel current interactions, then push a skill. |
 | `simulation guardian_now [force]` | Force a guardian self-care push for the active Sim. |
+| `simulation want_now` | Force the want resolver to push an active want for the active Sim. |
 | `simulation configpath` | Print the resolved `simulation-mode.txt` path and existence. |
 | `simulation dump_log` | Write a `simulation-mode.log` snapshot to disk. |
 | `simulation probe_all` | Run all probe diagnostics and report to the probe log. |
-| `simulation probe_wants` | Dump active want slots to the probe log. |
+| `simulation probe_wants` | Dump active wants to the probe log. |
 | `simulation probe_want <index>` | Inspect a specific want slot by index. |
 | `simulation probe_career` | Inspect career tuning and interactions in the probe log. |
 | `simulation probe_aspiration` | Inspect aspiration tuning and interactions in the probe log. |
@@ -126,6 +127,7 @@ Notes:
 
 * `guardian_min_motive` starts intervening when a core motive drops below this value. Motives generally range from -100..100, with yellow between -1..-50 and red below -50.
 * The Life Director nudges real skill-building interactions (no motive/skill cheating) when Sims are safe and idle.
+* Use `simulation want_now` to quickly confirm active wants can be resolved during a live session.
 * `death.toggle` is applied on enable and reasserted periodically while Simulation Mode is running.
 
 ## Life Director settings

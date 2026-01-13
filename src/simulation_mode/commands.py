@@ -170,9 +170,90 @@ def _get_active_sim(services):
     return None
 
 
-def _append_probe_log(lines):
+def _append_probe_log(title, lines):
     probe_log = importlib.import_module("simulation_mode.probe_log")
-    probe_log.append_probe_block(lines)
+    probe_log.append_probe_block(title, lines)
+
+
+def _trim_repr(value, limit=200):
+    try:
+        text = repr(value)
+    except Exception as exc:
+        text = f"<repr failed: {exc}>"
+    if text is None:
+        return ""
+    if len(text) > limit:
+        return f"{text[:limit]}..."
+    return text
+
+
+def _iter_probe_container(tracker):
+    slots_gen = _safe_get(tracker, "slots_gen")
+    if callable(slots_gen):
+        try:
+            slots = list(slots_gen())
+        except Exception:
+            slots = None
+        if slots:
+            return slots, "slots_gen()"
+    for attr in (
+        "_whim_slots",
+        "slots",
+        "active_wants",
+        "active_whims",
+        "_active_wants",
+        "_active_whims",
+    ):
+        value = _safe_get(tracker, attr)
+        if value is None:
+            continue
+        try:
+            slots = list(value)
+        except Exception:
+            continue
+        if slots:
+            return slots, attr
+    return None, None
+
+
+def _select_want_tracker(sim_info):
+    if sim_info is None:
+        return None, None
+    for token in ("want",):
+        for name in dir(sim_info):
+            if token not in name.lower():
+                continue
+            value = _safe_get(sim_info, name)
+            if value is not None:
+                return name, value
+    for token in ("whim",):
+        for name in dir(sim_info):
+            if token not in name.lower():
+                continue
+            value = _safe_get(sim_info, name)
+            if value is not None:
+                return name, value
+    return None, None
+
+
+def _find_first_attr(obj, attrs):
+    if obj is None:
+        return None, None
+    for attr in attrs:
+        if hasattr(obj, attr):
+            value = _safe_get(obj, attr)
+            if value is not None:
+                return attr, value
+    return None, None
+
+
+def _log_identifiers(lines, prefix, obj):
+    if obj is None:
+        return
+    for attr in ("guid64", "_guid64", "tuning_id", "_tuning_id", "instance_id"):
+        if hasattr(obj, attr):
+            value = _safe_get(obj, attr)
+            lines.append(f"{prefix}{attr}={value!r}")
 
 
 def _append_simulation_log(lines):
@@ -212,6 +293,285 @@ def _probe_slot_attrs(slot, attrs):
     return lines
 
 
+def _probe_siminfo_tracker_introspection(sim_info):
+    lines = []
+    if sim_info is None:
+        lines.append("sim_info= (none)")
+        return lines
+    tokens = ("want", "whim", "fear", "aspiration", "career")
+    for name in dir(sim_info):
+        lower_name = name.lower()
+        if not any(token in lower_name for token in tokens):
+            continue
+        try:
+            value = getattr(sim_info, name)
+        except Exception as exc:
+            lines.append(f"{name}=error {type(exc).__name__}: {exc}")
+            continue
+        lines.append(
+            f"{name}: type={type(value).__name__} is_none={value is None}"
+        )
+    return lines
+
+
+def _probe_active_wants_deep(sim_info):
+    lines = []
+    tracker_name, tracker = _select_want_tracker(sim_info)
+    if tracker is None:
+        lines.append("want_tracker= (not found)")
+        return lines, None, None
+    lines.append(
+        f"want_tracker_attr={tracker_name} type={type(tracker).__name__}"
+    )
+    slots, source = _iter_probe_container(tracker)
+    if not slots:
+        lines.append(f"No active wants container found on tracker={type(tracker).__name__}")
+        return lines, tracker, None
+    lines.append(f"active_wants_source={source} count={len(slots)}")
+    for idx, slot in enumerate(slots):
+        is_empty = None
+        is_locked = None
+        is_empty_attr = getattr(slot, "is_empty", None)
+        if callable(is_empty_attr):
+            try:
+                is_empty = is_empty_attr()
+            except Exception:
+                is_empty = None
+        else:
+            is_empty = is_empty_attr
+        is_locked_attr = getattr(slot, "is_locked", None)
+        if callable(is_locked_attr):
+            try:
+                is_locked = is_locked_attr()
+            except Exception:
+                is_locked = None
+        else:
+            is_locked = is_locked_attr
+        want = getattr(slot, "whim", None)
+        if want is None:
+            want = getattr(slot, "want", None)
+        if want is None:
+            want = slot
+        want_name = (
+            getattr(want, "__name__", None)
+            or getattr(want, "name", None)
+            or str(want)
+        )
+        lines.append(
+            f"slot[{idx}] slot_type={type(slot).__name__} "
+            f"is_empty={is_empty!r} is_locked={is_locked!r} "
+            f"want_type={type(want).__name__} want_name={want_name}"
+        )
+        _log_identifiers(lines, "  want.", want)
+
+        goal_attr, goal = _find_first_attr(
+            slot,
+            ("goal", "_goal", "objective", "_objective", "whim_goal", "_whim_goal"),
+        )
+        if goal is None:
+            goal_attr, goal = _find_first_attr(
+                want,
+                ("goal", "_goal", "objective", "_objective", "whim_goal", "_whim_goal"),
+            )
+        if goal is not None:
+            lines.append(
+                f"  goal_source={goal_attr} goal_type={type(goal).__name__}"
+            )
+            _log_identifiers(lines, "  goal.", goal)
+            for attr in (
+                "completed",
+                "progress",
+                "_count",
+                "_required_count",
+                "count",
+                "required_count",
+            ):
+                if hasattr(goal, attr):
+                    lines.append(f"  goal.{attr}={_safe_get(goal, attr)!r}")
+
+        aff_attr, affordance = _find_first_attr(
+            slot,
+            (
+                "affordance",
+                "super_affordance",
+                "interaction",
+                "_interaction",
+                "interaction_to_push",
+                "_super_affordance",
+                "_affordance",
+            ),
+        )
+        if affordance is None:
+            aff_attr, affordance = _find_first_attr(
+                want,
+                (
+                    "affordance",
+                    "super_affordance",
+                    "interaction",
+                    "_interaction",
+                    "interaction_to_push",
+                    "_super_affordance",
+                    "_affordance",
+                ),
+            )
+        if affordance is None and goal is not None:
+            aff_attr, affordance = _find_first_attr(
+                goal,
+                (
+                    "affordance",
+                    "super_affordance",
+                    "interaction",
+                    "_interaction",
+                    "interaction_to_push",
+                    "_super_affordance",
+                    "_affordance",
+                ),
+            )
+        if affordance is not None:
+            aff_name = getattr(affordance, "__name__", None) or str(affordance)
+            lines.append(
+                f"  affordance_source={aff_attr} aff_type={type(affordance).__name__} "
+                f"aff_name={aff_name}"
+            )
+            _log_identifiers(lines, "  aff.", affordance)
+
+        tests_attr, tests = _find_first_attr(
+            goal,
+            ("tests", "_tests", "test_set", "_test_set", "goal_tests", "_goal_tests"),
+        )
+        if tests is None:
+            tests_attr, tests = _find_first_attr(
+                want,
+                ("tests", "_tests", "test_set", "_test_set", "goal_tests", "_goal_tests"),
+            )
+        if tests is not None:
+            lines.append(f"  tests_source={tests_attr} tests_type={type(tests).__name__}")
+            if hasattr(tests, "__iter__") and not isinstance(tests, (str, bytes)):
+                try:
+                    for idx_test, item in enumerate(list(tests)[:5]):
+                        lines.append(
+                            f"    tests[{idx_test}] type={type(item).__name__} "
+                            f"repr={_trim_repr(item)}"
+                        )
+                except Exception:
+                    lines.append(f"    tests_repr={_trim_repr(tests)}")
+            else:
+                lines.append(f"    tests_repr={_trim_repr(tests)}")
+
+        for attr in (
+            "target_type",
+            "participant_type",
+            "participants",
+            "resolver",
+            "_target",
+            "_target_sim",
+            "target",
+            "sim_filter",
+        ):
+            if goal is not None and hasattr(goal, attr):
+                lines.append(
+                    f"  goal.{attr} type={type(_safe_get(goal, attr)).__name__} "
+                    f"repr={_trim_repr(_safe_get(goal, attr))}"
+                )
+            if hasattr(want, attr):
+                lines.append(
+                    f"  want.{attr} type={type(_safe_get(want, attr)).__name__} "
+                    f"repr={_trim_repr(_safe_get(want, attr))}"
+                )
+    return lines, tracker, slots
+
+
+def _probe_specific_want_slot(sim_info, index):
+    lines = []
+    tracker_name, tracker = _select_want_tracker(sim_info)
+    if tracker is None:
+        lines.append("want_tracker= (not found)")
+        return lines
+    lines.append(f"want_tracker_attr={tracker_name} type={type(tracker).__name__}")
+    slots, source = _iter_probe_container(tracker)
+    if not slots:
+        lines.append(f"No active wants container found on tracker={type(tracker).__name__}")
+        return lines
+    lines.append(f"active_wants_source={source} count={len(slots)}")
+    if index < 0 or index >= len(slots):
+        lines.append(f"probe_want_index_error=index {index} out of range")
+        return lines
+    slot = slots[index]
+    is_empty = None
+    is_locked = None
+    is_empty_attr = getattr(slot, "is_empty", None)
+    if callable(is_empty_attr):
+        try:
+            is_empty = is_empty_attr()
+        except Exception:
+            is_empty = None
+    else:
+        is_empty = is_empty_attr
+    is_locked_attr = getattr(slot, "is_locked", None)
+    if callable(is_locked_attr):
+        try:
+            is_locked = is_locked_attr()
+        except Exception:
+            is_locked = None
+    else:
+        is_locked = is_locked_attr
+    lines.append(
+        f"slot[{index}] slot_type={type(slot).__name__} "
+        f"is_empty={is_empty!r} is_locked={is_locked!r}"
+    )
+    want = getattr(slot, "whim", None)
+    if want is None:
+        want = getattr(slot, "want", None)
+    if want is None:
+        want = slot
+    want_name = (
+        getattr(want, "__name__", None)
+        or getattr(want, "name", None)
+        or str(want)
+    )
+    lines.append(
+        f"want_type={type(want).__name__} want_name={want_name}"
+    )
+    _log_identifiers(lines, "want.", want)
+    goal_attr, goal = _find_first_attr(
+        slot,
+        ("goal", "_goal", "objective", "_objective", "whim_goal", "_whim_goal"),
+    )
+    if goal is None:
+        goal_attr, goal = _find_first_attr(
+            want,
+            ("goal", "_goal", "objective", "_objective", "whim_goal", "_whim_goal"),
+        )
+    if goal is not None:
+        lines.append(f"goal_type={type(goal).__name__}")
+        _log_identifiers(lines, "goal.", goal)
+    filter_tokens = (
+        "goal",
+        "objective",
+        "test",
+        "afford",
+        "interaction",
+        "target",
+        "participant",
+        "progress",
+        "count",
+    )
+    lines.append(f"probe_want_slot_index={index}")
+    for label, obj in (("want", want), ("goal", goal)):
+        if obj is None:
+            lines.append(f"{label}_details= (none)")
+            continue
+        lines.append(f"{label}_details_type={type(obj).__name__}")
+        for name in dir(obj):
+            if not any(token in name.lower() for token in filter_tokens):
+                continue
+            value = _safe_get(obj, name)
+            lines.append(
+                f"  {label}.{name} type={type(value).__name__} repr={_trim_repr(value)}"
+            )
+    if goal_attr:
+        lines.append(f"goal_attr_source={goal_attr}")
+    return lines
 def _probe_wants(output, emit_output=True):
     services = importlib.import_module("services")
     sim = _get_active_sim(services)
@@ -222,7 +582,7 @@ def _probe_wants(output, emit_output=True):
     ]
     if sim is None and sim_info is None:
         lines.append("active_sim= (none)")
-        _append_probe_log(lines)
+        _append_probe_log(None, lines)
         output("probe_wants complete; run simulation dump_log")
         return True
     lines.append(f"active_sim={sim!r}")
@@ -231,7 +591,7 @@ def _probe_wants(output, emit_output=True):
     tracker = _safe_get(sim_info, "whim_tracker")
     if tracker is None:
         lines.append("whim_tracker= (not found)")
-        _append_probe_log(lines)
+        _append_probe_log(None, lines)
         if emit_output:
             output("probe_wants complete; run simulation dump_log")
         return True
@@ -253,7 +613,7 @@ def _probe_wants(output, emit_output=True):
             lines.append("whim_slots_source=_whim_slots")
     if slots is None:
         lines.append("whim_slots= (none)")
-        _append_probe_log(lines)
+        _append_probe_log(None, lines)
         if emit_output:
             output("probe_wants complete; run simulation dump_log")
         return True
@@ -281,7 +641,7 @@ def _probe_wants(output, emit_output=True):
         else:
             lines.append(f"active_whimset_data_error={error}")
 
-    _append_probe_log(lines)
+    _append_probe_log(None, lines)
     if emit_output:
         output("probe_wants complete; run simulation dump_log")
     return True
@@ -297,7 +657,7 @@ def _probe_career(output, emit_output=True):
     ]
     if sim is None and sim_info is None:
         lines.append("active_sim= (none)")
-        _append_probe_log(lines)
+        _append_probe_log(None, lines)
         if emit_output:
             output("probe_career complete; run simulation dump_log")
         return True
@@ -307,7 +667,7 @@ def _probe_career(output, emit_output=True):
     tracker = _safe_get(sim_info, "career_tracker")
     if tracker is None:
         lines.append("career_tracker= (not found)")
-        _append_probe_log(lines)
+        _append_probe_log(None, lines)
         if emit_output:
             output("probe_career complete; run simulation dump_log")
         return True
@@ -358,7 +718,7 @@ def _probe_career(output, emit_output=True):
             else:
                 lines.append(f"{name}()=error {error}")
 
-    _append_probe_log(lines)
+    _append_probe_log(None, lines)
     if emit_output:
         output("probe_career complete; run simulation dump_log")
     return True
@@ -374,7 +734,7 @@ def _probe_aspiration(output, emit_output=True):
     ]
     if sim is None and sim_info is None:
         lines.append("active_sim= (none)")
-        _append_probe_log(lines)
+        _append_probe_log(None, lines)
         if emit_output:
             output("probe_aspiration complete; run simulation dump_log")
         return True
@@ -384,7 +744,7 @@ def _probe_aspiration(output, emit_output=True):
     tracker = _safe_get(sim_info, "aspiration_tracker")
     if tracker is None:
         lines.append("aspiration_tracker= (not found)")
-        _append_probe_log(lines)
+        _append_probe_log(None, lines)
         if emit_output:
             output("probe_aspiration complete; run simulation dump_log")
         return True
@@ -469,7 +829,7 @@ def _probe_aspiration(output, emit_output=True):
         else:
             lines.append(f"latest_objective_type={type(latest_objective_attr)}")
 
-    _append_probe_log(lines)
+    _append_probe_log(None, lines)
     if emit_output:
         output("probe_aspiration complete; run simulation dump_log")
     return True
@@ -484,15 +844,38 @@ def _probe_all(output):
         "PROBE ALL",
         f"active_sim={sim!r}",
         f"sim_info={sim_info!r}",
-        "SECTION=WANTS",
     ]
-    _append_probe_log(header)
-    _probe_wants(output, emit_output=False)
-    _append_probe_log(["SECTION=CAREER"])
+    _append_probe_log(None, header)
+    _append_probe_log(
+        "A) SIMINFO TRACKER INTROSPECTION",
+        _probe_siminfo_tracker_introspection(sim_info),
+    )
+    deep_lines, _tracker, _slots = _probe_active_wants_deep(sim_info)
+    _append_probe_log("B) ACTIVE WANTS / WHIMS (DEEP DUMP)", deep_lines)
+    _append_probe_log("C) CAREER SUMMARY", [])
     _probe_career(output, emit_output=False)
-    _append_probe_log(["SECTION=ASPIRATION"])
+    _append_probe_log("D) ASPIRATION SUMMARY", [])
     _probe_aspiration(output, emit_output=False)
     output("Probe complete. See simulation-mode-probe.log")
+    return True
+
+
+def _probe_want(output, index):
+    services = importlib.import_module("services")
+    _sim = _get_active_sim(services)
+    sim_info = _active_sim_info()
+    try:
+        idx = int(index)
+    except Exception:
+        output("probe_want requires a numeric index")
+        return True
+    lines = [
+        "=" * 60,
+        f"PROBE WANT index={idx}",
+    ]
+    lines.extend(_probe_specific_want_slot(sim_info, idx))
+    _append_probe_log(None, lines)
+    output("probe_want complete; run simulation dump_log")
     return True
 
 
@@ -625,6 +1008,7 @@ def _usage_lines():
         "simulation configpath",
         "simulation dump_log",
         "simulation probe_all",
+        "simulation probe_want <index>",
         "simulation probe_wants",
         "simulation probe_career",
         "simulation probe_aspiration",
@@ -937,6 +1321,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "probe_wants":
         return _probe_wants(output)
+
+    if action_key == "probe_want":
+        return _probe_want(output, key)
 
     if action_key == "probe_career":
         return _probe_career(output)

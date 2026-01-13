@@ -17,6 +17,10 @@ def append_probe_line(line: str):
         handle.write(f"[{timestamp}] {line}\n")
 
 
+def log_probe(line: str):
+    append_probe_line(line)
+
+
 def append_probe_block(title, lines):
     if title:
         block_lines = [str(title)]

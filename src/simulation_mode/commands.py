@@ -1238,12 +1238,22 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "want_now":
         director = importlib.import_module("simulation_mode.director")
+        probe_log = importlib.import_module("simulation_mode.probe_log")
         sim_info = _active_sim_info()
         if sim_info is None:
             output("No active sim found.")
             return True
+        sim_name = director._sim_display_name(sim_info)
+        sim_id = director._sim_identifier(sim_info)
+        probe_log.log_probe("=" * 60)
+        probe_log.log_probe(f"WANT_NOW start sim={sim_name} sim_id={sim_id}")
         ok, message = director._try_resolve_wants(sim_info, force=True)
-        output(f"want_now pushed={ok} detail={message}")
+        probe_log.log_probe(f"WANT_NOW end result={'SUCCESS' if ok else 'FAIL'}")
+        output(
+            "want_now result={} probe_log={}".format(
+                "SUCCESS" if ok else "FAIL", probe_log.get_probe_log_path()
+            )
+        )
         return True
 
     if action_key == "director_push":

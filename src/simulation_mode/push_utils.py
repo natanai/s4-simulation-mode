@@ -1,3 +1,5 @@
+import importlib
+import importlib.util
 import inspect
 
 from interactions.context import (
@@ -23,6 +25,34 @@ _MOOD_LOCK_TOKENS = (
     "scared",
     "dazed",
 )
+
+
+_PICKER_SUPER_INTERACTION = None
+_PICKER_SPEC = importlib.util.find_spec("interactions.base.picker_interaction")
+if _PICKER_SPEC is not None:
+    _picker_module = importlib.import_module("interactions.base.picker_interaction")
+    _PICKER_SUPER_INTERACTION = getattr(_picker_module, "PickerSuperInteraction", None)
+
+
+def is_picker_affordance(affordance):
+    if affordance is None:
+        return False
+    if _PICKER_SUPER_INTERACTION is not None:
+        try:
+            if inspect.isclass(affordance) and issubclass(
+                affordance, _PICKER_SUPER_INTERACTION
+            ):
+                return True
+        except Exception:
+            pass
+    if hasattr(affordance, "picker_dialog"):
+        return True
+    name = (
+        getattr(affordance, "__name__", None)
+        or getattr(affordance, "__qualname__", None)
+        or ""
+    )
+    return "picker" in name.lower()
 
 
 def get_first_client():

@@ -1,3 +1,4 @@
+import inspect
 import re
 import time
 from collections import deque
@@ -10,11 +11,14 @@ import services
 
 from simulation_mode import clock_utils
 from simulation_mode import guardian
+from simulation_mode import probe_log
 from simulation_mode.push_utils import (
     affordance_name,
     call_push_super_affordance,
     find_affordance_candidates,
+    is_picker_affordance,
     iter_objects,
+    iter_super_affordances,
     make_interaction_context,
 )
 from simulation_mode.settings import settings
@@ -577,43 +581,15 @@ def _resolve_sim_instance_by_id(sim_id):
 def try_push_social_interaction(sim, target_sim):
     if sim is None or target_sim is None:
         return False
-    # Prefer low-risk friendly socials that exist across many packs
-    keywords = [
-        "chat",
-        "talk",
-        "friendly",
-        "get_to_know",
-        "get to know",
-        "ask",
-        "compliment",
-        "joke",
-        "discuss",
-        "brighten",
-        "deep",
-        "talk about",
-    ]
-    candidates = find_affordance_candidates(target_sim, keywords, sim=sim)
-    if not candidates:
+    affordance = _select_social_affordance(sim, target_sim, prefer_romance=False)
+    if affordance is None:
         return False
-    # Filter obvious debug/cheat
-    filtered = []
-    for aff in candidates:
-        try:
-            if _is_blocked_want_affordance(aff):
-                continue
-        except Exception:
-            pass
-        filtered.append(aff)
-    if not filtered:
-        return False
-
-    aff = filtered[0]
     context, _client_attached = make_interaction_context(sim, force=False)
-    ok, reason, sig = call_push_super_affordance(sim, aff, target_sim, context)
+    ok, reason, sig = call_push_super_affordance(sim, affordance, target_sim, context)
     if ok:
         _append_debug(
             f"{_sim_display_name(getattr(sim, 'sim_info', None))}: "
-            f"WANT social -> pushed {affordance_name(aff)} on sim_target={target_sim}"
+            f"WANT social -> pushed {affordance_name(affordance)} on sim_target={target_sim}"
         )
         return True
     _append_debug(
@@ -621,6 +597,44 @@ def try_push_social_interaction(sim, target_sim):
         f"WANT social push failed reason={reason} sig={sig}"
     )
     return False
+
+
+def _collect_social_affordances(sim, target_sim):
+    if sim is None or target_sim is None:
+        return []
+    candidates = []
+    getter = getattr(sim, "get_valid_interactions_for_target", None)
+    if callable(getter):
+        try:
+            result = getter(target_sim)
+            if result:
+                candidates.extend(result)
+        except Exception:
+            pass
+    if not candidates:
+        candidates.extend(iter_super_affordances(target_sim, sim=sim))
+    return list(dict.fromkeys(candidates))
+
+
+def _select_social_affordance(sim, target_sim, prefer_romance=False):
+    candidates = _collect_social_affordances(sim, target_sim)
+    if not candidates:
+        return None
+    keywords = ["romance", "flirt"] if prefer_romance else ["chat", "talk", "social", "friendly"]
+    for aff in candidates:
+        try:
+            name = affordance_name(aff)
+        except Exception:
+            continue
+        if is_picker_affordance(aff):
+            continue
+        if _is_blocked_want_affordance(aff):
+            continue
+        if "mentor" in name or "offer" in name or "picker" in name:
+            continue
+        if any(keyword in name for keyword in keywords):
+            return aff
+    return None
 
 
 def _resolve_whim_tuning_by_guid64(guid64):
@@ -949,6 +963,24 @@ def _find_target_sim(sim):
     return None
 
 
+def _resolve_whim_target_sim_instance(target_id):
+    if not target_id:
+        return None
+    try:
+        obj_mgr = services.object_manager()
+    except Exception:
+        obj_mgr = None
+    if obj_mgr is None:
+        return None
+    getter = getattr(obj_mgr, "get", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter(target_id)
+    except Exception:
+        return None
+
+
 def _is_same_zone(sim_info, other_sim_info):
     if sim_info is None or other_sim_info is None:
         return False
@@ -959,12 +991,16 @@ def _is_same_zone(sim_info, other_sim_info):
     return sim_zone == other_zone
 
 
-def _push_want(sim, rule_key, want_name, want_obj=None, force=False):
+def _push_want(sim, rule_key, want_name, want_obj=None, force=False, return_details=False):
     global _LAST_WANT_DETAILS
+    details = {"resolution_type": "FAIL"} if return_details else None
     if rule_key == "skill":
         # Generic “level up any skill”: reuse existing skill selection and push
         choice = choose_skill_goal(getattr(sim, "sim_info", None))
         if not choice:
+            if return_details:
+                details["failure_reason"] = "no skill goal available"
+                return False, "WANT no skill goal available", details
             return False, "WANT no skill goal available"
         # choose_skill_goal returns (skill_key, reason)
         if isinstance(choice, (tuple, list)) and len(choice) >= 1:
@@ -974,22 +1010,38 @@ def _push_want(sim, rule_key, want_name, want_obj=None, force=False):
             skill_key = choice
             reason = ""
         if not skill_key:
+            if return_details:
+                details["failure_reason"] = "no skill goal available"
+                return False, "WANT no skill goal available", details
             return False, "WANT no skill goal available"
-        ok = try_push_skill_interaction(sim, skill_key, force=True)
+        ok = try_push_skill_interaction(
+            sim, skill_key, force=True, probe_details=details if return_details else None
+        )
         if ok:
-            return (
-                True,
-                f"WANT skill {skill_key} ({reason})" if reason else f"WANT skill {skill_key}",
+            message = (
+                f"WANT skill {skill_key} ({reason})" if reason else f"WANT skill {skill_key}"
             )
-        return (
-            False,
+            if return_details:
+                return True, message, details
+            return True, message
+        message = (
             f"WANT skill push failed for {skill_key} ({reason})"
             if reason
-            else f"WANT skill push failed for {skill_key}",
+            else f"WANT skill push failed for {skill_key}"
         )
+        if return_details:
+            details["failure_reason"] = message
+            return False, message, details
+        return False, message
 
     if rule_key == "clean":
-        ok = try_push_clean_interaction(sim)
+        ok = try_push_clean_interaction(sim, probe_details=details if return_details else None)
+        if return_details:
+            if ok:
+                details["resolution_type"] = "OTHER_RULE"
+                return True, None, details
+            details.setdefault("failure_reason", "WANT clean push failed")
+            return False, "WANT clean push failed", details
         return (True, None) if ok else (False, "WANT clean push failed")
 
     if (
@@ -997,69 +1049,207 @@ def _push_want(sim, rule_key, want_name, want_obj=None, force=False):
         and hasattr(settings, "director_allow_social_wants")
         and not settings.director_allow_social_wants
     ):
+        if return_details:
+            details["failure_reason"] = "WANT social disabled"
+            return False, "WANT social disabled", details
         return False, "WANT social disabled"
     if rule_key == "social":
         target_sim = None
         target_id = _get_want_target_sim_id(want_obj)
         if target_id:
-            candidate = _resolve_sim_instance_by_id(target_id)
-            if candidate is not None and _is_same_zone(
-                getattr(sim, "sim_info", None), getattr(candidate, "sim_info", None)
-            ):
-                target_sim = candidate
-
+            target_sim = _resolve_whim_target_sim_instance(target_id)
+            if target_sim is None:
+                if return_details:
+                    details["resolution_type"] = "FAIL"
+                    details["failure_reason"] = "whim_target_sim not instanced"
+                    details["target_type"] = "sim"
+                    details["target_label"] = f"id={target_id}"
+                    return False, "WANT social target not instanced", details
+                return False, "WANT social target not instanced"
         if target_sim is None:
             target_sim = _find_target_sim(sim)
+            if target_sim is None:
+                if return_details:
+                    details["resolution_type"] = "FAIL"
+                    details["failure_reason"] = "no target sim"
+                    return False, "WANT social no target sim", details
+                return False, "WANT social no target sim"
 
-        if target_sim is not None:
-            ok = try_push_social_interaction(sim, target_sim)
-            if ok:
-                return True, "WANT social"
-
-        # Fallback to existing object-based social rule behavior (phone/computer)
-        # Let the generic rule flow continue below by NOT early-returning here.
-        # If the generic rule cannot resolve, the caller will report no supported target.
+        prefer_romance = "romance" in (want_name or "").lower() or "flirt" in (
+            want_name or ""
+        ).lower()
+        candidates = _collect_social_affordances(sim, target_sim)
+        selected = None
+        if candidates:
+            keywords = ["romance", "flirt"] if prefer_romance else [
+                "chat",
+                "talk",
+                "social",
+                "friendly",
+            ]
+            for aff in candidates:
+                try:
+                    name = affordance_name(aff)
+                except Exception:
+                    continue
+                if is_picker_affordance(aff):
+                    continue
+                if _is_blocked_want_affordance(aff):
+                    continue
+                if "mentor" in name or "offer" in name or "picker" in name:
+                    continue
+                if any(keyword in name for keyword in keywords):
+                    selected = aff
+                    break
+        if selected is None:
+            if return_details:
+                details["resolution_type"] = "FAIL"
+                details["target_type"] = "sim"
+                details["target_label"] = _get_sim_probe_label(target_sim)
+                details["candidate_affordances"] = [
+                    affordance_name(aff) for aff in candidates[:30]
+                ]
+                details["failure_reason"] = "no social affordance match"
+                return False, "WANT social no affordance candidates", details
+            return False, "WANT social no affordance candidates"
+        ok, failure_reason, sig_names, _client_attached = _push_affordance_with_details(
+            sim, target_sim, selected, reason=rule_key, force=force
+        )
+        if return_details:
+            details["resolution_type"] = "SOCIAL_TARGETED"
+            details["target_type"] = "sim"
+            details["target_label"] = _get_sim_probe_label(target_sim)
+            details["push_attempts"] = [
+                {
+                    "affordance_name": affordance_name(selected),
+                    "affordance_class": _get_affordance_class_name(selected),
+                    "affordance_is_picker": is_picker_affordance(selected),
+                    "push_ok": ok,
+                    "push_sig_names": list(sig_names or []),
+                    "push_reason": failure_reason,
+                }
+            ]
+        if ok:
+            if return_details:
+                return True, "WANT social", details
+            return True, "WANT social"
+        if return_details:
+            details["failure_reason"] = failure_reason or "push returned False"
+            return False, "WANT social push failed", details
+        return False, "WANT social push failed"
     rule = _WHIM_RULES.get(rule_key)
     if rule is None:
+        if return_details:
+            details["failure_reason"] = "WANT no rule"
+            return False, "WANT no rule", details
         return False, "WANT no rule"
     if rule.get("target_type") == "sim":
         target_sim = _find_target_sim(sim)
         if target_sim is None:
+            if return_details:
+                details["failure_reason"] = f"WANT {rule_key} no target sim"
+                details["resolution_type"] = "FAIL"
+                return False, f"WANT {rule_key} no target sim", details
             return False, f"WANT {rule_key} no target sim"
         candidates = find_affordance_candidates(
             target_sim, rule.get("affordance_keywords", []), sim=sim
         )
-        candidates = [aff for aff in candidates if not _is_blocked_want_affordance(aff)]
+        candidates = [
+            aff
+            for aff in candidates
+            if not _is_blocked_want_affordance(aff) and not is_picker_affordance(aff)
+        ]
         if not candidates:
+            if return_details:
+                details["failure_reason"] = f"WANT {rule_key} no affordance candidates"
+                details["resolution_type"] = "FAIL"
+                details["target_type"] = "sim"
+                details["target_label"] = _get_sim_probe_label(target_sim)
+                return False, f"WANT {rule_key} no affordance candidates", details
             return False, f"WANT {rule_key} no affordance candidates"
         for affordance in candidates[:8]:
-            if _push_affordance(sim, target_sim, affordance, reason=rule_key, force=force):
+            ok, failure_reason, sig_names, _client_attached = _push_affordance_with_details(
+                sim, target_sim, affordance, reason=rule_key, force=force
+            )
+            if return_details:
+                details["resolution_type"] = "OTHER_RULE"
+                details["target_type"] = "sim"
+                details["target_label"] = _get_sim_probe_label(target_sim)
+                details.setdefault("push_attempts", []).append(
+                    {
+                        "affordance_name": affordance_name(affordance),
+                        "affordance_class": _get_affordance_class_name(affordance),
+                        "affordance_is_picker": is_picker_affordance(affordance),
+                        "push_ok": ok,
+                        "push_sig_names": list(sig_names or []),
+                        "push_reason": failure_reason,
+                    }
+                )
+            if ok:
                 _LAST_WANT_DETAILS = (
                     want_name,
                     _get_object_label(target_sim),
                     _get_affordance_label(affordance),
                 )
+                if return_details:
+                    return True, f"WANT {want_name}", details
                 return True, f"WANT {want_name}"
+        if return_details:
+            details["failure_reason"] = f"WANT {rule_key} no affordance candidates"
+            return False, f"WANT {rule_key} no affordance candidates", details
         return False, f"WANT {rule_key} no affordance candidates"
 
     target_obj = _find_target_object(sim, rule)
     if target_obj is None:
+        if return_details:
+            details["failure_reason"] = f"WANT {rule_key} no object match"
+            details["resolution_type"] = "FAIL"
+            return False, f"WANT {rule_key} no object match", details
         return False, f"WANT {rule_key} no object match"
     candidates = find_affordance_candidates(
         target_obj, rule.get("affordance_keywords", []), sim=sim
     )
-    candidates = [aff for aff in candidates if not _is_blocked_want_affordance(aff)]
+    candidates = [
+        aff
+        for aff in candidates
+        if not _is_blocked_want_affordance(aff) and not is_picker_affordance(aff)
+    ]
     if not candidates:
+        if return_details:
+            details["failure_reason"] = f"WANT {rule_key} no affordance candidates"
+            details["resolution_type"] = "FAIL"
+            details["target_type"] = "object"
+            details["target_label"] = _get_object_probe_label(target_obj)
+            return False, f"WANT {rule_key} no affordance candidates", details
         return False, f"WANT {rule_key} no affordance candidates"
     affordance = candidates[0]
-    pushed = _push_affordance(sim, target_obj, affordance, reason=rule_key, force=force)
-    if pushed:
+    ok, failure_reason, sig_names, _client_attached = _push_affordance_with_details(
+        sim, target_obj, affordance, reason=rule_key, force=force
+    )
+    if ok:
         _LAST_WANT_DETAILS = (
             want_name,
             _get_object_label(target_obj),
             _get_affordance_label(affordance),
         )
-    return pushed, f"WANT {want_name}"
+    if return_details:
+        details["resolution_type"] = "OTHER_RULE"
+        details["target_type"] = "object"
+        details["target_label"] = _get_object_probe_label(target_obj)
+        details["push_attempts"] = [
+            {
+                "affordance_name": affordance_name(affordance),
+                "affordance_class": _get_affordance_class_name(affordance),
+                "affordance_is_picker": is_picker_affordance(affordance),
+                "push_ok": ok,
+                "push_sig_names": list(sig_names or []),
+                "push_reason": failure_reason,
+            }
+        ]
+        if not ok:
+            details["failure_reason"] = failure_reason or "push returned False"
+        return ok, f"WANT {want_name}", details
+    return ok, f"WANT {want_name}"
 
 
 def _is_blocked_want_affordance(affordance):
@@ -1082,9 +1272,57 @@ def _try_resolve_wants(sim_info, force=False, now=None):
         rule_key = _resolve_whim_rule(want_name)
         if rule_key is None:
             continue
-        pushed, want_message = _push_want(
-            sim, rule_key, want_name, want_obj=_want_obj, force=force
+        guid64 = _get_whim_guid64(_want_obj)
+        tuning = _resolve_whim_tuning_by_guid64(guid64)
+        tuning_name = getattr(tuning, "__name__", None) if tuning is not None else None
+        whim_target_sim = _get_want_target_sim_id(_want_obj)
+        _log_probe(
+            "WANT_NOW want_label={} want_guid64={} want_tuning={} whim_target_sim={}".format(
+                want_name, guid64, tuning_name, whim_target_sim
+            )
         )
+        pushed, want_message, details = _push_want(
+            sim,
+            rule_key,
+            want_name,
+            want_obj=_want_obj,
+            force=force,
+            return_details=True,
+        )
+        resolution_type = details.get("resolution_type", "FAIL")
+        _log_probe(f"WANT_NOW resolution_type={resolution_type}")
+        if "object_scan_count" in details:
+            _log_probe(
+                "WANT_NOW object_scan_count={} object_keywords={}".format(
+                    details.get("object_scan_count"), details.get("object_keywords")
+                )
+            )
+        target_label = details.get("target_label")
+        if target_label:
+            _log_probe(
+                "WANT_NOW target_type={} target={}".format(
+                    details.get("target_type"), target_label
+                )
+            )
+        if details.get("candidate_affordances"):
+            _log_probe(
+                "WANT_NOW candidate_affordances={}".format(
+                    details.get("candidate_affordances")
+                )
+            )
+        for attempt in details.get("push_attempts", []):
+            _log_probe(
+                "WANT_NOW affordance_name={} affordance_class={} is_picker={} push_sig_names={} push_ok={} push_reason={}".format(
+                    attempt.get("affordance_name"),
+                    attempt.get("affordance_class"),
+                    attempt.get("affordance_is_picker"),
+                    attempt.get("push_sig_names"),
+                    attempt.get("push_ok"),
+                    attempt.get("push_reason"),
+                )
+            )
+        if details.get("failure_reason"):
+            _log_probe(f"WANT_NOW failure_reason={details.get('failure_reason')}")
         last_message = want_message
         if pushed:
             sim_id = _sim_identifier(sim_info)
@@ -1107,6 +1345,51 @@ def _get_object_label(obj):
             parts.append(name)
     parts.append(str(obj))
     return " ".join(part for part in parts if part).lower()
+
+
+def _get_object_probe_label(obj):
+    if obj is None:
+        return "none"
+    definition = getattr(obj, "definition", None)
+    definition_name = getattr(definition, "name", None) if definition is not None else None
+    object_id = getattr(obj, "id", None) or getattr(obj, "object_id", None)
+    pieces = []
+    if definition_name:
+        pieces.append(str(definition_name))
+    if object_id is not None:
+        pieces.append(f"id={object_id}")
+    return " ".join(pieces) or str(obj)
+
+
+def _get_sim_probe_label(sim):
+    if sim is None:
+        return "none"
+    full_name = getattr(sim, "full_name", None)
+    if callable(full_name):
+        try:
+            full_name = full_name()
+        except Exception:
+            full_name = None
+    full_name = full_name or getattr(sim, "first_name", None) or "Sim"
+    sim_id = None
+    sim_info = getattr(sim, "sim_info", None)
+    if sim_info is not None:
+        sim_id = _sim_identifier(sim_info)
+    if sim_id is None:
+        sim_id = getattr(sim, "id", None) or getattr(sim, "sim_id", None)
+    return f"{full_name} id={sim_id}" if sim_id is not None else full_name
+
+
+def _get_affordance_class_name(affordance):
+    if affordance is None:
+        return "None"
+    if inspect.isclass(affordance):
+        return affordance.__name__
+    return getattr(type(affordance), "__name__", str(affordance))
+
+
+def _log_probe(line):
+    probe_log.log_probe(line)
 
 
 def _get_affordance_label(affordance):
@@ -1148,13 +1431,13 @@ def _distance(sim, obj):
         return None
 
 
-def _find_target_object(sim, rule):
+def _find_target_object(sim, rule, objects=None):
     keywords = rule.get("object_keywords", [])
     if not keywords:
         return None
     best = None
     best_distance = None
-    for obj in iter_objects():
+    for obj in objects if objects is not None else iter_objects():
         try:
             in_inventory = getattr(obj, "is_in_inventory", None)
             if in_inventory is True:
@@ -1220,7 +1503,41 @@ def _push_affordance(sim, target_obj, affordance, reason=None, force=False):
     return False
 
 
-def try_push_skill_interaction(sim, skill_key, force=False):
+def _push_affordance_with_details(sim, target_obj, affordance, reason=None, force=False):
+    try:
+        src = InteractionSource.PIE_MENU if force else InteractionSource.SCRIPT
+    except Exception:
+        src = InteractionContext.SOURCE_PIE_MENU if force else InteractionContext.SOURCE_SCRIPT
+    context, client_attached = make_interaction_context(sim, force=force, source=src)
+    ok, failure_reason, sig_names = call_push_super_affordance(
+        sim, affordance, target_obj, context
+    )
+    if ok:
+        global _LAST_ACTION_DETAILS
+        _LAST_ACTION_DETAILS = (
+            _get_object_label(target_obj),
+            _get_affordance_label(affordance),
+        )
+        return True, None, sig_names, client_attached
+    failure_reason = failure_reason or "unknown failure"
+    sim_name = getattr(sim, "full_name", None)
+    if callable(sim_name):
+        try:
+            sim_name = sim_name()
+        except Exception:
+            sim_name = None
+    sim_name = sim_name or getattr(sim, "first_name", None) or "Sim"
+    target_class = getattr(target_obj.__class__, "__name__", "unknown")
+    aff_label = _get_affordance_label(affordance)
+    _append_debug(
+        f"{sim_name}: push failed obj_class={target_class} "
+        f"aff={aff_label} reason={failure_reason} client_attached={client_attached} "
+        f"sig_names={sig_names}"
+    )
+    return False, failure_reason, sig_names, client_attached
+
+
+def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
     sim_name = getattr(sim, "full_name", None)
     if callable(sim_name):
         try:
@@ -1232,9 +1549,15 @@ def try_push_skill_interaction(sim, skill_key, force=False):
     if rule is None:
         _append_debug(f"{sim_name}: FAIL no rule for skill={skill_key}")
         return False
-    target_obj = _find_target_object(sim, rule)
+    objects = list(iter_objects())
+    target_obj = _find_target_object(sim, rule, objects=objects)
     if target_obj is None:
-        count = len(iter_objects())
+        count = len(objects)
+        if probe_details is not None:
+            probe_details["resolution_type"] = "FAIL"
+            probe_details["object_scan_count"] = count
+            probe_details["object_keywords"] = list(rule.get("object_keywords", []))
+            probe_details["failure_reason"] = "no object match"
         _append_debug(
             f"{sim_name}: FAIL no object for skill={skill_key} "
             f"(iter_objects={count}) keywords={rule.get('object_keywords')}"
@@ -1243,14 +1566,70 @@ def try_push_skill_interaction(sim, skill_key, force=False):
     candidates = find_affordance_candidates(
         target_obj, rule.get("affordance_keywords", []), sim=sim
     )
-    if not candidates:
+    filtered = []
+    for affordance in candidates:
+        try:
+            if is_picker_affordance(affordance):
+                continue
+            name = affordance_name(affordance)
+            module_name = getattr(affordance, "__module__", "") or ""
+            if "mentor" in name or "social" in module_name.lower():
+                continue
+        except Exception:
+            continue
+        filtered.append(affordance)
+    if filtered:
+        object_def_name = ""
+        definition = getattr(target_obj, "definition", None)
+        if definition is not None:
+            object_def_name = getattr(definition, "name", "") or ""
+        object_def_name = object_def_name.lower()
+        tokens = [
+            token.lower()
+            for token in rule.get("object_keywords", []) + rule.get("affordance_keywords", [])
+            if token
+        ]
+
+        def _skill_affordance_score(aff):
+            name = affordance_name(aff)
+            score = 0
+            for token in tokens:
+                if token in name or (object_def_name and token in object_def_name):
+                    score += 1
+            return score
+
+        filtered.sort(key=_skill_affordance_score, reverse=True)
+    if probe_details is not None:
+        probe_details["resolution_type"] = "SKILL_OBJECT"
+        probe_details["object_scan_count"] = len(objects)
+        probe_details["object_keywords"] = list(rule.get("object_keywords", []))
+        probe_details["target_label"] = _get_object_probe_label(target_obj)
+        probe_details["target_type"] = "object"
+        probe_details["push_attempts"] = []
+    if not filtered:
         _append_debug(
             f"{sim_name}: FAIL no affordance for skill={skill_key} "
             f"object={_get_object_label(target_obj)} keywords={rule.get('affordance_keywords')}"
         )
+        if probe_details is not None:
+            probe_details["failure_reason"] = "no affordance candidates"
         return False
-    for affordance in candidates[:8]:
-        if _push_affordance(sim, target_obj, affordance, reason=skill_key, force=force):
+    for affordance in filtered[:8]:
+        ok, failure_reason, sig_names, _client_attached = _push_affordance_with_details(
+            sim, target_obj, affordance, reason=skill_key, force=force
+        )
+        if probe_details is not None:
+            probe_details["push_attempts"].append(
+                {
+                    "affordance_name": affordance_name(affordance),
+                    "affordance_class": _get_affordance_class_name(affordance),
+                    "affordance_is_picker": is_picker_affordance(affordance),
+                    "push_ok": ok,
+                    "push_sig_names": list(sig_names or []),
+                    "push_reason": failure_reason,
+                }
+            )
+        if ok:
             _append_debug(
                 f"{sim_name}: SUCCESS push skill={skill_key} aff={_aff_label(affordance)}"
             )
@@ -1259,10 +1638,12 @@ def try_push_skill_interaction(sim, skill_key, force=False):
             f"{sim_name}: candidate failed skill={skill_key} aff={_aff_label(affordance)}"
         )
     _append_debug(f"{sim_name}: FAIL all candidates failed for skill={skill_key}")
+    if probe_details is not None:
+        probe_details["failure_reason"] = "all candidates failed"
     return False
 
 
-def try_push_clean_interaction(sim):
+def try_push_clean_interaction(sim, probe_details=None):
     sim_name = getattr(sim, "full_name", None)
     if callable(sim_name):
         try:
@@ -1293,14 +1674,34 @@ def try_push_clean_interaction(sim):
             continue
         if not candidates:
             continue
-        aff = candidates[0]
-        context, _client_attached = make_interaction_context(sim, force=False)
-        ok, reason, sig = call_push_super_affordance(sim, aff, obj, context)
+        filtered = [aff for aff in candidates if not is_picker_affordance(aff)]
+        if not filtered:
+            continue
+        aff = filtered[0]
+        ok, reason, sig, _client_attached = _push_affordance_with_details(
+            sim, obj, aff, reason="clean", force=False
+        )
+        if probe_details is not None:
+            probe_details["resolution_type"] = "OTHER_RULE"
+            probe_details["target_type"] = "object"
+            probe_details["target_label"] = _get_object_probe_label(obj)
+            probe_details["push_attempts"] = [
+                {
+                    "affordance_name": affordance_name(aff),
+                    "affordance_class": _get_affordance_class_name(aff),
+                    "affordance_is_picker": is_picker_affordance(aff),
+                    "push_ok": ok,
+                    "push_sig_names": list(sig or []),
+                    "push_reason": reason,
+                }
+            ]
         if ok:
             _append_debug(f"{sim_name}: WANT clean -> pushed {affordance_name(aff)} on {obj}")
             return True
         _append_debug(f"{sim_name}: WANT clean push failed: {reason} sig={sig}")
     _append_debug(f"{sim_name}: WANT clean no eligible object/affordance found in zone")
+    if probe_details is not None:
+        probe_details["failure_reason"] = "no clean affordance candidates"
     return False
 
 

@@ -94,11 +94,10 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 | `simulation director_push <skill_key>` | Push a skill interaction on the active Sim. |
 | `simulation director_takeover <skill_key>` | Cancel current interactions, then push a skill. |
 | `simulation guardian_now [force]` | Force a guardian self-care push for the active Sim. |
-| `simulation want_now` | Force the want resolver to push an active want for the active Sim. |
 | `simulation configpath` | Print the resolved `simulation-mode.txt` path and existence. |
 | `simulation dump_log` | Write a `simulation-mode.log` snapshot to disk. |
 | `simulation probe_all` | Run all probe diagnostics and report to the probe log. |
-| `simulation probe_wants` | Dump active wants to the probe log. |
+| `simulation probe_wants` | Dump active want slots to the probe log. |
 | `simulation probe_want <index>` | Inspect a specific want slot by index. |
 | `simulation probe_career` | Inspect career tuning and interactions in the probe log. |
 | `simulation probe_aspiration` | Inspect aspiration tuning and interactions in the probe log. |

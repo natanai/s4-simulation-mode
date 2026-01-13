@@ -15,7 +15,6 @@ from simulation_mode.push_utils import (
     find_affordance_candidates,
     iter_objects,
     make_interaction_context,
-    push_best_affordance,
 )
 from simulation_mode.settings import settings
 
@@ -540,36 +539,75 @@ def _iter_active_whims_from_tracker(tracker):
     return active
 
 
-def get_active_want_targets(sim_info):
-    sim = sim_info.get_sim_instance() if sim_info else None
-    for source in (sim_info, sim):
-        if source is None:
-            continue
-        tracker = getattr(source, "wants_tracker", None)
-        if tracker is None:
-            tracker = getattr(source, "wants_and_fears_tracker", None)
-        if tracker is None:
-            tracker = getattr(source, "whim_tracker", None)
-        if tracker is None:
-            continue
-        active_slots = _iter_active_whims_from_tracker(tracker)
-        if active_slots is not None:
-            return active_slots
-        for attr in ("get_active_wants", "get_wants"):
-            getter = getattr(tracker, attr, None)
-            if callable(getter):
-                try:
-                    wants = list(getter())
-                except Exception:
-                    wants = []
-                return [want for want in wants if want]
-        active = getattr(tracker, "active_wants", None)
-        if active is not None:
+def _get_active_wants(sim_info):
+    """
+    Return a list of active want/whim entries for sim_info.
+    Must work with both:
+      A) tracker exposes get_current_whims() / current_whims / _current_whims
+      B) tracker exposes slots_gen() / _whim_slots (older whim-slot style)
+    """
+    if sim_info is None:
+        return []
+
+    tracker = getattr(sim_info, "whim_tracker", None) or getattr(sim_info, "_whim_tracker", None)
+    if tracker is None:
+        sim = sim_info.get_sim_instance()
+        tracker = getattr(sim, "whim_tracker", None) or getattr(sim, "_whim_tracker", None)
+
+    wants = []
+
+    if tracker is not None:
+        get_current = getattr(tracker, "get_current_whims", None)
+        if callable(get_current):
             try:
-                return list(active)
+                result = get_current()
             except Exception:
-                return []
+                result = None
+            if result:
+                try:
+                    wants = list(result)
+                except Exception:
+                    wants = [result]
+                return wants
+
+        for attr in ("current_whims", "_current_whims", "current_wants", "_current_wants"):
+            value = getattr(tracker, attr, None)
+            if isinstance(value, (list, tuple)) and value:
+                return list(value)
+
+    if tracker is not None:
+        slots_gen = getattr(tracker, "slots_gen", None)
+        if callable(slots_gen):
+            try:
+                slots = list(slots_gen())
+            except Exception:
+                slots = None
+        else:
+            slots = getattr(tracker, "_whim_slots", None)
+
+        if slots:
+            out = []
+            for slot in slots:
+                is_empty = getattr(slot, "is_empty", False)
+                is_locked = getattr(slot, "is_locked", False)
+                if is_empty or is_locked:
+                    continue
+                whim = getattr(slot, "whim", None)
+                if whim is not None:
+                    out.append(whim)
+            if out:
+                return out
+
+    for attr in ("current_whims", "_current_whims", "current_wants", "_current_wants"):
+        value = getattr(sim_info, attr, None)
+        if isinstance(value, (list, tuple)) and value:
+            return list(value)
+
     return []
+
+
+def get_active_want_targets(sim_info):
+    return _get_active_wants(sim_info)
 
 
 def _resolve_whim_rule(whim_name: str):
@@ -593,7 +631,7 @@ def _resolve_whim_rule(whim_name: str):
 
 
 def _select_want_targets(sim_info):
-    wants = get_active_want_targets(sim_info)
+    wants = _get_active_wants(sim_info)
     if not wants:
         return [], "WANT unavailable (no active wants or wants disabled)"
     non_social_rules = []
@@ -671,22 +709,21 @@ def _push_want(sim, rule_key, want_name, force=False):
         target_sim = _find_target_sim(sim)
         if target_sim is None:
             return False, f"WANT {rule_key} no target sim"
-        pushed, aff_name, reason = push_best_affordance(
-            sim,
-            target_sim,
-            rule.get("affordance_keywords", []),
-            force=force,
+        candidates = find_affordance_candidates(
+            target_sim, rule.get("affordance_keywords", []), sim=sim
         )
-        if not pushed:
-            if reason == "no affordance candidates":
-                return False, f"WANT {rule_key} no affordance candidates"
+        candidates = [aff for aff in candidates if not _is_blocked_want_affordance(aff)]
+        if not candidates:
             return False, f"WANT {rule_key} no affordance candidates"
-        _LAST_WANT_DETAILS = (
-            want_name,
-            _get_object_label(target_sim),
-            aff_name or "unknown",
-        )
-        return True, f"WANT {want_name}"
+        for affordance in candidates[:8]:
+            if _push_affordance(sim, target_sim, affordance, reason=rule_key, force=force):
+                _LAST_WANT_DETAILS = (
+                    want_name,
+                    _get_object_label(target_sim),
+                    _get_affordance_label(affordance),
+                )
+                return True, f"WANT {want_name}"
+        return False, f"WANT {rule_key} no affordance candidates"
 
     target_obj = _find_target_object(sim, rule)
     if target_obj is None:
@@ -694,6 +731,7 @@ def _push_want(sim, rule_key, want_name, force=False):
     candidates = find_affordance_candidates(
         target_obj, rule.get("affordance_keywords", []), sim=sim
     )
+    candidates = [aff for aff in candidates if not _is_blocked_want_affordance(aff)]
     if not candidates:
         return False, f"WANT {rule_key} no affordance candidates"
     affordance = candidates[0]
@@ -705,6 +743,48 @@ def _push_want(sim, rule_key, want_name, force=False):
             _get_affordance_label(affordance),
         )
     return pushed, f"WANT {want_name}"
+
+
+def _is_blocked_want_affordance(affordance):
+    label = _get_affordance_label(affordance)
+    return "cheat" in label or "debug" in label
+
+
+def _try_resolve_wants(sim_info, force=False, now=None):
+    if sim_info is None:
+        return False, "WANT unavailable (no active wants or wants disabled)"
+    sim = sim_info.get_sim_instance()
+    if sim is None:
+        return False, "WANT unavailable (no active sim)"
+    want_targets, want_reason = _select_want_targets(sim_info)
+    if not want_targets:
+        return False, want_reason or "WANT unavailable (no active wants or wants disabled)"
+    sim_name = _sim_display_name(sim_info)
+    last_message = want_reason
+    for want_key, want_name, _want_obj in want_targets:
+        if want_key == "social":
+            if not settings.director_allow_social_goals:
+                last_message = "WANT social disabled"
+                continue
+        if want_key == "hug":
+            if (
+                hasattr(settings, "director_allow_social_wants")
+                and not settings.director_allow_social_wants
+            ):
+                last_message = "WANT hug disabled"
+                continue
+        pushed, want_message = _push_want(sim, want_key, want_name, force=force)
+        last_message = want_message
+        if pushed:
+            sim_id = _sim_identifier(sim_info)
+            now = time.time() if now is None else now
+            _record_push(sim_id, now)
+            action = f"{sim_name} -> WANT {want_name}"
+            _append_action(action)
+            global last_director_time
+            last_director_time = now
+            return True, want_message
+    return False, last_message or "WANT no supported target"
 
 
 def _get_object_label(obj):

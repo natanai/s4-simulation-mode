@@ -69,29 +69,52 @@ In-game: Options → Game Options → Other → enable “Enable Custom Content 
 
 Open the cheat console and run:
 
-All commands are exposed under `simulation` (and the alias `simulation_mode`) with the
-following behaviors:
+All commands are exposed under `simulation` (and the alias `simulation_mode`).
 
-* `simulation status` — show current enablement and daemon status.
-* `simulation true` — enable Simulation Mode and start the daemon.
-* `simulation false` — disable Simulation Mode and stop the daemon.
-* `simulation reload` — reload `simulation-mode.txt` from disk and apply changes.
-* `simulation help` — print usage + available keys.
-* `simulation debug` — print daemon timing, alarm, and auto-unpause diagnostics.
-* `simulation set <key> <value>` — set a runtime setting (non-persistent).
-  * `simulation set tick 1..120` — set tick interval in seconds.
-* `simulation director` — show Life Director configuration, last run info, and motive snapshot.
-* `simulation director_gate` — print green-gate evaluation (safe-to-push check).
-* `simulation director_now` — force a Life Director run and print the last actions.
-* `simulation director_why` — dump the most recent Life Director debug lines.
-* `simulation director_push <skill_key>` — push a skill interaction on the active Sim.
-* `simulation director_takeover <skill_key>` — cancel current interactions, then push a skill.
-* `simulation configpath` — print the resolved `simulation-mode.txt` path and existence.
-* `simulation dump_log` — write a `simulation-mode.log` snapshot to disk.
-* `simulation allow_pregnancy <true|false>` — shorthand for `simulation set allow_pregnancy ...`.
-* `simulation auto_unpause <true|false>` — shorthand for `simulation set auto_unpause ...`.
-* `simulation allow_death <true|false>` — shorthand for `simulation set allow_death ...`.
-* `simulation tick <1..120>` — shorthand for `simulation set tick ...`.
+### Console command reference
+
+| Command | What it does |
+| --- | --- |
+| `simulation status` | Show enablement state, daemon status, and tick counters. |
+| `simulation true` | Enable Simulation Mode and start the daemon. |
+| `simulation false` | Disable Simulation Mode and stop the daemon. |
+| `simulation help` | Print usage plus available settings keys. |
+| `simulation reload` | Reload `simulation-mode.txt` from disk and apply changes. |
+| `simulation set <key> <value>` | Set a runtime setting (non-persistent). |
+| `simulation set tick 1..120` | Set the watchdog tick interval in seconds. |
+| `simulation tick <1..120>` | Shorthand for `simulation set tick ...`. |
+| `simulation allow_pregnancy <true|false>` | Shorthand for `simulation set allow_pregnancy ...`. |
+| `simulation auto_unpause <true|false>` | Shorthand for `simulation set auto_unpause ...`. |
+| `simulation allow_death <true|false>` | Shorthand for `simulation set allow_death ...`. |
+| `simulation debug` | Print daemon timing, alarm, and auto-unpause diagnostics. |
+| `simulation director` | Show Life Director configuration, last run info, and motive snapshot. |
+| `simulation director_gate` | Print green-gate evaluation (safe-to-push check). |
+| `simulation director_now` | Force a Life Director run and print the last actions. |
+| `simulation director_why` | Dump the most recent Life Director debug lines. |
+| `simulation director_push <skill_key>` | Push a skill interaction on the active Sim. |
+| `simulation director_takeover <skill_key>` | Cancel current interactions, then push a skill. |
+| `simulation guardian_now [force]` | Force a guardian self-care push for the active Sim. |
+| `simulation configpath` | Print the resolved `simulation-mode.txt` path and existence. |
+| `simulation dump_log` | Write a `simulation-mode.log` snapshot to disk. |
+| `simulation probe_all` | Run all probe diagnostics and report to the probe log. |
+| `simulation probe_wants` | Dump active want slots to the probe log. |
+| `simulation probe_want <index>` | Inspect a specific want slot by index. |
+| `simulation probe_career` | Inspect career tuning and interactions in the probe log. |
+| `simulation probe_aspiration` | Inspect aspiration tuning and interactions in the probe log. |
+
+### Settings keys for `simulation set`
+
+`auto_unpause`, `allow_death`, `allow_pregnancy`, `tick`, `guardian_enabled`,
+`guardian_check_seconds`, `guardian_min_motive`, `guardian_red_motive`,
+`guardian_per_sim_cooldown_seconds`, `guardian_max_pushes_per_sim_per_hour`,
+`director_enabled`, `director_check_seconds`, `director_min_safe_motive`,
+`director_green_motive_percent`, `director_green_min_commodities`,
+`director_allow_social_goals`, `director_allow_social_wants`,
+`director_use_guardian_when_low`, `director_per_sim_cooldown_seconds`,
+`director_max_pushes_per_sim_per_hour`, `director_prefer_career_skills`,
+`director_fallback_to_started_skills`, `director_skill_allow_list`,
+`director_skill_block_list`, `integrate_better_autonomy_trait`,
+`better_autonomy_trait_id`.
 
 Settings are stored in the manually editable file:
 
@@ -121,11 +144,15 @@ director_skill_block_list=
 
 ## Test plan
 
+See the full in-game plan in [`assets/in-game-test-plan.md`](assets/in-game-test-plan.md).
+
+Quick smoke checklist:
+
 1. Put `simulation-mode.ts4script` into `Mods/SimulationMode/`.
 2. Add `simulation-mode.txt` to `Mods/SimulationMode/`.
-3. Enable script mods.
+3. Enable script mods and restart.
 4. In-game, run `simulation status` (should show loaded + version if provided).
-5. Run `simulation true`.
-6. Wait 3–5 seconds; run `simulation status` again: `tick_count` should be > 0 and `daemon_running` should be `True`.
-7. Pause the game, wait 2 seconds, and confirm it unpauses. If it does not, confirm `daemon_running` is `True` and `tick_count` is increasing, then debug the clock API.
-8. Let a household Sim dip into yellow motives and confirm the guardian pushes a self-care interaction.
+5. Run `simulation true`, wait 3–5 seconds, then run `simulation status` again (confirm `tick_count` is > 0 and `daemon_running` is `True`).
+6. Run `simulation debug` and confirm `clock_speed`/alarm info are printed.
+7. Pause the game for 2 seconds and confirm it auto-unpauses (if `auto_unpause=true`).
+8. Let a Sim dip into yellow motives and confirm the guardian pushes a self-care interaction.

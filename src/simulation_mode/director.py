@@ -11,6 +11,7 @@ import services
 from simulation_mode import clock_utils
 from simulation_mode import guardian
 from simulation_mode.push_utils import (
+    affordance_name,
     call_push_super_affordance,
     find_affordance_candidates,
     iter_objects,
@@ -479,16 +480,48 @@ def choose_skill_goal(sim_info):
 
 
 def _extract_whim_name(whim):
-    for attr in ("name", "display_name", "whim_type", "whim_category"):
-        value = getattr(whim, attr, None)
-        if callable(value):
-            try:
-                value = value()
-            except Exception:
-                value = None
-        if value:
-            return str(value)
-    return str(whim) if whim is not None else ""
+    if whim is None:
+        return ""
+    # Many Sims 4 tuned instances are represented as blueprint-like objects where
+    # the stable identifier is __name__ (and sometimes __module__).
+    try:
+        n = getattr(whim, "__name__", None)
+        if n:
+            return str(n)
+    except Exception:
+        pass
+
+    # Try common “display/name” accessors
+    for attr in (
+        "name",
+        "display_name",
+        "get_display_name",
+        "get_name",
+        "ui_name",
+        "get_gsi_name",
+        "gsi_name",
+        "whim_type",
+        "whim_category",
+        "goal_name",
+        "title",
+    ):
+        try:
+            value = getattr(whim, attr, None)
+            if callable(value):
+                # Only call methods that take no args besides self
+                try:
+                    value = value()
+                except TypeError:
+                    value = None
+            if value:
+                return str(value)
+        except Exception:
+            continue
+
+    try:
+        return str(whim)
+    except Exception:
+        return ""
 
 
 def _extract_whim_guid(whim):
@@ -627,6 +660,24 @@ def _resolve_whim_rule(whim_name: str):
         return "social"
     if "exercise" in lowered or "workout" in lowered:
         return "exercise"
+    if (
+        "clean" in lowered
+        or "cleaning" in lowered
+        or "clean something" in lowered
+        or "clean up" in lowered
+        or "tidy" in lowered
+        or "mop" in lowered
+        or "wash dishes" in lowered
+        or "do laundry" in lowered
+    ):
+        return "clean"
+    if (
+        "level up" in lowered
+        or "level a skill" in lowered
+        or "any skill" in lowered
+        or "skill" in lowered
+    ):
+        return "skill"
     return None
 
 
@@ -700,6 +751,18 @@ def _find_target_sim(sim):
 
 def _push_want(sim, rule_key, want_name, force=False):
     global _LAST_WANT_DETAILS
+    if rule_key == "skill":
+        # Generic “level up any skill”: reuse existing skill selection and push
+        skill_key = choose_skill_goal(sim.sim_info)
+        if not skill_key:
+            return False, "WANT no skill goal available"
+        ok = try_push_skill_interaction(sim, skill_key, force=True)
+        return (True, None) if ok else (False, f"WANT skill push failed for {skill_key}")
+
+    if rule_key == "clean":
+        ok = try_push_clean_interaction(sim)
+        return (True, None) if ok else (False, "WANT clean push failed")
+
     if rule_key == "social" and not settings.director_allow_social_goals:
         return False, "WANT social disabled"
     rule = _WHIM_RULES.get(rule_key)
@@ -948,6 +1011,48 @@ def try_push_skill_interaction(sim, skill_key, force=False):
             f"{sim_name}: candidate failed skill={skill_key} aff={_aff_label(affordance)}"
         )
     _append_debug(f"{sim_name}: FAIL all candidates failed for skill={skill_key}")
+    return False
+
+
+def try_push_clean_interaction(sim):
+    sim_name = getattr(sim, "full_name", None)
+    if callable(sim_name):
+        try:
+            sim_name = sim_name()
+        except Exception:
+            sim_name = None
+    sim_name = sim_name or getattr(sim, "first_name", None) or "Sim"
+
+    # Scan objects and look for any viable “clean” affordance.
+    # We deliberately search affordances rather than trying to detect “dirty” state,
+    # because different object types expose different dirtiness APIs.
+    clean_aff_keywords = [
+        "clean",
+        "clean up",
+        "mop",
+        "wash",
+        "wash dishes",
+        "do laundry",
+        "laundry",
+        "throw away",
+        "take out trash",
+    ]
+
+    for obj in iter_objects():
+        try:
+            candidates = find_affordance_candidates(obj, clean_aff_keywords, sim=sim)
+        except Exception:
+            continue
+        if not candidates:
+            continue
+        aff = candidates[0]
+        context, _client_attached = make_interaction_context(sim, force=False)
+        ok, reason, sig = call_push_super_affordance(sim, aff, obj, context)
+        if ok:
+            _append_debug(f"{sim_name}: WANT clean -> pushed {affordance_name(aff)} on {obj}")
+            return True
+        _append_debug(f"{sim_name}: WANT clean push failed: {reason} sig={sig}")
+    _append_debug(f"{sim_name}: WANT clean no eligible object/affordance found in zone")
     return False
 
 

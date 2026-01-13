@@ -607,10 +607,62 @@ def _probe_wants(output, emit_output=True, emit_dump=True):
 
     wants = director.get_active_want_targets(sim_info)
     lines.append(f"wants_count={len(wants)}")
+    dir_tokens = (
+        "name",
+        "goal",
+        "objective",
+        "afford",
+        "interaction",
+        "target",
+        "test",
+        "tuning",
+        "guid",
+        "instance",
+        "whim",
+        "want",
+        "tracker",
+        "resolver",
+        "tooltip",
+        "display",
+    )
     for idx, want in enumerate(wants[:6]):
         lines.append(f"want[{idx}] type={type(want).__name__}")
         lines.append(f"want[{idx}] name={director._extract_whim_name(want)}")
-        for attr in ("goal", "objective", "affordance", "super_affordance", "tuning", "guid", "guid64"):
+        want_name = getattr(want, "__name__", None)
+        if want_name:
+            lines.append(f"want[{idx}] __name__={want_name}")
+        want_module = getattr(want, "__module__", None)
+        if want_module:
+            lines.append(f"want[{idx}] __module__={want_module}")
+        try:
+            hint_names = [
+                name
+                for name in dir(want)
+                if any(token in name.lower() for token in dir_tokens)
+            ]
+        except Exception:
+            hint_names = []
+        hint_names = sorted(hint_names)[:60]
+        lines.append(f"want[{idx}] dir_hints={', '.join(hint_names)}")
+        for attr in (
+            "goal",
+            "objective",
+            "affordance",
+            "super_affordance",
+            "tuning",
+            "guid",
+            "guid64",
+            "_goal",
+            "_objective",
+            "_affordance",
+            "_super_affordance",
+            "_tuning",
+            "_guid",
+            "_guid64",
+            "_instance_id",
+            "_whim",
+            "_want",
+        ):
             try:
                 value = getattr(want, attr)
             except Exception as exc:

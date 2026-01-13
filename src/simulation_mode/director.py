@@ -180,6 +180,9 @@ _last_motive_snapshot_by_sim = {}
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
 
+_CACHED_WHIM_MANAGER = None
+_CACHED_WHIM_TYPE_NAME = None
+
 
 def _norm(s: str) -> str:
     s = (s or "").lower()
@@ -479,47 +482,125 @@ def choose_skill_goal(sim_info):
     return _choose_career_skill(sim_info) or _choose_started_skill(sim_info)
 
 
+def _is_proto_message(obj):
+    return hasattr(obj, "DESCRIPTOR") and hasattr(obj, "ListFields")
+
+
+def _get_whim_guid64(whim):
+    if whim is None:
+        return None
+    if _is_proto_message(whim) and hasattr(whim, "whim_guid64"):
+        try:
+            return int(getattr(whim, "whim_guid64") or 0) or None
+        except Exception:
+            return None
+    for attr in ("guid64", "_guid64", "tuning_id", "_tuning_id", "instance_id"):
+        try:
+            value = getattr(whim, attr, None)
+        except Exception:
+            continue
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                value = None
+        if value is None:
+            continue
+        try:
+            guid64 = int(value)
+        except Exception:
+            continue
+        if guid64:
+            return guid64
+    return None
+
+
+def _resolve_whim_tuning_by_guid64(guid64):
+    if not guid64:
+        return None
+    import sims4.resources
+
+    global _CACHED_WHIM_MANAGER
+    global _CACHED_WHIM_TYPE_NAME
+    if _CACHED_WHIM_MANAGER is not None:
+        try:
+            inst = _CACHED_WHIM_MANAGER.get(guid64)
+        except Exception:
+            inst = None
+        if inst is not None:
+            return inst
+
+    candidates = []
+    for name in dir(sims4.resources.Types):
+        if not name.isupper():
+            continue
+        if "WHIM" not in name:
+            continue
+        candidates.append(name)
+
+    for candidate_name in candidates:
+        try:
+            type_value = getattr(sims4.resources.Types, candidate_name)
+        except Exception:
+            continue
+        try:
+            mgr = services.get_instance_manager(type_value)
+        except Exception:
+            mgr = None
+        if mgr is None:
+            continue
+        try:
+            inst = mgr.get(guid64)
+        except Exception:
+            inst = None
+        if inst is not None:
+            _CACHED_WHIM_MANAGER = mgr
+            _CACHED_WHIM_TYPE_NAME = candidate_name
+            return inst
+    return None
+
+
 def _extract_whim_name(whim):
     if whim is None:
         return ""
-    # Many Sims 4 tuned instances are represented as blueprint-like objects where
-    # the stable identifier is __name__ (and sometimes __module__).
-    try:
-        n = getattr(whim, "__name__", None)
-        if n:
-            return str(n)
-    except Exception:
-        pass
+    guid64 = _get_whim_guid64(whim)
+    tuning = _resolve_whim_tuning_by_guid64(guid64)
+    if tuning is not None:
+        return getattr(tuning, "__name__", None) or str(tuning)
 
-    # Try common “display/name” accessors
+    if _is_proto_message(whim):
+        if hasattr(whim, "whim_name") and getattr(whim, "whim_name"):
+            return f"whim_name={whim.whim_name!r}"
+        if hasattr(whim, "whim_tooltip") and getattr(whim, "whim_tooltip"):
+            return f"whim_tooltip={whim.whim_tooltip!r}"
+        if guid64:
+            return f"whim_guid64={guid64}"
+        try:
+            return repr(whim)
+        except Exception:
+            return ""
+
     for attr in (
         "name",
+        "__name__",
         "display_name",
-        "get_display_name",
-        "get_name",
-        "ui_name",
-        "get_gsi_name",
-        "gsi_name",
-        "whim_type",
-        "whim_category",
-        "goal_name",
-        "title",
+        "whim_name",
+        "whim_tooltip",
     ):
         try:
             value = getattr(whim, attr, None)
-            if callable(value):
-                # Only call methods that take no args besides self
-                try:
-                    value = value()
-                except TypeError:
-                    value = None
-            if value:
-                return str(value)
         except Exception:
             continue
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                value = None
+        if value:
+            return str(value)
 
     try:
-        return str(whim)
+        return repr(whim)
     except Exception:
         return ""
 
@@ -656,28 +737,24 @@ def _resolve_whim_rule(whim_name: str):
         return "admire_art"
     if "fun" in lowered or "have fun" in lowered:
         return "fun"
-    if "friendly" in lowered or "social" in lowered or "be friendly" in lowered:
+    if (
+        "chat" in lowered
+        or "social" in lowered
+        or "talk" in lowered
+        or "friendly" in lowered
+        or "be friendly" in lowered
+    ):
         return "social"
     if "exercise" in lowered or "workout" in lowered:
         return "exercise"
-    if (
-        "clean" in lowered
-        or "cleaning" in lowered
-        or "clean something" in lowered
-        or "clean up" in lowered
-        or "tidy" in lowered
-        or "mop" in lowered
-        or "wash dishes" in lowered
-        or "do laundry" in lowered
-    ):
+    if "clean" in lowered or "wash" in lowered or "laundry" in lowered or "scrub" in lowered:
         return "clean"
-    if (
-        "level up" in lowered
-        or "level a skill" in lowered
-        or "any skill" in lowered
-        or "skill" in lowered
-    ):
+    if "skill" in lowered or "level" in lowered or "practice" in lowered or "train" in lowered:
         return "skill"
+    if "repair" in lowered or "fix" in lowered:
+        return "repair"
+    if "cook" in lowered or "meal" in lowered or "eat" in lowered:
+        return "cook"
     return None
 
 
@@ -685,17 +762,32 @@ def _select_want_targets(sim_info):
     wants = _get_active_wants(sim_info)
     if not wants:
         return [], "WANT unavailable (no active wants or wants disabled)"
+    sim_name = getattr(sim_info, "full_name", None) if sim_info is not None else None
+    if callable(sim_name):
+        try:
+            sim_name = sim_name()
+        except Exception:
+            sim_name = None
+    sim_name = sim_name or getattr(sim_info, "first_name", None) or "Sim"
     non_social_rules = []
     social_rules = []
     for want in wants:
-        want_name = _extract_whim_name(want)
-        rule_key = _resolve_whim_rule(want_name)
+        guid64 = _get_whim_guid64(want)
+        tuning = _resolve_whim_tuning_by_guid64(guid64)
+        tuning_name = getattr(tuning, "__name__", None) if tuning is not None else None
+        label = tuning_name if tuning_name else _extract_whim_name(want)
+        rule_key = _resolve_whim_rule(label)
+        want_key = str(guid64) if guid64 else label
+        _append_debug(
+            f"{sim_name}: WANT label={label} guid64={guid64} "
+            f"tuning_type={_CACHED_WHIM_TYPE_NAME} rule={rule_key}"
+        )
         if rule_key is None:
             continue
         if rule_key in {"social", "hug"}:
-            social_rules.append((rule_key, want_name, want))
+            social_rules.append((want_key, label, want))
             continue
-        non_social_rules.append((rule_key, want_name, want))
+        non_social_rules.append((want_key, label, want))
     candidates = non_social_rules + social_rules
     if not candidates:
         return [], "WANT no supported target"
@@ -825,18 +917,21 @@ def _try_resolve_wants(sim_info, force=False, now=None):
     sim_name = _sim_display_name(sim_info)
     last_message = want_reason
     for want_key, want_name, _want_obj in want_targets:
-        if want_key == "social":
+        rule_key = _resolve_whim_rule(want_name)
+        if rule_key == "social":
             if not settings.director_allow_social_goals:
                 last_message = "WANT social disabled"
                 continue
-        if want_key == "hug":
+        if rule_key == "hug":
             if (
                 hasattr(settings, "director_allow_social_wants")
                 and not settings.director_allow_social_wants
             ):
                 last_message = "WANT hug disabled"
                 continue
-        pushed, want_message = _push_want(sim, want_key, want_name, force=force)
+        if rule_key is None:
+            continue
+        pushed, want_message = _push_want(sim, rule_key, want_name, force=force)
         last_message = want_message
         if pushed:
             sim_id = _sim_identifier(sim_info)
@@ -1176,18 +1271,23 @@ def _evaluate(now: float, force: bool = False):
                 for want_key, want_name, want_obj in want_targets:
                     debug_name = getattr(want_obj, "__name__", None) or str(want_obj)
                     _dbg(f"{sim_name}: WHIM picked __name__={debug_name}")
-                    if want_key == "social":
+                    rule_key = _resolve_whim_rule(want_name)
+                    if rule_key == "social":
                         if not settings.director_allow_social_goals:
                             _dbg(f"{sim_name}: WANT social disabled")
                             continue
-                    if want_key == "hug":
+                    if rule_key == "hug":
                         if (
                             hasattr(settings, "director_allow_social_wants")
                             and not settings.director_allow_social_wants
                         ):
                             _dbg(f"{sim_name}: WANT hug disabled")
                             continue
-                    pushed, want_message = _push_want(sim, want_key, want_name, force=force)
+                    if rule_key is None:
+                        continue
+                    pushed, want_message = _push_want(
+                        sim, rule_key, want_name, force=force
+                    )
                     if pushed:
                         _record_push(sim_id, now)
                         action = f"{sim_name} -> WANT {want_name}"

@@ -219,12 +219,20 @@ def _iter_probe_container(tracker):
 def _select_want_tracker(sim_info):
     if sim_info is None:
         return None, None
+    tracker = _safe_get(sim_info, "whim_tracker")
+    if tracker is not None:
+        return "whim_tracker", tracker
+    tracker = _safe_get(sim_info, "_whim_tracker")
+    if tracker is not None:
+        return "_whim_tracker", tracker
     for token in ("want",):
         for name in dir(sim_info):
             if token not in name.lower():
                 continue
             value = _safe_get(sim_info, name)
             if value is not None:
+                if isinstance(value, (list, tuple)) and "current" in name.lower():
+                    continue
                 return name, value
     for token in ("whim",):
         for name in dir(sim_info):
@@ -232,6 +240,8 @@ def _select_want_tracker(sim_info):
                 continue
             value = _safe_get(sim_info, name)
             if value is not None:
+                if isinstance(value, (list, tuple)) and "current" in name.lower():
+                    continue
                 return name, value
     return None, None
 
@@ -326,170 +336,34 @@ def _probe_siminfo_tracker_introspection(sim_info):
 
 
 def _probe_active_wants_deep(sim_info):
+    director = importlib.import_module("simulation_mode.director")
     lines = []
-    tracker_name, tracker = _select_want_tracker(sim_info)
-    if tracker is None:
-        lines.append("want_tracker= (not found)")
-        return lines, None, None
-    lines.append(
-        f"want_tracker_attr={tracker_name} type={type(tracker).__name__}"
-    )
-    slots, source = _iter_probe_container(tracker)
-    if not slots:
-        lines.append(f"No active wants container found on tracker={type(tracker).__name__}")
-        return lines, tracker, None
-    lines.append(f"active_wants_source={source} count={len(slots)}")
-    for idx, slot in enumerate(slots):
-        is_empty = None
-        is_locked = None
-        is_empty_attr = getattr(slot, "is_empty", None)
-        if callable(is_empty_attr):
-            try:
-                is_empty = is_empty_attr()
-            except Exception:
-                is_empty = None
-        else:
-            is_empty = is_empty_attr
-        is_locked_attr = getattr(slot, "is_locked", None)
-        if callable(is_locked_attr):
-            try:
-                is_locked = is_locked_attr()
-            except Exception:
-                is_locked = None
-        else:
-            is_locked = is_locked_attr
-        want = getattr(slot, "whim", None)
-        if want is None:
-            want = getattr(slot, "want", None)
-        if want is None:
-            want = slot
-        want_name = (
-            getattr(want, "__name__", None)
-            or getattr(want, "name", None)
-            or str(want)
-        )
+    wants = director._get_active_wants(sim_info)
+    lines.append(f"active_wants_count={len(wants)}")
+    for idx, want in enumerate(wants):
+        guid64 = director._get_whim_guid64(want)
+        tuning = director._resolve_whim_tuning_by_guid64(guid64)
+        tuning_name = getattr(tuning, "__name__", None) if tuning is not None else None
+        label = tuning_name if tuning_name else director._extract_whim_name(want)
         lines.append(
-            f"slot[{idx}] slot_type={type(slot).__name__} "
-            f"is_empty={is_empty!r} is_locked={is_locked!r} "
-            f"want_type={type(want).__name__} want_name={want_name}"
+            f"want[{idx}] guid64={guid64} tuning={tuning_name!r} "
+            f"label={label!r} type={type(want).__name__}"
         )
-        _log_identifiers(lines, "  want.", want)
-
-        goal_attr, goal = _find_first_attr(
-            slot,
-            ("goal", "_goal", "objective", "_objective", "whim_goal", "_whim_goal"),
-        )
-        if goal is None:
-            goal_attr, goal = _find_first_attr(
-                want,
-                ("goal", "_goal", "objective", "_objective", "whim_goal", "_whim_goal"),
-            )
-        if goal is not None:
-            lines.append(
-                f"  goal_source={goal_attr} goal_type={type(goal).__name__}"
-            )
-            _log_identifiers(lines, "  goal.", goal)
+        if director._is_proto_message(want):
             for attr in (
-                "completed",
-                "progress",
-                "_count",
-                "_required_count",
-                "count",
-                "required_count",
+                "whim_guid64",
+                "whim_name",
+                "whim_tooltip",
+                "whim_target_sim",
+                "whim_type",
+                "slot_whim_type",
+                "whim_current_count",
+                "whim_goal_count",
+                "whim_locked",
             ):
-                if hasattr(goal, attr):
-                    lines.append(f"  goal.{attr}={_safe_get(goal, attr)!r}")
-
-        aff_attr, affordance = _find_first_attr(
-            slot,
-            (
-                "affordance",
-                "super_affordance",
-                "interaction",
-                "_interaction",
-                "interaction_to_push",
-                "_super_affordance",
-                "_affordance",
-            ),
-        )
-        if affordance is None:
-            aff_attr, affordance = _find_first_attr(
-                want,
-                (
-                    "affordance",
-                    "super_affordance",
-                    "interaction",
-                    "_interaction",
-                    "interaction_to_push",
-                    "_super_affordance",
-                    "_affordance",
-                ),
-            )
-        if affordance is None and goal is not None:
-            aff_attr, affordance = _find_first_attr(
-                goal,
-                (
-                    "affordance",
-                    "super_affordance",
-                    "interaction",
-                    "_interaction",
-                    "interaction_to_push",
-                    "_super_affordance",
-                    "_affordance",
-                ),
-            )
-        if affordance is not None:
-            aff_name = getattr(affordance, "__name__", None) or str(affordance)
-            lines.append(
-                f"  affordance_source={aff_attr} aff_type={type(affordance).__name__} "
-                f"aff_name={aff_name}"
-            )
-            _log_identifiers(lines, "  aff.", affordance)
-
-        tests_attr, tests = _find_first_attr(
-            goal,
-            ("tests", "_tests", "test_set", "_test_set", "goal_tests", "_goal_tests"),
-        )
-        if tests is None:
-            tests_attr, tests = _find_first_attr(
-                want,
-                ("tests", "_tests", "test_set", "_test_set", "goal_tests", "_goal_tests"),
-            )
-        if tests is not None:
-            lines.append(f"  tests_source={tests_attr} tests_type={type(tests).__name__}")
-            if hasattr(tests, "__iter__") and not isinstance(tests, (str, bytes)):
-                try:
-                    for idx_test, item in enumerate(list(tests)[:5]):
-                        lines.append(
-                            f"    tests[{idx_test}] type={type(item).__name__} "
-                            f"repr={_trim_repr(item)}"
-                        )
-                except Exception:
-                    lines.append(f"    tests_repr={_trim_repr(tests)}")
-            else:
-                lines.append(f"    tests_repr={_trim_repr(tests)}")
-
-        for attr in (
-            "target_type",
-            "participant_type",
-            "participants",
-            "resolver",
-            "_target",
-            "_target_sim",
-            "target",
-            "sim_filter",
-        ):
-            if goal is not None and hasattr(goal, attr):
-                lines.append(
-                    f"  goal.{attr} type={type(_safe_get(goal, attr)).__name__} "
-                    f"repr={_trim_repr(_safe_get(goal, attr))}"
-                )
-            if hasattr(want, attr):
-                lines.append(
-                    f"  want.{attr} type={type(_safe_get(want, attr)).__name__} "
-                    f"repr={_trim_repr(_safe_get(want, attr))}"
-                )
-    return lines, tracker, slots
+                if hasattr(want, attr):
+                    lines.append(f"  {attr}={_safe_get(want, attr)!r}")
+    return lines, None, None
 
 
 def _probe_specific_want_slot(sim_info, index):

@@ -148,6 +148,10 @@ director_skill_block_list=
 
 See the full in-game plan in [`assets/in-game-test-plan.md`](assets/in-game-test-plan.md).
 
+## Docs enforcement (CI checks)
+
+The `Verify docs updates` GitHub Actions workflow (`.github/workflows/verify-docs.yml`) enforces that every push/PR updates both `README.md` and `assets/in-game-test-plan.md`, or the check will fail. The rationale is to keep documentation and the in-game test plan in sync as behavior changes. To satisfy the check for no-op changes, add a minimal note or clarification to both files (and remove it later if needed).
+
 Quick smoke checklist:
 
 1. Put `simulation-mode.ts4script` into `Mods/SimulationMode/`.

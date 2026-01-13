@@ -515,6 +515,114 @@ def _get_whim_guid64(whim):
     return None
 
 
+def _get_want_target_sim_id(want_obj):
+    if want_obj is None:
+        return None
+    try:
+        if _is_proto_message(want_obj) and hasattr(want_obj, "whim_target_sim"):
+            value = getattr(want_obj, "whim_target_sim", 0)
+            try:
+                value = int(value)
+            except Exception:
+                return None
+            return value if value else None
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_sim_instance_by_id(sim_id):
+    if not sim_id:
+        return None
+    try:
+        mgr = services.sim_info_manager()
+    except Exception:
+        mgr = None
+    sim_info = None
+
+    if mgr is not None:
+        for fn_name in ("get", "get_sim_info_by_id", "get_by_id"):
+            fn = getattr(mgr, fn_name, None)
+            if callable(fn):
+                try:
+                    sim_info = fn(sim_id)
+                except Exception:
+                    sim_info = None
+                if sim_info is not None:
+                    break
+        if sim_info is None:
+            get_all = getattr(mgr, "get_all", None)
+            if callable(get_all):
+                try:
+                    for info in list(get_all()):
+                        if info is None:
+                            continue
+                        sid = getattr(info, "sim_id", None) or getattr(info, "id", None)
+                        if sid == sim_id:
+                            sim_info = info
+                            break
+                except Exception:
+                    pass
+
+    if sim_info is None:
+        return None
+
+    try:
+        sim = sim_info.get_sim_instance()
+    except Exception:
+        sim = None
+    return sim
+
+
+def try_push_social_interaction(sim, target_sim):
+    if sim is None or target_sim is None:
+        return False
+    # Prefer low-risk friendly socials that exist across many packs
+    keywords = [
+        "chat",
+        "talk",
+        "friendly",
+        "get_to_know",
+        "get to know",
+        "ask",
+        "compliment",
+        "joke",
+        "discuss",
+        "brighten",
+        "deep",
+        "talk about",
+    ]
+    candidates = find_affordance_candidates(target_sim, keywords, sim=sim)
+    if not candidates:
+        return False
+    # Filter obvious debug/cheat
+    filtered = []
+    for aff in candidates:
+        try:
+            if _is_blocked_want_affordance(aff):
+                continue
+        except Exception:
+            pass
+        filtered.append(aff)
+    if not filtered:
+        return False
+
+    aff = filtered[0]
+    context, _client_attached = make_interaction_context(sim, force=False)
+    ok, reason, sig = call_push_super_affordance(sim, aff, target_sim, context)
+    if ok:
+        _append_debug(
+            f"{_sim_display_name(getattr(sim, 'sim_info', None))}: "
+            f"WANT social -> pushed {affordance_name(aff)} on sim_target={target_sim}"
+        )
+        return True
+    _append_debug(
+        f"{_sim_display_name(getattr(sim, 'sim_info', None))}: "
+        f"WANT social push failed reason={reason} sig={sig}"
+    )
+    return False
+
+
 def _resolve_whim_tuning_by_guid64(guid64):
     if not guid64:
         return None
@@ -841,22 +949,76 @@ def _find_target_sim(sim):
     return None
 
 
-def _push_want(sim, rule_key, want_name, force=False):
+def _is_same_zone(sim_info, other_sim_info):
+    if sim_info is None or other_sim_info is None:
+        return False
+    sim_zone = getattr(sim_info, "zone_id", None)
+    other_zone = getattr(other_sim_info, "zone_id", None)
+    if sim_zone is None or other_zone is None:
+        return True
+    return sim_zone == other_zone
+
+
+def _push_want(sim, rule_key, want_name, want_obj=None, force=False):
     global _LAST_WANT_DETAILS
     if rule_key == "skill":
         # Generic “level up any skill”: reuse existing skill selection and push
-        skill_key = choose_skill_goal(sim.sim_info)
+        choice = choose_skill_goal(getattr(sim, "sim_info", None))
+        if not choice:
+            return False, "WANT no skill goal available"
+        # choose_skill_goal returns (skill_key, reason)
+        if isinstance(choice, (tuple, list)) and len(choice) >= 1:
+            skill_key = choice[0]
+            reason = choice[1] if len(choice) > 1 else ""
+        else:
+            skill_key = choice
+            reason = ""
         if not skill_key:
             return False, "WANT no skill goal available"
         ok = try_push_skill_interaction(sim, skill_key, force=True)
-        return (True, None) if ok else (False, f"WANT skill push failed for {skill_key}")
+        if ok:
+            return (
+                True,
+                f"WANT skill {skill_key} ({reason})" if reason else f"WANT skill {skill_key}",
+            )
+        return (
+            False,
+            f"WANT skill push failed for {skill_key} ({reason})"
+            if reason
+            else f"WANT skill push failed for {skill_key}",
+        )
 
     if rule_key == "clean":
         ok = try_push_clean_interaction(sim)
         return (True, None) if ok else (False, "WANT clean push failed")
 
-    if rule_key == "social" and not settings.director_allow_social_goals:
+    if (
+        rule_key == "social"
+        and hasattr(settings, "director_allow_social_wants")
+        and not settings.director_allow_social_wants
+    ):
         return False, "WANT social disabled"
+    if rule_key == "social":
+        target_sim = None
+        target_id = _get_want_target_sim_id(want_obj)
+        if target_id:
+            candidate = _resolve_sim_instance_by_id(target_id)
+            if candidate is not None and _is_same_zone(
+                getattr(sim, "sim_info", None), getattr(candidate, "sim_info", None)
+            ):
+                target_sim = candidate
+
+        if target_sim is None:
+            target_sim = _find_target_sim(sim)
+
+        if target_sim is not None:
+            ok = try_push_social_interaction(sim, target_sim)
+            if ok:
+                return True, "WANT social"
+
+        # Fallback to existing object-based social rule behavior (phone/computer)
+        # Let the generic rule flow continue below by NOT early-returning here.
+        # If the generic rule cannot resolve, the caller will report no supported target.
     rule = _WHIM_RULES.get(rule_key)
     if rule is None:
         return False, "WANT no rule"
@@ -918,20 +1080,11 @@ def _try_resolve_wants(sim_info, force=False, now=None):
     last_message = want_reason
     for want_key, want_name, _want_obj in want_targets:
         rule_key = _resolve_whim_rule(want_name)
-        if rule_key == "social":
-            if not settings.director_allow_social_goals:
-                last_message = "WANT social disabled"
-                continue
-        if rule_key == "hug":
-            if (
-                hasattr(settings, "director_allow_social_wants")
-                and not settings.director_allow_social_wants
-            ):
-                last_message = "WANT hug disabled"
-                continue
         if rule_key is None:
             continue
-        pushed, want_message = _push_want(sim, rule_key, want_name, force=force)
+        pushed, want_message = _push_want(
+            sim, rule_key, want_name, want_obj=_want_obj, force=force
+        )
         last_message = want_message
         if pushed:
             sim_id = _sim_identifier(sim_info)
@@ -1273,7 +1426,10 @@ def _evaluate(now: float, force: bool = False):
                     _dbg(f"{sim_name}: WHIM picked __name__={debug_name}")
                     rule_key = _resolve_whim_rule(want_name)
                     if rule_key == "social":
-                        if not settings.director_allow_social_goals:
+                        if (
+                            hasattr(settings, "director_allow_social_wants")
+                            and not settings.director_allow_social_wants
+                        ):
                             _dbg(f"{sim_name}: WANT social disabled")
                             continue
                     if rule_key == "hug":
@@ -1286,7 +1442,7 @@ def _evaluate(now: float, force: bool = False):
                     if rule_key is None:
                         continue
                     pushed, want_message = _push_want(
-                        sim, rule_key, want_name, force=force
+                        sim, rule_key, want_name, want_obj=want_obj, force=force
                     )
                     if pushed:
                         _record_push(sim_id, now)

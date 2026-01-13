@@ -518,37 +518,56 @@ def _probe_wants(output, emit_output=True, emit_dump=True):
             hint_names = []
         hint_names = sorted(hint_names)[:60]
         lines.append(f"want[{idx}] dir_hints={', '.join(hint_names)}")
-        for attr in (
-            "goal",
-            "objective",
-            "affordance",
-            "super_affordance",
-            "tuning",
-            "guid",
-            "guid64",
-            "_goal",
-            "_objective",
-            "_affordance",
-            "_super_affordance",
-            "_tuning",
-            "_guid",
-            "_guid64",
-            "_instance_id",
-            "_whim",
-            "_want",
-        ):
-            try:
-                value = getattr(want, attr)
-            except Exception as exc:
-                lines.append(f"  {attr}=error {type(exc).__name__}: {exc}")
-                continue
-            if callable(value):
+        if getattr(director, "_is_proto_message", None) and director._is_proto_message(want):
+            for field in (
+                "whim_guid64",
+                "whim_target_sim",
+                "whim_type",
+                "slot_whim_type",
+                "whim_current_count",
+                "whim_goal_count",
+                "whim_locked",
+                "whim_name",
+                "whim_tooltip",
+                "whim_tooltip_reason",
+            ):
                 try:
-                    value = value()
+                    if hasattr(want, field):
+                        lines.append(f"  {field}={_trim_repr(getattr(want, field))}")
+                except Exception as exc:
+                    lines.append(f"  {field}=error {type(exc).__name__}: {exc}")
+        if not (getattr(director, "_is_proto_message", None) and director._is_proto_message(want)):
+            for attr in (
+                "goal",
+                "objective",
+                "affordance",
+                "super_affordance",
+                "tuning",
+                "guid",
+                "guid64",
+                "_goal",
+                "_objective",
+                "_affordance",
+                "_super_affordance",
+                "_tuning",
+                "_guid",
+                "_guid64",
+                "_instance_id",
+                "_whim",
+                "_want",
+            ):
+                try:
+                    value = getattr(want, attr)
                 except Exception as exc:
                     lines.append(f"  {attr}=error {type(exc).__name__}: {exc}")
                     continue
-            lines.append(f"  {attr}={_trim_repr(value)}")
+                if callable(value):
+                    try:
+                        value = value()
+                    except Exception as exc:
+                        lines.append(f"  {attr}=error {type(exc).__name__}: {exc}")
+                        continue
+                lines.append(f"  {attr}={_trim_repr(value)}")
 
     _append_probe_log(None, lines)
     if emit_output:

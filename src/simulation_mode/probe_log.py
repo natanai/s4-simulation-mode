@@ -17,13 +17,19 @@ def append_probe_line(line: str):
         handle.write(f"[{timestamp}] {line}\n")
 
 
-def append_probe_block(lines):
-    if not lines:
+def append_probe_block(title, lines):
+    if title:
+        block_lines = [str(title)]
+        if lines:
+            block_lines.extend(lines)
+    else:
+        block_lines = list(lines or [])
+    if not block_lines:
         return
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     path = get_probe_log_path()
     with open(path, "a", encoding="utf-8") as handle:
-        handle.write("\n".join(f"[{timestamp}] {line}" for line in lines))
+        handle.write("\n".join(f"[{timestamp}] {line}" for line in block_lines))
         handle.write("\n")
 
 

@@ -149,6 +149,14 @@ _WHIM_RULES = {
         "target_type": "sim",
         "affordance_keywords": ["hug"],
     },
+    "paint": {
+        "object_keywords": ["easel"],
+        "affordance_keywords": ["paint"],
+    },
+    "trivia_box": {
+        "object_keywords": ["triviabox", "trivia"],
+        "affordance_keywords": ["play", "trivia"],
+    },
 }
 
 _last_check_time = 0.0
@@ -209,6 +217,64 @@ def _safe_min_motive(snapshot):
         if min_value is None or value < min_value:
             min_value = value
     return min_value
+
+
+def _get_instantiated_sims_for_director():
+    sims = []
+    try:
+        active_sim = services.get_active_sim()
+    except Exception:
+        active_sim = None
+    if active_sim is not None:
+        sims.append(active_sim)
+
+    try:
+        sim_infos = list(services.sim_info_manager().get_all())
+    except Exception:
+        sim_infos = []
+
+    current_zone_id = None
+    try:
+        current_zone_id = services.current_zone_id()
+    except Exception:
+        pass
+
+    for sim_info in sim_infos:
+        if sim_info is None:
+            continue
+        if active_sim is not None and getattr(active_sim, "sim_info", None) is sim_info:
+            continue
+        sim = None
+        try:
+            get_inst = getattr(sim_info, "get_sim_instance", None)
+            if callable(get_inst):
+                try:
+                    sim = get_inst()
+                except TypeError:
+                    sim = get_inst()
+        except Exception:
+            sim = None
+        if sim is None:
+            continue
+
+        try:
+            zid = getattr(sim, "zone_id", None)
+            if current_zone_id is not None and zid == current_zone_id:
+                sims.append(sim)
+            else:
+                sims.append(sim)
+        except Exception:
+            sims.append(sim)
+
+    seen = set()
+    out = []
+    for sim in sims:
+        sid = id(sim)
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append(sim)
+    return out
 
 
 def _can_push_for_sim(sim_id, now):
@@ -511,6 +577,10 @@ def _resolve_whim_rule(whim_name: str):
     normalized = _norm(whim_name)
     if "hug" in normalized:
         return "hug"
+    if "paint" in normalized:
+        return "paint"
+    if "triviabox" in normalized or "woowho" in normalized:
+        return "trivia_box"
     if "admireart" in normalized or ("admire" in normalized and "art" in normalized):
         return "admire_art"
     if "fun" in lowered or "have fun" in lowered:
@@ -864,29 +934,17 @@ def _evaluate(now: float, force: bool = False):
     last_director_debug[:] = []
     settings.last_director_debug = ""
     actions_before = len(last_director_actions)
-    household = services.active_household()
-    if household is None:
-        _dbg("Director ran: no active household")
-        return
-    try:
-        sim_infos = list(household)
-    except Exception:
-        try:
-            sim_infos = list(household.sim_infos)
-        except Exception:
-            _dbg("Director ran: unable to read household sims")
-            return
-    if not sim_infos:
+    sims = _get_instantiated_sims_for_director()
+    if not sims:
         _dbg("Director ran: no eligible sims")
         return
 
-    for sim_info in sim_infos:
+    for sim in sims:
         try:
-            sim_name = _sim_display_name(sim_info)
-            sim = sim_info.get_sim_instance()
-            if sim is None:
-                _dbg(f"{sim_name}: SKIP no sim instance")
+            sim_info = getattr(sim, "sim_info", None)
+            if sim_info is None:
                 continue
+            sim_name = _sim_display_name(sim_info)
 
             min_motive = None
             snapshot = _get_motive_snapshot(sim_info)
@@ -1002,7 +1060,7 @@ def _evaluate(now: float, force: bool = False):
         except Exception:
             continue
     if not last_director_debug and len(last_director_actions) == actions_before:
-        _dbg("Director ran: no eligible sims")
+        _dbg(f"Director ran: {len(sims)} eligible sims")
 
 
 def on_tick(now: float):

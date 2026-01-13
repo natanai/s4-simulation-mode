@@ -265,6 +265,17 @@ def _append_simulation_log(lines):
         handle.write("\n")
 
 
+def _dump_log(output, note):
+    log_dump = importlib.import_module("simulation_mode.log_dump")
+    ok, result = log_dump.dump_state_to_file(extra_note=note)
+    if ok:
+        output(f"log_dump_written={result}")
+    else:
+        output("log_dump_failed")
+        output(result.splitlines()[-1] if result else "unknown error")
+    return ok, result
+
+
 def _probe_item_ids(item):
     ids = []
     for key in ("guid64", "tuning_guid", "instance_id"):
@@ -574,7 +585,7 @@ def _probe_specific_want_slot(sim_info, index):
     return lines
 
 
-def _probe_wants(output, emit_output=True):
+def _probe_wants(output, emit_output=True, emit_dump=True):
     director = importlib.import_module("simulation_mode.director")
     services = importlib.import_module("services")
     sim = _get_active_sim(services)
@@ -586,7 +597,10 @@ def _probe_wants(output, emit_output=True):
     if sim is None and sim_info is None:
         lines.append("active_sim= (none)")
         _append_probe_log(None, lines)
-        output("probe_wants complete; run simulation dump_log")
+        if emit_output:
+            if emit_dump:
+                _dump_log(output, "probe_wants")
+            output("probe_wants complete; see simulation-mode-probe.log")
         return True
     lines.append(f"active_sim={sim!r}")
     lines.append(f"sim_info={sim_info!r}")
@@ -612,11 +626,13 @@ def _probe_wants(output, emit_output=True):
 
     _append_probe_log(None, lines)
     if emit_output:
-        output("probe_wants complete; run simulation dump_log")
+        if emit_dump:
+            _dump_log(output, "probe_wants")
+        output("probe_wants complete; see simulation-mode-probe.log")
     return True
 
 
-def _probe_career(output, emit_output=True):
+def _probe_career(output, emit_output=True, emit_dump=True):
     services = importlib.import_module("services")
     sim = _get_active_sim(services)
     sim_info = _active_sim_info()
@@ -628,7 +644,9 @@ def _probe_career(output, emit_output=True):
         lines.append("active_sim= (none)")
         _append_probe_log(None, lines)
         if emit_output:
-            output("probe_career complete; run simulation dump_log")
+            if emit_dump:
+                _dump_log(output, "probe_career")
+            output("probe_career complete; see simulation-mode-probe.log")
         return True
     lines.append(f"active_sim={sim!r}")
     lines.append(f"sim_info={sim_info!r}")
@@ -638,7 +656,9 @@ def _probe_career(output, emit_output=True):
         lines.append("career_tracker= (not found)")
         _append_probe_log(None, lines)
         if emit_output:
-            output("probe_career complete; run simulation dump_log")
+            if emit_dump:
+                _dump_log(output, "probe_career")
+            output("probe_career complete; see simulation-mode-probe.log")
         return True
 
     lines.append(f"career_tracker_type={type(tracker)}")
@@ -689,11 +709,13 @@ def _probe_career(output, emit_output=True):
 
     _append_probe_log(None, lines)
     if emit_output:
-        output("probe_career complete; run simulation dump_log")
+        if emit_dump:
+            _dump_log(output, "probe_career")
+        output("probe_career complete; see simulation-mode-probe.log")
     return True
 
 
-def _probe_aspiration(output, emit_output=True):
+def _probe_aspiration(output, emit_output=True, emit_dump=True):
     services = importlib.import_module("services")
     sim = _get_active_sim(services)
     sim_info = _active_sim_info()
@@ -705,7 +727,9 @@ def _probe_aspiration(output, emit_output=True):
         lines.append("active_sim= (none)")
         _append_probe_log(None, lines)
         if emit_output:
-            output("probe_aspiration complete; run simulation dump_log")
+            if emit_dump:
+                _dump_log(output, "probe_aspiration")
+            output("probe_aspiration complete; see simulation-mode-probe.log")
         return True
     lines.append(f"active_sim={sim!r}")
     lines.append(f"sim_info={sim_info!r}")
@@ -715,7 +739,9 @@ def _probe_aspiration(output, emit_output=True):
         lines.append("aspiration_tracker= (not found)")
         _append_probe_log(None, lines)
         if emit_output:
-            output("probe_aspiration complete; run simulation dump_log")
+            if emit_dump:
+                _dump_log(output, "probe_aspiration")
+            output("probe_aspiration complete; see simulation-mode-probe.log")
         return True
 
     lines.append(f"aspiration_tracker_type={type(tracker)}")
@@ -800,7 +826,9 @@ def _probe_aspiration(output, emit_output=True):
 
     _append_probe_log(None, lines)
     if emit_output:
-        output("probe_aspiration complete; run simulation dump_log")
+        if emit_dump:
+            _dump_log(output, "probe_aspiration")
+        output("probe_aspiration complete; see simulation-mode-probe.log")
     return True
 
 
@@ -822,14 +850,15 @@ def _probe_all(output):
     deep_lines, _tracker, _slots = _probe_active_wants_deep(sim_info)
     _append_probe_log("B) ACTIVE WANTS / WHIMS (DEEP DUMP)", deep_lines)
     _append_probe_log("C) CAREER SUMMARY", [])
-    _probe_career(output, emit_output=False)
+    _probe_career(output, emit_output=False, emit_dump=False)
     _append_probe_log("D) ASPIRATION SUMMARY", [])
-    _probe_aspiration(output, emit_output=False)
-    output("Probe complete. See simulation-mode-probe.log")
+    _probe_aspiration(output, emit_output=False, emit_dump=False)
+    _dump_log(output, "probe_all")
+    output("probe_all complete; see simulation-mode-probe.log")
     return True
 
 
-def _probe_want(output, index):
+def _probe_want(output, index, emit_dump=True):
     services = importlib.import_module("services")
     _sim = _get_active_sim(services)
     sim_info = _active_sim_info()
@@ -844,7 +873,9 @@ def _probe_want(output, index):
     ]
     lines.extend(_probe_specific_want_slot(sim_info, idx))
     _append_probe_log(None, lines)
-    output("probe_want complete; run simulation dump_log")
+    if emit_dump:
+        _dump_log(output, "probe_want")
+    output("probe_want complete; see simulation-mode-probe.log")
     return True
 
 

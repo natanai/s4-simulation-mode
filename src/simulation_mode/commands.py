@@ -81,6 +81,7 @@ def _status_lines():
         f"director_green_min_commodities={settings.director_green_min_commodities}",
         f"director_allow_social_goals={settings.director_allow_social_goals}",
         f"director_allow_social_wants={settings.director_allow_social_wants}",
+        f"director_enable_wants={settings.director_enable_wants}",
         f"director_use_guardian_when_low={settings.director_use_guardian_when_low}",
         f"director_per_sim_cooldown_seconds={settings.director_per_sim_cooldown_seconds}",
         f"director_max_pushes_per_sim_per_hour={settings.director_max_pushes_per_sim_per_hour}",
@@ -88,6 +89,7 @@ def _status_lines():
         f"director_fallback_to_started_skills={settings.director_fallback_to_started_skills}",
         f"director_skill_allow_list={settings.director_skill_allow_list}",
         f"director_skill_block_list={settings.director_skill_block_list}",
+        f"collect_log_filename={settings.collect_log_filename}",
         f"integrate_better_autonomy_trait={settings.integrate_better_autonomy_trait}",
         f"better_autonomy_trait_id={settings.better_autonomy_trait_id}",
         f"daemon_running={running}",
@@ -273,6 +275,275 @@ def _append_simulation_log(lines):
     with open(path, "a", encoding="utf-8") as handle:
         handle.write("\n".join(f"[{timestamp}] {line}" for line in lines))
         handle.write("\n")
+
+
+def _collect_config_snapshot():
+    lines = ["COLLECT: CONFIG"]
+    lines.append(f"config_path={os.path.abspath(get_config_path())}")
+    for key in sorted(vars(settings).keys()):
+        try:
+            lines.append(f"{key}={getattr(settings, key)}")
+        except Exception:
+            continue
+    return lines
+
+
+def _collect_daemon_snapshot():
+    daemon = importlib.import_module("simulation_mode.daemon")
+    lines = ["COLLECT: DAEMON"]
+    for key in (
+        "tick_count",
+        "last_error",
+        "daemon_error",
+        "last_tick_wallclock",
+        "last_alarm_variant",
+        "last_unpause_attempt_ts",
+        "last_unpause_result",
+        "last_pause_requests_count",
+    ):
+        try:
+            lines.append(f"{key}={getattr(daemon, key, None)}")
+        except Exception:
+            continue
+    return lines
+
+
+def _collect_career_summary(sim_info):
+    director = importlib.import_module("simulation_mode.director")
+    lines = []
+    tracker = _safe_get(sim_info, "career_tracker")
+    if tracker is None:
+        lines.append("career_tracker= (not found)")
+        return lines
+    lines.append(f"career_tracker_type={type(tracker).__name__}")
+    careers = director._iter_careers(sim_info)
+    if not careers:
+        lines.append("career_current= (none)")
+        return lines
+    for career in careers:
+        career_name = getattr(getattr(career, "__class__", None), "__name__", "")
+        track = _safe_get(career, "current_track")
+        track_name = getattr(track, "__name__", None) if track is not None else None
+        level = _safe_get(career, "career_level") or _safe_get(career, "level")
+        lines.append(
+            f"career_name={career_name} track={track_name} level={level}"
+        )
+        for attr in ("guid64", "uid", "tuning_id", "instance_id"):
+            if hasattr(career, attr):
+                lines.append(f"career_{attr}={_safe_get(career, attr)!r}")
+    return lines
+
+
+def _collect_started_skills(sim_info):
+    director = importlib.import_module("simulation_mode.director")
+    lines = []
+    candidates = director._get_started_skill_candidates(sim_info)
+    if not candidates:
+        lines.append("started_skills= (none)")
+        return lines
+    lines.append("started_skills:")
+    for skill_key, _reason, level in candidates:
+        lines.append(f"- {skill_key} level={level}")
+    return lines
+
+
+def _collect_aspiration_summary(sim_info):
+    lines = []
+    tracker = _safe_get(sim_info, "aspiration_tracker")
+    if tracker is None:
+        lines.append("aspiration_tracker= (not found)")
+        return lines
+    lines.append(f"aspiration_tracker_type={type(tracker).__name__}")
+    active = _safe_get(tracker, "_active_aspiration") or _safe_get(tracker, "active_aspiration")
+    if active is None:
+        lines.append("active_aspiration= (none)")
+    else:
+        asp_name = (
+            _safe_get(active, "__name__")
+            or _safe_get(active, "name")
+            or _safe_get(active, "display_name")
+            or str(active)
+        )
+        lines.append(f"active_aspiration={asp_name}")
+        for attr in ("guid64", "tuning_id", "instance_id"):
+            if hasattr(active, attr):
+                lines.append(f"active_aspiration_{attr}={_safe_get(active, attr)!r}")
+    milestone_lines = []
+    if active is not None:
+        for name in dir(active):
+            if not any(token in name.lower() for token in ("milestone", "goal")):
+                continue
+            value = _safe_get(active, name)
+            if isinstance(value, (list, tuple)) and value:
+                for item in list(value)[:5]:
+                    ids = _probe_item_ids(item)
+                    milestone_lines.append(
+                        "{}: type={} ids={} repr={}".format(
+                            name,
+                            type(item).__name__,
+                            ids if ids else "none",
+                            _trim_repr(item),
+                        )
+                    )
+    if milestone_lines:
+        lines.append("aspiration_milestones_goals:")
+        lines.extend(f"- {line}" for line in milestone_lines)
+    else:
+        lines.append("aspiration_milestones_goals= (none)")
+        attr_names = _filter_names(
+            tracker, ("aspir", "milestone", "goal", "track", "current", "active")
+        )
+        lines.append(f"aspiration_tracker_attrs_hint={attr_names[:12]}")
+    return lines
+
+
+def _collect_plan_preview(sim, now):
+    director = importlib.import_module("simulation_mode.director")
+    guardian = importlib.import_module("simulation_mode.guardian")
+    preview = director.build_plan_preview(sim, now=now)
+    if preview is None:
+        return ["plan_preview= (unavailable)"]
+    lines = []
+    sim_info = getattr(sim, "sim_info", None)
+    sim_name = director._sim_display_name(sim_info) if sim_info is not None else "Sim"
+    lines.append(f"sim_name={sim_name}")
+    lines.append(
+        f"busy={preview['busy']} reason={preview['busy_reason']}"
+    )
+    lines.append(
+        f"cooldown_ok={preview['cooldown_ok']} time_since_last_push={preview['time_since_last_push']}"
+    )
+    lines.append(
+        "motive_safe={} min_motive={} threshold={}".format(
+            not preview["motive_unsafe"],
+            preview["min_motive"],
+            settings.director_min_safe_motive,
+        )
+    )
+    lines.append(
+        "green_count={}/{} green_min={} green_percent={}".format(
+            preview["green_count"],
+            preview["motive_total"],
+            settings.director_green_min_commodities,
+            settings.director_green_motive_percent,
+        )
+    )
+    if preview["snapshot"]:
+        lines.append("motive_snapshot:")
+        for key, value in preview["snapshot"]:
+            percent = guardian.motive_percent(value)
+            lines.append(f"- {key}={value:.1f} percent={percent:.2f}")
+    else:
+        lines.append("motive_snapshot= (none)")
+    lines.append(f"plan={preview['plan']} reason={preview['plan_reason']}")
+    if preview["plan"] == "GUARDIAN":
+        lines.append("plan_preview=GUARDIAN")
+    elif preview["plan"] == "SKILLS":
+        chosen = preview["chosen_skill"]
+        if chosen:
+            lines.append(f"plan_preview=SKILLS chosen_skill={chosen[0]}")
+            lines.append(f"plan_choice_reason={chosen[1]}")
+        else:
+            lines.append("plan_preview=SKILLS chosen_skill= (none)")
+        candidates = preview["candidates"][:5]
+        if candidates:
+            lines.append("candidate_skills_top5:")
+            for skill_key, reason in candidates:
+                lines.append(f"- {skill_key} ({reason})")
+        else:
+            lines.append("candidate_skills_top5= (none)")
+    return lines
+
+
+def _collect_internal_probes(sim_info):
+    lines = ["COLLECT: INTERNAL PROBES"]
+    lines.append("PROBE ALL (EMBEDDED)")
+    lines.extend(_probe_siminfo_tracker_introspection(sim_info))
+    deep_lines, _tracker, _slots = _probe_active_wants_deep(sim_info)
+    lines.append("ACTIVE WANTS / WHIMS (DEEP DUMP)")
+    lines.extend(deep_lines)
+    lines.append("CAREER SUMMARY (PROBE)")
+    lines.extend(_collect_career_summary(sim_info))
+    lines.append("ASPIRATION SUMMARY (PROBE)")
+    lines.extend(_collect_aspiration_summary(sim_info))
+    tracker = _safe_get(sim_info, "career_tracker")
+    if tracker is not None:
+        attrs = _filter_names(tracker, ("career", "level", "track", "promotion"))
+        lines.append(
+            f"career_tracker_attrs_hint={type(tracker).__name__} attrs={attrs[:10]}"
+        )
+    tracker = _safe_get(sim_info, "aspiration_tracker")
+    if tracker is not None:
+        attrs = _filter_names(tracker, ("aspir", "milestone", "goal", "track", "current"))
+        lines.append(
+            f"aspiration_tracker_attrs_hint={type(tracker).__name__} attrs={attrs[:10]}"
+        )
+    tracker = _safe_get(sim_info, "skill_tracker")
+    if tracker is not None:
+        attrs = _filter_names(tracker, ("skill", "level", "max"))
+        lines.append(
+            f"skill_tracker_attrs_hint={type(tracker).__name__} attrs={attrs[:10]}"
+        )
+    return lines
+
+
+def _cancel_sim_interactions(sim):
+    if sim is None:
+        return False, "no sim"
+    try:
+        if hasattr(sim, "queue") and hasattr(sim.queue, "cancel_all"):
+            sim.queue.cancel_all()
+            return True, "queue.cancel_all"
+        if hasattr(sim, "cancel_all_interactions"):
+            sim.cancel_all_interactions()
+            return True, "sim.cancel_all_interactions"
+        if hasattr(sim, "queue") and hasattr(sim.queue, "clear"):
+            sim.queue.clear()
+            return True, "queue.clear"
+    except Exception as exc:
+        return False, f"cancel_failed: {exc}"
+    return False, "cancel_unavailable"
+
+
+def _build_collect_payload():
+    director = importlib.import_module("simulation_mode.director")
+    lines = []
+    lines.extend(_collect_config_snapshot())
+    lines.append("")
+    lines.extend(_collect_daemon_snapshot())
+    lines.append("")
+    lines.append("COLLECT: DIRECTOR — PLAN PREVIEW (NO ACTIONS)")
+    now = time.time()
+    sims = director._get_instantiated_sims_for_director()
+    if not sims:
+        lines.append("eligible_sims= (none)")
+    for sim in sims:
+        sim_info = getattr(sim, "sim_info", None)
+        sim_name = director._sim_display_name(sim_info) if sim_info is not None else "Sim"
+        sim_id = director._sim_identifier(sim_info) if sim_info is not None else None
+        lines.append("")
+        lines.append(f"SIM: {sim_name} id={sim_id}")
+        lines.extend(_collect_plan_preview(sim, now))
+        if sim_info is not None:
+            director._get_career_skill_candidates(sim_info)
+            career_probe = director.get_last_career_probe()
+            if career_probe:
+                lines.append("career_requirement_probe:")
+                lines.extend(f"- {line}" for line in career_probe[:10])
+            lines.append("career_summary:")
+            lines.extend(_collect_career_summary(sim_info))
+            lines.append("skills_summary:")
+            lines.extend(_collect_started_skills(sim_info))
+            lines.append("aspiration_summary:")
+            lines.extend(_collect_aspiration_summary(sim_info))
+    lines.append("")
+    sim_info = _active_sim_info()
+    if sim_info is None:
+        lines.append("COLLECT: INTERNAL PROBES")
+        lines.append("active_sim= (none)")
+    else:
+        lines.extend(_collect_internal_probes(sim_info))
+    return "\n".join(lines)
 
 
 def _dump_log(output, note):
@@ -696,6 +967,8 @@ def _probe_aspiration(output, emit_output=True, emit_dump=True):
     lines.append(f"_active_aspiration_type={type(active)}")
     lines.append(f"_selected_aspiration={selected!r}")
     lines.append(f"_selected_aspiration_type={type(selected)}")
+    lines.append("ASPIRATION DETAIL")
+    lines.extend(_collect_aspiration_summary(sim_info))
 
     milestone = None
     milestone_source = None
@@ -951,6 +1224,8 @@ def _usage_lines():
         "simulation director_takeover <skill_key>",
         "simulation guardian_now [force]",
         "simulation want_now",
+        "simulation collect",
+        "simulation skill_plan_now",
         "simulation configpath",
         "simulation dump_log",
         "simulation probe_all",
@@ -965,9 +1240,10 @@ def _usage_lines():
         "director_min_safe_motive, director_per_sim_cooldown_seconds, "
         "director_green_motive_percent, director_green_min_commodities, "
         "director_allow_social_goals, director_allow_social_wants, director_use_guardian_when_low, "
-        "director_max_pushes_per_sim_per_hour, director_prefer_career_skills, "
+        "director_enable_wants, director_max_pushes_per_sim_per_hour, director_prefer_career_skills, "
         "director_fallback_to_started_skills, director_skill_allow_list, "
-        "director_skill_block_list, integrate_better_autonomy_trait, better_autonomy_trait_id",
+        "director_skill_block_list, collect_log_filename, "
+        "integrate_better_autonomy_trait, better_autonomy_trait_id",
     ]
 
 
@@ -985,6 +1261,7 @@ def _handle_set(key, value, _connection, output):
     key = key.strip().lower()
     if key in {"auto_unpause", "allow_death", "allow_pregnancy", "guardian_enabled",
                "director_allow_social_goals", "director_allow_social_wants",
+               "director_enable_wants",
                "director_use_guardian_when_low",
                "integrate_better_autonomy_trait"}:
         parsed = _parse_bool(value)
@@ -1066,7 +1343,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         if parsed:
             if success:
-                output("Simulation daemon started successfully.")
+                output("Simulation daemon started successfully (build 41).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -1099,6 +1376,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         output(f"director_green_min_commodities={settings.director_green_min_commodities}")
         output(f"director_allow_social_goals={settings.director_allow_social_goals}")
         output(f"director_allow_social_wants={settings.director_allow_social_wants}")
+        output(f"director_enable_wants={settings.director_enable_wants}")
         output(f"director_use_guardian_when_low={settings.director_use_guardian_when_low}")
         output(f"last_director_called_time={last_called}")
         output(f"last_director_run_time={last_run}")
@@ -1253,6 +1531,124 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             "want_now result={} probe_log={}".format(
                 "SUCCESS" if ok else "FAIL", probe_log.get_probe_log_path()
             )
+        )
+        return True
+
+    if action_key == "collect":
+        logging_utils = importlib.import_module("simulation_mode.logging_utils")
+        _reload_settings(_connection, output)
+        payload = _build_collect_payload()
+        path = logging_utils.append_log_block(
+            settings.collect_log_filename, "SimulationMode COLLECT", payload
+        )
+        output(f"collect_written={path}")
+        return True
+
+    if action_key == "skill_plan_now":
+        director = importlib.import_module("simulation_mode.director")
+        guardian = importlib.import_module("simulation_mode.guardian")
+        logging_utils = importlib.import_module("simulation_mode.logging_utils")
+        services = importlib.import_module("services")
+        sim = _get_active_sim(services)
+        sim_info = getattr(sim, "sim_info", None) if sim is not None else None
+        if sim is None or sim_info is None:
+            output("No active sim found.")
+            return True
+        now = time.time()
+        sim_name = director._sim_display_name(sim_info)
+        snapshot = director.get_motive_snapshot_for_sim(sim_info)
+        min_motive = director._safe_min_motive(snapshot) if snapshot else None
+        motive_unsafe = (
+            min_motive is not None and min_motive < settings.director_min_safe_motive
+        )
+        result_lines = [
+            f"skill_plan_now sim={sim_name} sim_id={director._sim_identifier(sim_info)}",
+            f"min_motive={min_motive} min_safe_threshold={settings.director_min_safe_motive}",
+            f"motive_unsafe={motive_unsafe}",
+        ]
+        success = False
+        if motive_unsafe and settings.director_use_guardian_when_low:
+            ok, detail = guardian.push_self_care(
+                sim_info, now, settings.director_green_motive_percent
+            )
+            result_lines.append(f"guardian_invoked={ok} detail={detail}")
+            success = ok
+        else:
+            goal, candidates = director.build_skill_plan(sim_info)
+            result_lines.append(f"skill_candidates_count={len(candidates)}")
+            if candidates:
+                result_lines.append("skill_candidates_top5:")
+                for skill_key, reason in candidates[:5]:
+                    result_lines.append(f"- {skill_key} ({reason})")
+            if goal is None:
+                result_lines.append("skill_plan_result=FAIL reason=no skill candidates")
+            else:
+                skill_key, reason = goal
+                result_lines.append(f"chosen_skill_key={skill_key}")
+                result_lines.append(f"chosen_skill_reason={reason}")
+                details = {}
+                ok = director.try_push_skill_interaction(
+                    sim, skill_key, force=True, probe_details=details
+                )
+                result_lines.append(f"push_attempt_1_ok={ok}")
+                attempts = details.get("push_attempts", [])
+                if attempts:
+                    first_attempt = attempts[0]
+                    result_lines.append(
+                        "push_signature_1={} push_affordance_1={} push_ok_1={}".format(
+                            first_attempt.get("push_sig_names"),
+                            first_attempt.get("affordance_name"),
+                            first_attempt.get("push_ok"),
+                        )
+                    )
+                result_lines.append(f"target_object={details.get('target_label')}")
+                result_lines.append(
+                    f"chosen_affordance={details.get('chosen_affordance')}"
+                )
+                if details.get("failure_reason"):
+                    result_lines.append(f"failure_reason={details.get('failure_reason')}")
+                if details.get("candidate_affordances"):
+                    result_lines.append(
+                        f"candidate_affordances={details.get('candidate_affordances')}"
+                    )
+                if not ok:
+                    cancelled, cancel_reason = _cancel_sim_interactions(sim)
+                    result_lines.append(
+                        f"cancel_attempted={cancelled} cancel_reason={cancel_reason}"
+                    )
+                    retry_details = {}
+                    ok = director.try_push_skill_interaction(
+                        sim, skill_key, force=True, probe_details=retry_details
+                    )
+                    result_lines.append(f"push_attempt_2_ok={ok}")
+                    retry_attempts = retry_details.get("push_attempts", [])
+                    if retry_attempts:
+                        retry_first = retry_attempts[0]
+                        result_lines.append(
+                            "push_signature_2={} push_affordance_2={} push_ok_2={}".format(
+                                retry_first.get("push_sig_names"),
+                                retry_first.get("affordance_name"),
+                                retry_first.get("push_ok"),
+                            )
+                        )
+                    result_lines.append(f"target_object_retry={retry_details.get('target_label')}")
+                    result_lines.append(
+                        f"chosen_affordance_retry={retry_details.get('chosen_affordance')}"
+                    )
+                    if retry_details.get("failure_reason"):
+                        result_lines.append(
+                            f"failure_reason_retry={retry_details.get('failure_reason')}"
+                        )
+                success = ok
+                if ok:
+                    director._record_push(director._sim_identifier(sim_info), now)
+                    director._record_action(sim_info, skill_key, reason, now)
+        payload = "\n".join(result_lines)
+        path = logging_utils.append_log_block(
+            settings.collect_log_filename, "SimulationMode SKILL_PLAN_NOW", payload
+        )
+        output(
+            f"skill_plan_now_written={path} result={'success' if success else 'failure'}"
         )
         return True
 

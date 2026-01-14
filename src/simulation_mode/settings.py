@@ -30,6 +30,7 @@ KNOWN_DEFAULTS = [
     ("director_green_min_commodities", "6"),
     ("director_allow_social_goals", "false"),
     ("director_allow_social_wants", "true"),
+    ("director_enable_wants", "false"),
     ("director_use_guardian_when_low", "true"),
     ("director_per_sim_cooldown_seconds", "300"),
     ("director_max_pushes_per_sim_per_hour", "12"),
@@ -37,6 +38,7 @@ KNOWN_DEFAULTS = [
     ("director_fallback_to_started_skills", "true"),
     ("director_skill_allow_list", ""),
     ("director_skill_block_list", ""),
+    ("collect_log_filename", "simulation-mode-collect.log"),
     ("integrate_better_autonomy_trait", "false"),
     ("better_autonomy_trait_id", "3985292068"),
 ]
@@ -87,6 +89,9 @@ def _build_default_template_text():
         "director_allow_social_wants={}".format(defaults["director_allow_social_wants"])
     )
     lines.append(
+        "director_enable_wants={}".format(defaults["director_enable_wants"])
+    )
+    lines.append(
         "director_use_guardian_when_low={}".format(defaults["director_use_guardian_when_low"])
     )
     lines.append(
@@ -111,6 +116,7 @@ def _build_default_template_text():
     )
     lines.append("director_skill_allow_list={}".format(defaults["director_skill_allow_list"]))
     lines.append("director_skill_block_list={}".format(defaults["director_skill_block_list"]))
+    lines.append("collect_log_filename={}".format(defaults["collect_log_filename"]))
     lines.append("")
     lines.append(
         "# Optional integration if you ALSO installed a mod that defines this trait ID"
@@ -239,6 +245,7 @@ class SimulationModeSettings:
         director_green_min_commodities=6,
         director_allow_social_goals=False,
         director_allow_social_wants=True,
+        director_enable_wants=False,
         director_use_guardian_when_low=True,
         director_per_sim_cooldown_seconds=300,
         director_max_pushes_per_sim_per_hour=12,
@@ -246,6 +253,7 @@ class SimulationModeSettings:
         director_fallback_to_started_skills=True,
         director_skill_allow_list=None,
         director_skill_block_list=None,
+        collect_log_filename="simulation-mode-collect.log",
         integrate_better_autonomy_trait=False,
         better_autonomy_trait_id=3985292068,
     ):
@@ -267,6 +275,7 @@ class SimulationModeSettings:
         self.director_green_min_commodities = director_green_min_commodities
         self.director_allow_social_goals = director_allow_social_goals
         self.director_allow_social_wants = director_allow_social_wants
+        self.director_enable_wants = director_enable_wants
         self.director_use_guardian_when_low = director_use_guardian_when_low
         self.director_per_sim_cooldown_seconds = director_per_sim_cooldown_seconds
         self.director_max_pushes_per_sim_per_hour = director_max_pushes_per_sim_per_hour
@@ -274,6 +283,7 @@ class SimulationModeSettings:
         self.director_fallback_to_started_skills = director_fallback_to_started_skills
         self.director_skill_allow_list = director_skill_allow_list or []
         self.director_skill_block_list = director_skill_block_list or []
+        self.collect_log_filename = collect_log_filename
         self.integrate_better_autonomy_trait = integrate_better_autonomy_trait
         self.better_autonomy_trait_id = better_autonomy_trait_id
 
@@ -511,6 +521,11 @@ def load_settings(target):
                     target.director_allow_social_wants = value
                 else:
                     _log_invalid_value(key, raw_value)
+            elif key == "director_enable_wants":
+                if isinstance(value, bool):
+                    target.director_enable_wants = value
+                else:
+                    _log_invalid_value(key, raw_value)
             elif key == "director_use_guardian_when_low":
                 if isinstance(value, bool):
                     target.director_use_guardian_when_low = value
@@ -540,6 +555,11 @@ def load_settings(target):
                 target.director_skill_allow_list = _parse_list(raw_value)
             elif key == "director_skill_block_list":
                 target.director_skill_block_list = _parse_list(raw_value)
+            elif key == "collect_log_filename":
+                value = str(raw_value).strip()
+                target.collect_log_filename = (
+                    value if value else "simulation-mode-collect.log"
+                )
             elif key == "integrate_better_autonomy_trait":
                 if isinstance(value, bool):
                     target.integrate_better_autonomy_trait = value

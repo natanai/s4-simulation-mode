@@ -121,6 +121,17 @@ _CAREER_TO_SKILLS = {
     "ActorCareer": ["acting", "charisma"],
 }
 
+_AFFORDANCE_BLOCK_TOKENS = (
+    "offer",
+    "ask",
+    "invite",
+    "mentor",
+    "teach",
+    "discuss",
+    "chat",
+    "social",
+)
+
 _WHIM_RULES = {
     "fun": {
         "object_keywords": ["tv", "stereo", "radio", "computer", "console", "game"],
@@ -180,6 +191,7 @@ _LAST_ACTION_DETAILS = None
 _LAST_WANT_DETAILS = None
 
 _last_motive_snapshot_by_sim = {}
+_LAST_CAREER_PROBE = []
 
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
@@ -198,17 +210,94 @@ def _sim_identifier(sim_info):
     return sim_id or id(sim_info)
 
 
-def _is_sim_busy(sim):
+def _get_current_interaction(sim):
+    if sim is None:
+        return None, "sim_none"
+    for attr in ("get_current_interaction", "get_running_interaction", "get_current_super_interaction"):
+        getter = getattr(sim, attr, None)
+        if callable(getter):
+            try:
+                interaction = getter()
+            except Exception:
+                interaction = None
+            if interaction is not None:
+                return interaction, attr
     queue = getattr(sim, "queue", None)
     if queue is None:
-        return False
-    try:
-        queued = getattr(queue, "_queue", None)
-        if queued is not None and hasattr(queued, "__len__"):
-            return len(queued) > 0
-    except Exception:
-        pass
+        return None, "queue_none"
+    for attr in ("current_interaction", "_current_interaction", "running"):
+        interaction = getattr(queue, attr, None)
+        if interaction is None:
+            continue
+        if isinstance(interaction, (list, tuple)):
+            if interaction:
+                return interaction[0], f"queue.{attr}[0]"
+            continue
+        return interaction, f"queue.{attr}"
+    return None, "no_current_interaction"
+
+
+def _interaction_is_idle(interaction):
+    for attr in ("is_idle", "is_idle_interaction", "is_sim_idle"):
+        value = getattr(interaction, attr, None)
+        if callable(value):
+            try:
+                return bool(value())
+            except Exception:
+                continue
+        if value is not None:
+            return bool(value)
     return False
+
+
+def _interaction_is_cancelable(interaction):
+    for attr in ("can_cancel", "can_be_canceled", "can_be_cancelled", "is_cancelable"):
+        value = getattr(interaction, attr, None)
+        if callable(value):
+            try:
+                return bool(value())
+            except Exception:
+                continue
+        if value is not None:
+            return bool(value)
+    return None
+
+
+def _queue_size(sim):
+    queue = getattr(sim, "queue", None)
+    if queue is None:
+        return None
+    for attr in ("_queue", "queue"):
+        value = getattr(queue, attr, None)
+        if value is None:
+            continue
+        try:
+            return len(value)
+        except Exception:
+            continue
+    return None
+
+
+def _is_sim_busy(sim):
+    interaction, source = _get_current_interaction(sim)
+    if interaction is None:
+        queue_len = _queue_size(sim)
+        detail = f"no active interaction (queue_len={queue_len})"
+        return False, detail
+    if _interaction_is_idle(interaction):
+        queue_len = _queue_size(sim)
+        detail = f"current interaction idle source={source} queue_len={queue_len}"
+        return False, detail
+    cancelable = _interaction_is_cancelable(interaction)
+    if cancelable is False:
+        detail = (
+            f"active non-cancelable interaction source={source} type={type(interaction).__name__}"
+        )
+        return True, detail
+    detail = (
+        f"active but cancelable interaction source={source} type={type(interaction).__name__}"
+    )
+    return False, detail
 
 
 def _get_motive_snapshot(sim_info):
@@ -329,6 +418,28 @@ def _extract_skill_name(skill):
     )
 
 
+def _trim_repr(value, limit=200):
+    try:
+        text = repr(value)
+    except Exception as exc:
+        text = f"<repr failed: {exc}>"
+    if text is None:
+        return ""
+    if len(text) > limit:
+        return f"{text[:limit]}..."
+    return text
+
+
+def _skill_key_from_name(name):
+    if not name:
+        return None
+    lowered = name.lower()
+    for key in _SKILL_RULES:
+        if key in lowered:
+            return key
+    return None
+
+
 def _skill_level_from_tracker(skill_tracker, skill):
     getter = getattr(skill_tracker, "get_skill_level", None)
     if callable(getter):
@@ -386,58 +497,8 @@ def _skill_max_from_skill(skill):
     return None
 
 
-def _choose_career_skill(sim_info):
-    if sim_info is None or not settings.director_prefer_career_skills:
-        return None
-    career_tracker = getattr(sim_info, "career_tracker", None)
-    career = None
-    if career_tracker is not None:
-        career = getattr(career_tracker, "career_current", None) or getattr(
-            career_tracker, "current_career", None
-        )
-        if career is None:
-            careers_dict = getattr(career_tracker, "_careers", None)
-            if isinstance(careers_dict, dict) and careers_dict:
-                candidates = [candidate for candidate in careers_dict.values() if candidate is not None]
-                if any(
-                    callable(getattr(candidate, "is_work_career", None))
-                    for candidate in candidates
-                ):
-                    work_candidates = [
-                        candidate
-                        for candidate in candidates
-                        if candidate is not None
-                        and callable(getattr(candidate, "is_work_career", None))
-                        and candidate.is_work_career()
-                    ]
-                    if work_candidates:
-                        candidates = work_candidates
-                if candidates:
-                    career = max(
-                        candidates,
-                        key=lambda candidate: (getattr(candidate, "level", 0) or 0),
-                    )
-    career_name = ""
-    career_guid = None
-    if career is not None:
-        career_name = getattr(getattr(career, "__class__", None), "__name__", "")
-        career_guid = getattr(career, "guid64", None)
-    if not career_name:
-        return None
-    lowered = career_name.lower()
-    for key, skills in _CAREER_TO_SKILLS.items():
-        if key.lower() in lowered:
-            for skill_key in skills:
-                if _skill_allowed(skill_key):
-                    reason = f"career: {career_name}"
-                    if career_guid is not None:
-                        reason = f"career: {career_name} ({career_guid})"
-                    return skill_key, reason
-    return None
-
-
-def _choose_started_skill(sim_info):
-    if sim_info is None or not settings.director_fallback_to_started_skills:
+def _skill_level_for_key(sim_info, skill_key):
+    if sim_info is None or not skill_key:
         return None
     skill_tracker = getattr(sim_info, "skill_tracker", None)
     get_skills = None
@@ -445,45 +506,258 @@ def _choose_started_skill(sim_info):
         get_skills = getattr(skill_tracker, "get_all_skills", None)
         if get_skills is None:
             get_skills = getattr(skill_tracker, "get_all_skill_types", None)
-    if callable(get_skills):
-        try:
-            skills = list(get_skills())
-        except Exception:
-            skills = []
-        for skill in skills:
-            try:
-                name = _extract_skill_name(skill)
-                if not name:
-                    continue
-                lowered = name.lower()
-                matched_key = None
-                for key in _SKILL_RULES:
-                    if key in lowered:
-                        matched_key = key
-                        break
-                if matched_key is None:
-                    continue
-                if not _skill_allowed(matched_key):
-                    continue
+    if not callable(get_skills):
+        return None
+    try:
+        skills = list(get_skills())
+    except Exception:
+        return None
+    for skill in skills:
+        name = _extract_skill_name(skill)
+        if not name:
+            continue
+        if _skill_key_from_name(name) != skill_key:
+            continue
+        level = _skill_level_from_skill(skill)
+        if level is None and skill_tracker is not None:
+            level = _skill_level_from_tracker(skill_tracker, skill)
+        return level
+    return None
 
-                level = _skill_level_from_skill(skill)
-                if level is None and skill_tracker is not None:
-                    level = _skill_level_from_tracker(skill_tracker, skill)
-                max_level = _skill_max_from_skill(skill)
-                if max_level is None and skill_tracker is not None:
-                    max_level = _skill_max_from_tracker(skill_tracker, skill)
 
-                if level is None or max_level is None:
+def _iter_careers(sim_info):
+    if sim_info is None:
+        return []
+    career_tracker = getattr(sim_info, "career_tracker", None)
+    if career_tracker is None:
+        return []
+    careers = []
+    career = getattr(career_tracker, "career_current", None) or getattr(
+        career_tracker, "current_career", None
+    )
+    if career is not None:
+        careers.append(career)
+    careers_dict = getattr(career_tracker, "_careers", None)
+    if isinstance(careers_dict, dict):
+        for candidate in careers_dict.values():
+            if candidate is not None and candidate not in careers:
+                careers.append(candidate)
+    if careers:
+        work_candidates = []
+        for candidate in careers:
+            is_work = getattr(candidate, "is_work_career", None)
+            if callable(is_work):
+                try:
+                    if is_work():
+                        work_candidates.append(candidate)
+                except Exception:
                     continue
-                if level > 0 and level < max_level:
-                    return matched_key, "started skill"
-            except Exception:
+        if work_candidates:
+            return work_candidates
+    return careers
+
+
+def _iter_skill_tuning_values(value):
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        items = list(value.values())
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        items = [value]
+    out = []
+    for item in items:
+        if item is None:
+            continue
+        out.append(item)
+    return out
+
+
+def _extract_skill_candidates_from_value(value):
+    candidates = []
+    for item in _iter_skill_tuning_values(value):
+        name = _extract_skill_name(item)
+        skill_key = _skill_key_from_name(name)
+        if skill_key and _skill_allowed(skill_key):
+            candidates.append((skill_key, name))
+    return candidates
+
+
+def _get_career_skill_candidates(sim_info):
+    global _LAST_CAREER_PROBE
+    _LAST_CAREER_PROBE = []
+    if sim_info is None or not settings.director_prefer_career_skills:
+        return []
+    candidates = []
+    careers = _iter_careers(sim_info)
+    if not careers:
+        _LAST_CAREER_PROBE.append("career_probe=no careers found")
+        return []
+    for career in careers:
+        career_name = getattr(getattr(career, "__class__", None), "__name__", "") or "Career"
+        career_guid = getattr(career, "guid64", None)
+        for obj_label, obj in (
+            ("career", career),
+            ("career_track", getattr(career, "current_track", None)),
+            ("current_level", getattr(career, "current_level_tuning", None)),
+            ("next_level", getattr(career, "next_level_tuning", None)),
+        ):
+            if obj is None:
                 continue
+            for attr in dir(obj):
+                if "skill" not in attr.lower():
+                    continue
+                try:
+                    value = getattr(obj, attr)
+                except Exception:
+                    continue
+                if callable(value):
+                    try:
+                        value = value()
+                    except Exception:
+                        continue
+                _LAST_CAREER_PROBE.append(
+                    f"{career_name}.{obj_label}.{attr} type={type(value).__name__} repr={_trim_repr(value)}"
+                )
+                for skill_key, skill_name in _extract_skill_candidates_from_value(value):
+                    detail = (
+                        f"career_requirement:{career_name}.{obj_label}.{attr} skill={skill_name}"
+                    )
+                    if career_guid is not None:
+                        detail = f"{detail} career_id={career_guid}"
+                    rationale = f"career_skill: {skill_key} because {detail}"
+                    candidates.append((skill_key, rationale))
+    if candidates:
+        deduped = []
+        seen = set()
+        for skill_key, rationale in candidates:
+            if skill_key in seen:
+                continue
+            seen.add(skill_key)
+            deduped.append((skill_key, rationale))
+
+        def _level_sort(item):
+            level = _skill_level_for_key(sim_info, item[0])
+            return (level if level is not None else 999, item[0])
+
+        deduped.sort(key=_level_sort)
+        return deduped
+
+    fallback = []
+    for career in careers:
+        career_name = getattr(getattr(career, "__class__", None), "__name__", "") or ""
+        career_guid = getattr(career, "guid64", None)
+        lowered = career_name.lower()
+        for key, skills in _CAREER_TO_SKILLS.items():
+            if key.lower() in lowered:
+                for skill_key in skills:
+                    if not _skill_allowed(skill_key):
+                        continue
+                    rationale = (
+                        f"career_skill: {skill_key} because career requirements not discoverable "
+                        f"via tuning probe; using curated career mapping for career id={career_guid}"
+                    )
+                    fallback.append((skill_key, rationale))
+        if fallback:
+            break
+    if fallback:
+        _LAST_CAREER_PROBE.append("career_probe=fallback_mapping_used")
+    return fallback
+
+
+def _choose_career_skill(sim_info):
+    if sim_info is None or not settings.director_prefer_career_skills:
+        return None
+    for skill_key, rationale in _get_career_skill_candidates(sim_info):
+        if _skill_allowed(skill_key):
+            return skill_key, rationale
+    return None
+
+
+def _get_started_skill_candidates(sim_info):
+    if sim_info is None or not settings.director_fallback_to_started_skills:
+        return []
+    skill_tracker = getattr(sim_info, "skill_tracker", None)
+    get_skills = None
+    if skill_tracker is not None:
+        get_skills = getattr(skill_tracker, "get_all_skills", None)
+        if get_skills is None:
+            get_skills = getattr(skill_tracker, "get_all_skill_types", None)
+    if not callable(get_skills):
+        return []
+    try:
+        skills = list(get_skills())
+    except Exception:
+        skills = []
+    candidates = []
+    for skill in skills:
+        try:
+            name = _extract_skill_name(skill)
+            if not name:
+                continue
+            matched_key = _skill_key_from_name(name)
+            if matched_key is None:
+                continue
+            if not _skill_allowed(matched_key):
+                continue
+
+            level = _skill_level_from_skill(skill)
+            if level is None and skill_tracker is not None:
+                level = _skill_level_from_tracker(skill_tracker, skill)
+            max_level = _skill_max_from_skill(skill)
+            if max_level is None and skill_tracker is not None:
+                max_level = _skill_max_from_tracker(skill_tracker, skill)
+            if level is None:
+                continue
+            if level <= 0 or level >= 10:
+                continue
+            max_level = max_level if max_level is not None else 10
+            if level >= max_level:
+                continue
+            candidates.append(
+                (
+                    matched_key,
+                    f"started_skill: {matched_key} because level={level}",
+                    level,
+                )
+            )
+        except Exception:
+            continue
+    candidates.sort(key=lambda item: (item[2], item[0]))
+    return candidates
+
+
+def _choose_started_skill(sim_info):
+    if sim_info is None or not settings.director_fallback_to_started_skills:
+        return None
+    candidates = _get_started_skill_candidates(sim_info)
+    if candidates:
+        skill_key, rationale, _level = candidates[0]
+        return skill_key, rationale
     return None
 
 
 def choose_skill_goal(sim_info):
     return _choose_career_skill(sim_info) or _choose_started_skill(sim_info)
+
+
+def build_skill_plan(sim_info):
+    candidates = []
+    selected = None
+    if settings.director_prefer_career_skills:
+        career_candidates = _get_career_skill_candidates(sim_info)
+        for skill_key, rationale in career_candidates:
+            candidates.append((skill_key, rationale))
+        if career_candidates:
+            selected = career_candidates[0]
+    if selected is None and settings.director_fallback_to_started_skills:
+        started_candidates = _get_started_skill_candidates(sim_info)
+        for skill_key, rationale, _level in started_candidates:
+            candidates.append((skill_key, rationale))
+        if started_candidates:
+            selected = (started_candidates[0][0], started_candidates[0][1])
+    return selected, candidates
 
 
 def _is_proto_message(obj):
@@ -1537,6 +1811,54 @@ def _push_affordance_with_details(sim, target_obj, affordance, reason=None, forc
     return False, failure_reason, sig_names, client_attached
 
 
+def _value_mentions_target_sim(value):
+    if value is None:
+        return False
+    text = _trim_repr(value).lower()
+    return "targetsim" in text or "target_sim" in text or "participanttype.targetsim" in text
+
+
+def _affordance_requires_target_sim(affordance):
+    for attr in (
+        "target_type",
+        "target_types",
+        "target_sim_type",
+        "participant_type",
+        "participant_types",
+        "participants",
+    ):
+        value = getattr(affordance, attr, None)
+        if value is None:
+            continue
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                continue
+        if _value_mentions_target_sim(value):
+            return True
+        if isinstance(value, (list, tuple, set)):
+            if any(_value_mentions_target_sim(item) for item in value):
+                return True
+    return False
+
+
+def _skill_affordance_block_reason(affordance):
+    if affordance is None:
+        return "none"
+    if is_picker_affordance(affordance):
+        return "picker_affordance"
+    name = affordance_name(affordance)
+    class_name = _get_affordance_class_name(affordance).lower()
+    if any(token in name for token in _AFFORDANCE_BLOCK_TOKENS):
+        return "blocked_name_token"
+    if any(token in class_name for token in _AFFORDANCE_BLOCK_TOKENS):
+        return "blocked_class_token"
+    if _affordance_requires_target_sim(affordance):
+        return "requires_target_sim"
+    return None
+
+
 def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
     sim_name = getattr(sim, "full_name", None)
     if callable(sim_name):
@@ -1567,13 +1889,19 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
         target_obj, rule.get("affordance_keywords", []), sim=sim
     )
     filtered = []
+    candidate_debug = []
     for affordance in candidates:
         try:
-            if is_picker_affordance(affordance):
-                continue
-            name = affordance_name(affordance)
-            module_name = getattr(affordance, "__module__", "") or ""
-            if "mentor" in name or "social" in module_name.lower():
+            reason = _skill_affordance_block_reason(affordance)
+            candidate_debug.append(
+                {
+                    "affordance_name": affordance_name(affordance),
+                    "affordance_class": _get_affordance_class_name(affordance),
+                    "blocked_reason": reason,
+                    "requires_target_sim": _affordance_requires_target_sim(affordance),
+                }
+            )
+            if reason is not None:
                 continue
         except Exception:
             continue
@@ -1606,13 +1934,14 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
         probe_details["target_label"] = _get_object_probe_label(target_obj)
         probe_details["target_type"] = "object"
         probe_details["push_attempts"] = []
+        probe_details["candidate_affordances"] = candidate_debug
     if not filtered:
         _append_debug(
             f"{sim_name}: FAIL no affordance for skill={skill_key} "
             f"object={_get_object_label(target_obj)} keywords={rule.get('affordance_keywords')}"
         )
         if probe_details is not None:
-            probe_details["failure_reason"] = "no affordance candidates"
+            probe_details["failure_reason"] = "no safe affordance candidates"
         return False
     for affordance in filtered[:8]:
         ok, failure_reason, sig_names, _client_attached = _push_affordance_with_details(
@@ -1630,6 +1959,9 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
                 }
             )
         if ok:
+            if probe_details is not None:
+                probe_details["chosen_affordance"] = affordance_name(affordance)
+                probe_details["chosen_affordance_class"] = _get_affordance_class_name(affordance)
             _append_debug(
                 f"{sim_name}: SUCCESS push skill={skill_key} aff={_aff_label(affordance)}"
             )
@@ -1762,6 +2094,72 @@ def get_motive_snapshot_for_sim(sim_info):
     return snapshot or []
 
 
+def get_last_career_probe():
+    return list(_LAST_CAREER_PROBE)
+
+
+def build_plan_preview(sim, now=None):
+    if sim is None:
+        return None
+    sim_info = getattr(sim, "sim_info", None)
+    if sim_info is None:
+        return None
+    now = time.time() if now is None else now
+    sim_id = _sim_identifier(sim_info)
+    snapshot = _get_motive_snapshot(sim_info)
+    min_motive = _safe_min_motive(snapshot) if snapshot else None
+    green_count = 0
+    for _key, value in snapshot or []:
+        if guardian.motive_is_green(value, settings.director_green_motive_percent):
+            green_count += 1
+    motive_unsafe = (
+        min_motive is not None and min_motive < settings.director_min_safe_motive
+    )
+    busy, busy_reason = _is_sim_busy(sim)
+    last_push = _per_sim_last_push_time.get(sim_id)
+    cooldown_ok = _can_push_for_sim(sim_id, now)
+    time_since_last_push = None
+    if last_push is not None:
+        time_since_last_push = now - last_push
+    plan = "NONE"
+    plan_reason = "no plan"
+    chosen_skill = None
+    candidates = []
+    if motive_unsafe:
+        if settings.director_use_guardian_when_low and settings.guardian_enabled:
+            plan = "GUARDIAN"
+            plan_reason = "unsafe motive"
+        else:
+            plan = "NONE"
+            plan_reason = "unsafe motive; guardian disabled"
+    else:
+        if snapshot and green_count >= settings.director_green_min_commodities:
+            chosen_skill, candidates = build_skill_plan(sim_info)
+            if chosen_skill is not None:
+                plan = "SKILLS"
+                plan_reason = chosen_skill[1]
+            else:
+                plan_reason = "no skill candidates"
+        else:
+            plan_reason = "green gate not met"
+    return {
+        "sim_id": sim_id,
+        "busy": busy,
+        "busy_reason": busy_reason,
+        "cooldown_ok": cooldown_ok,
+        "time_since_last_push": time_since_last_push,
+        "min_motive": min_motive,
+        "motive_unsafe": motive_unsafe,
+        "green_count": green_count,
+        "motive_total": len(snapshot or []),
+        "plan": plan,
+        "plan_reason": plan_reason,
+        "chosen_skill": chosen_skill,
+        "candidates": candidates,
+        "snapshot": snapshot or [],
+    }
+
+
 def _evaluate(now: float, force: bool = False):
     global last_director_time
     _DEBUG_RING.clear()
@@ -1790,7 +2188,11 @@ def _evaluate(now: float, force: bool = False):
                 for _key, value in snapshot:
                     if guardian.motive_is_green(value, settings.director_green_motive_percent):
                         green_count += 1
-                if green_count < settings.director_green_min_commodities:
+                motive_unsafe = (
+                    min_motive is not None
+                    and min_motive < settings.director_min_safe_motive
+                )
+                if motive_unsafe:
                     if settings.director_use_guardian_when_low and settings.guardian_enabled:
                         success, debug_message = guardian.push_self_care(
                             sim_info, now, settings.director_green_motive_percent
@@ -1804,101 +2206,78 @@ def _evaluate(now: float, force: bool = False):
                         else:
                             _dbg(f"{sim_name}: CARE {debug_message}")
                     else:
-                        _dbg(f"{sim_name}: CARE disabled (gate)")
+                        _dbg(f"{sim_name}: CARE disabled (unsafe motive)")
+                    continue
+                if green_count < settings.director_green_min_commodities:
+                    _dbg(
+                        f"{sim_name}: SKIP green gate "
+                        f"({green_count}/{len(snapshot)} < {settings.director_green_min_commodities})"
+                    )
                     continue
             else:
                 _dbg(f"{sim_name}: SKIP motives unreadable (no motive stats found)")
                 continue
 
-            if _is_sim_busy(sim):
-                _dbg(f"{sim_name}: SKIP busy")
+            busy, busy_reason = _is_sim_busy(sim)
+            if busy:
+                _dbg(f"{sim_name}: SKIP busy ({busy_reason})")
                 continue
 
             if not _can_push_for_sim(sim_id, now):
                 _dbg(f"{sim_name}: SKIP cooldown")
                 continue
 
-            want_targets, want_reason = _select_want_targets(sim_info)
-            goal = None
-            if want_targets:
-                pushed_any = False
-                for want_key, want_name, want_obj in want_targets:
-                    debug_name = getattr(want_obj, "__name__", None) or str(want_obj)
-                    _dbg(f"{sim_name}: WHIM picked __name__={debug_name}")
-                    rule_key = _resolve_whim_rule(want_name)
-                    if rule_key == "social":
-                        if (
-                            hasattr(settings, "director_allow_social_wants")
-                            and not settings.director_allow_social_wants
-                        ):
-                            _dbg(f"{sim_name}: WANT social disabled")
+            if settings.director_enable_wants:
+                want_targets, want_reason = _select_want_targets(sim_info)
+                if want_targets:
+                    pushed_any = False
+                    for _want_key, want_name, want_obj in want_targets:
+                        debug_name = getattr(want_obj, "__name__", None) or str(want_obj)
+                        _dbg(f"{sim_name}: WHIM picked __name__={debug_name}")
+                        rule_key = _resolve_whim_rule(want_name)
+                        if rule_key == "social":
+                            if (
+                                hasattr(settings, "director_allow_social_wants")
+                                and not settings.director_allow_social_wants
+                            ):
+                                _dbg(f"{sim_name}: WANT social disabled")
+                                continue
+                        if rule_key == "hug":
+                            if (
+                                hasattr(settings, "director_allow_social_wants")
+                                and not settings.director_allow_social_wants
+                            ):
+                                _dbg(f"{sim_name}: WANT hug disabled")
+                                continue
+                        if rule_key is None:
                             continue
-                    if rule_key == "hug":
-                        if (
-                            hasattr(settings, "director_allow_social_wants")
-                            and not settings.director_allow_social_wants
-                        ):
-                            _dbg(f"{sim_name}: WANT hug disabled")
-                            continue
-                    if rule_key is None:
+                        pushed, want_message = _push_want(
+                            sim, rule_key, want_name, want_obj=want_obj, force=force
+                        )
+                        if pushed:
+                            _record_push(sim_id, now)
+                            action = f"{sim_name} -> WANT {want_name}"
+                            _append_action(action)
+                            last_director_time = now
+                            pushed_any = True
+                            break
+                        _dbg(f"{sim_name}: {want_message}")
+                    if pushed_any:
                         continue
-                    pushed, want_message = _push_want(
-                        sim, rule_key, want_name, want_obj=want_obj, force=force
-                    )
-                    if pushed:
-                        _record_push(sim_id, now)
-                        action = f"{sim_name} -> WANT {want_name}"
-                        _append_action(action)
-                        last_director_time = now
-                        pushed_any = True
-                        break
-                    _dbg(f"{sim_name}: {want_message}")
-                if pushed_any:
-                    continue
-            elif want_reason:
-                _dbg(f"{sim_name}: {want_reason}")
+                elif want_reason:
+                    _dbg(f"{sim_name}: {want_reason}")
 
-            if goal is None:
-                goal = choose_skill_goal(sim_info)
+            goal, _candidates = build_skill_plan(sim_info)
             if goal is None:
                 _dbg(f"{sim_name}: NO GOAL")
                 continue
             skill_key, reason = goal
-
-            rule = _SKILL_RULES.get(skill_key)
-            if rule is None:
-                _dbg(f"{sim_name}: FAIL no rule for skill={skill_key}")
-                continue
-            target_obj = _find_target_object(sim, rule)
-            if target_obj is None:
-                _dbg(f"{sim_name}: FAIL no object for skill={skill_key}")
-                continue
-            candidates = find_affordance_candidates(
-                target_obj, rule.get("affordance_keywords", []), sim=sim
-            )
-            if not candidates:
-                _dbg(
-                    f"{sim_name}: FAIL no affordance on object={_get_object_label(target_obj)} "
-                    f"for skill={skill_key}"
-                )
-                continue
-            affordance = candidates[0]
-            try:
-                pushed = _push_affordance(sim, target_obj, affordance, reason=skill_key, force=force)
-            except Exception as exc:
-                _dbg(
-                    f"{sim_name}: EXC push skill={skill_key} target={_get_object_label(target_obj)} "
-                    f"aff={_aff_label(affordance)} err={repr(exc)}"
-                )
-                continue
+            pushed = try_push_skill_interaction(sim, skill_key, force=force)
             if pushed:
                 _record_push(sim_id, now)
                 _record_action(sim_info, skill_key, reason, now)
             else:
-                _dbg(
-                    f"{sim_name}: FAIL push returned False skill={skill_key} "
-                    f"target={_get_object_label(target_obj)} aff={_aff_label(affordance)}"
-                )
+                _dbg(f"{sim_name}: FAIL push returned False skill={skill_key}")
         except Exception:
             continue
     if not last_director_debug and len(last_director_actions) == actions_before:

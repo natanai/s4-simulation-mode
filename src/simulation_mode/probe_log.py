@@ -3,6 +3,8 @@ import time
 
 from simulation_mode.settings import get_config_path
 
+probe_log_error = None
+
 
 def get_probe_log_path():
     cfg = os.path.abspath(get_config_path())
@@ -10,9 +12,21 @@ def get_probe_log_path():
     return os.path.join(folder, "simulation-mode-probe.log")
 
 
+def _prepare_probe_log_path():
+    global probe_log_error
+    path = get_probe_log_path()
+    if not path:
+        probe_log_error = "probe_log_path is empty; skipping probe log write"
+        return None
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
 def append_probe_line(line: str):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    path = get_probe_log_path()
+    path = _prepare_probe_log_path()
+    if not path:
+        return
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(f"[{timestamp}] {line}\n")
 
@@ -31,13 +45,17 @@ def append_probe_block(title, lines):
     if not block_lines:
         return
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    path = get_probe_log_path()
+    path = _prepare_probe_log_path()
+    if not path:
+        return
     with open(path, "a", encoding="utf-8") as handle:
         handle.write("\n".join(f"[{timestamp}] {line}" for line in block_lines))
         handle.write("\n")
 
 
 def probe_clear():
-    path = get_probe_log_path()
+    path = _prepare_probe_log_path()
+    if not path:
+        return
     with open(path, "w", encoding="utf-8") as handle:
         handle.write("")

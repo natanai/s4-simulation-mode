@@ -64,7 +64,13 @@ def _filter_names(obj, contains):
 
 def _status_lines():
     running, daemon_error, daemon_tick_count = _daemon_snapshot()
+    try:
+        package = importlib.import_module("simulation_mode")
+        version = getattr(package, "__version__", None)
+    except Exception:
+        version = None
     return [
+        f"version={version}" if version else "version=unknown",
         f"enabled={settings.enabled}",
         f"auto_unpause={settings.auto_unpause}",
         f"allow_death={settings.allow_death}",

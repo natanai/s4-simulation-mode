@@ -24,7 +24,7 @@ _MOTIVE_ALIASES = {
 _MOTIVE_KEYS = list(_MOTIVE_ALIASES.keys())
 
 _OBJECT_KEYWORDS = {
-    "motive_hunger": ["fridge", "refriger", "microwave", "stove", "oven", "grill"],
+    "motive_hunger": ["fridge", "refriger", "microwave"],
     "motive_bladder": ["toilet", "urinal", "potty"],
     "motive_energy": ["bed", "tent", "coffin", "sleeping"],
     "motive_hygiene": ["shower", "bath", "sink"],

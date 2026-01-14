@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.5.0)
+# Simulation Mode Kernel Mod (v0.5.0, Build 43)
 
 ## What it is
 

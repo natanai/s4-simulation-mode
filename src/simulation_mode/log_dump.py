@@ -16,6 +16,7 @@ def get_log_path():
 
 def dump_state_to_file(extra_note: str = ""):
     daemon = importlib.import_module("simulation_mode.daemon")
+    push_utils = importlib.import_module("simulation_mode.push_utils")
     path = get_log_path()
     try:
         lines = []
@@ -24,6 +25,11 @@ def dump_state_to_file(extra_note: str = ""):
         if extra_note:
             lines.append(f"NOTE: {extra_note}")
         lines.append(f"config_path={os.path.abspath(get_config_path())}")
+        lines.append(
+            "unsafe_affordance_cache_size={}".format(
+                len(getattr(push_utils, "_UNSAFE_AFFORDANCE_CACHE", []))
+            )
+        )
 
         for key in sorted(vars(settings).keys()):
             try:

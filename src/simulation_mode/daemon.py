@@ -5,6 +5,7 @@ import traceback
 from simulation_mode import clock_utils
 from simulation_mode import director
 from simulation_mode.settings import settings
+import services
 
 
 class _DaemonOwnerSingleton:
@@ -170,6 +171,11 @@ def _on_tick(_alarm_handle=None):
         return
     _maybe_auto_unpause()
     _maybe_reassert_death()
+    zone = services.current_zone()
+    if zone is None:
+        return
+    if not getattr(zone, "is_zone_running", False):
+        return
     if settings.guardian_enabled:
         try:
             if not clock_utils.is_paused():

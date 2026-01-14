@@ -33,6 +33,8 @@ if _PICKER_SPEC is not None:
     _picker_module = importlib.import_module("interactions.base.picker_interaction")
     _PICKER_SUPER_INTERACTION = getattr(_picker_module, "PickerSuperInteraction", None)
 
+_UNSAFE_AFFORDANCE_CACHE = set()
+
 
 def is_picker_affordance(affordance):
     if affordance is None:
@@ -248,6 +250,38 @@ def affordance_name(aff):
     ).lower()
 
 
+def _required_kwonly_args(aff):
+    init = getattr(aff, "__init__", None)
+    if init is None:
+        return []
+    try:
+        sig = inspect.signature(init)
+    except Exception:
+        return []
+    required = [
+        param.name.lower()
+        for param in sig.parameters.values()
+        if param.kind == param.KEYWORD_ONLY and param.default is inspect._empty
+    ]
+    return required
+
+
+def is_safe_for_script_push(aff):
+    if aff is None:
+        return False, "none"
+    name = affordance_name(aff)
+    if name in _UNSAFE_AFFORDANCE_CACHE:
+        return False, "cached_unsafe"
+    if is_picker_affordance(aff):
+        return False, "picker_affordance"
+    if any(fragment in name for fragment in ("createfood", "createfinalfood")):
+        return False, "crafting_food_affordance"
+    required = _required_kwonly_args(aff)
+    if required:
+        return False, "requires_kwonly=" + ",".join(required)
+    return True, "ok"
+
+
 def _score_affordance(affordance, keywords):
     name = affordance_name(affordance)
     score = 0
@@ -261,7 +295,7 @@ def _score_affordance(affordance, keywords):
     return score
 
 
-def find_affordance_candidates(obj, keywords, sim=None):
+def find_affordance_candidates(obj, keywords, sim=None, debug_append=None):
     if not keywords:
         return []
     affordances = iter_super_affordances(obj, sim)
@@ -273,6 +307,13 @@ def find_affordance_candidates(obj, keywords, sim=None):
         try:
             name = affordance_name(affordance)
             if any(keyword in name for keyword in lowered_keywords):
+                safe, reason = is_safe_for_script_push(affordance)
+                if not safe:
+                    if debug_append:
+                        debug_append(
+                            f"SKIP unsafe affordance {name} reason={reason}"
+                        )
+                    continue
                 candidates.append(affordance)
         except Exception:
             continue
@@ -286,6 +327,10 @@ def call_push_super_affordance(sim, super_affordance, target, context):
     fn = getattr(sim, "push_super_affordance", None)
     if fn is None:
         return False, "no push_super_affordance on sim", []
+
+    safe, reason = is_safe_for_script_push(super_affordance)
+    if not safe:
+        return False, f"unsafe affordance: {reason}", []
 
     try:
         sig = inspect.signature(fn)
@@ -315,6 +360,10 @@ def call_push_super_affordance(sim, super_affordance, target, context):
         return True, None, names
     except Exception as exc:
         param_names = names if "names" in locals() else []
+        message = str(exc)
+        lower_message = message.lower()
+        if "crafting_process" in lower_message or "phase" in lower_message:
+            _UNSAFE_AFFORDANCE_CACHE.add(affordance_name(super_affordance))
         return False, f"exception calling push_super_affordance: {exc!r}", param_names
 
 
@@ -329,10 +378,21 @@ def push_best_affordance(
     debug_append=None,
 ):
     context, client_attached = make_interaction_context(sim, force=force, source=source)
-    candidates = find_affordance_candidates(target_obj, keywords, sim=sim)
+    candidates = find_affordance_candidates(
+        target_obj, keywords, sim=sim, debug_append=debug_append
+    )
     if not candidates:
-        return False, None, "no affordance candidates"
+        return False, None, "no safe affordances"
     for affordance in candidates[:max_candidates]:
+        safe, reason = is_safe_for_script_push(affordance)
+        if not safe:
+            if debug_append:
+                debug_append(
+                    "SKIP unsafe affordance {} reason={}".format(
+                        affordance_name(affordance), reason
+                    )
+                )
+            continue
         ok, reason, sig_names = call_push_super_affordance(
             sim, affordance, target_obj, context
         )
@@ -347,4 +407,4 @@ def push_best_affordance(
                     client_attached,
                 )
             )
-    return False, None, "all candidates failed"
+    return False, None, "all safe candidates failed"

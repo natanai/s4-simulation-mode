@@ -72,12 +72,20 @@ def _resolve_source(source, force):
     if source is not None:
         return source
     try:
-        return InteractionSource.AUTONOMY
+        return InteractionSource.PIE_MENU if force else InteractionSource.AUTONOMY
     except Exception:
         try:
-            return InteractionContext.SOURCE_AUTONOMY
+            return (
+                InteractionContext.SOURCE_PIE_MENU
+                if force
+                else InteractionContext.SOURCE_AUTONOMY
+            )
         except Exception:
-            return InteractionContext.SOURCE_SCRIPT if force else InteractionContext.SOURCE_AUTONOMY
+            return (
+                InteractionContext.SOURCE_PIE_MENU
+                if force
+                else InteractionContext.SOURCE_AUTONOMY
+            )
 
 
 def make_interaction_context(sim, *, force=False, source=None):
@@ -85,7 +93,7 @@ def make_interaction_context(sim, *, force=False, source=None):
     prio = priority.Priority.Critical if force else priority.Priority.High
 
     try:
-        insert = QueueInsertStrategy.NEXT if force else QueueInsertStrategy.LAST
+        insert = QueueInsertStrategy.FIRST if force else QueueInsertStrategy.NEXT
     except Exception:
         insert = QueueInsertStrategy.NEXT
 

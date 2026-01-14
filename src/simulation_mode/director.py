@@ -279,6 +279,11 @@ def _queue_size(sim):
 
 
 def _is_sim_busy(sim):
+    queue = getattr(sim, "queue", None)
+    running = getattr(queue, "running", None) if queue is not None else None
+    if running is not None:
+        detail = f"running interaction queue.running type={type(running).__name__}"
+        return True, detail
     interaction, source = _get_current_interaction(sim)
     if interaction is None:
         queue_len = _queue_size(sim)
@@ -288,16 +293,8 @@ def _is_sim_busy(sim):
         queue_len = _queue_size(sim)
         detail = f"current interaction idle source={source} queue_len={queue_len}"
         return False, detail
-    cancelable = _interaction_is_cancelable(interaction)
-    if cancelable is False:
-        detail = (
-            f"active non-cancelable interaction source={source} type={type(interaction).__name__}"
-        )
-        return True, detail
-    detail = (
-        f"active but cancelable interaction source={source} type={type(interaction).__name__}"
-    )
-    return False, detail
+    detail = f"active interaction source={source} type={type(interaction).__name__}"
+    return True, detail
 
 
 def _get_motive_snapshot(sim_info):

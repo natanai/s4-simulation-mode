@@ -128,6 +128,7 @@ Notes:
 * `guardian_min_motive` starts intervening when a core motive drops below this value. Motives generally range from -100..100, with yellow between -1..-50 and red below -50.
 * The Life Director nudges real skill-building interactions (no motive/skill cheating) when Sims are safe and idle.
 * Use `simulation want_now` to quickly confirm active wants can be resolved during a live session.
+* `simulation skill_plan_now` will defer with a short retry if the Sim is already running a different interaction.
 * `death.toggle` is applied on enable and reasserted periodically while Simulation Mode is running.
 
 ## Life Director settings

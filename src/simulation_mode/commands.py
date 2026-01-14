@@ -11,6 +11,8 @@ _FALSE_STRINGS = {"false", "f", "0", "off", "no", "n"}
 _TICK_MIN_SECONDS = 1
 _TICK_MAX_SECONDS = 120
 _last_patch_error = None
+_PENDING_SKILL_PLAN_PUSHES = {}
+_SKILL_PLAN_ALARM_OWNER = object()
 
 
 def _parse_bool(arg: str):
@@ -397,6 +399,104 @@ def _collect_aspiration_summary(sim_info):
     return lines
 
 
+def _affordance_label(value):
+    return (
+        _safe_get(value, "__name__")
+        or _safe_get(value, "__qualname__")
+        or _safe_get(value, "name")
+        or str(value)
+    )
+
+
+def _collect_active_sim_details(sim):
+    lines = ["COLLECT: ACTIVE SIM"]
+    if sim is None:
+        lines.append("active_sim= (none)")
+        return lines
+    queue = _safe_get(sim, "queue")
+    if queue is None:
+        lines.append("queue= (none)")
+        return lines
+    cancel_methods = _filter_names(queue, ("cancel", "clear", "stop"))
+    lines.append(f"queue_cancel_methods={cancel_methods}")
+    running = _safe_get(queue, "running")
+    if running is None:
+        lines.append("running_interaction= (none)")
+        return lines
+    lines.append(f"running_interaction_type={type(running).__name__}")
+    running_affordance = _safe_get(running, "super_affordance")
+    if running_affordance is None:
+        running_affordance = _safe_get(running, "affordance")
+    if running_affordance is not None:
+        lines.append(f"running_affordance_name={_affordance_label(running_affordance)}")
+    else:
+        lines.append("running_affordance_name= (unavailable)")
+    return lines
+
+
+def _collect_aspiration_probe_lines(sim_info):
+    lines = ["COLLECT: ASPIRATIONS"]
+    tracker = _safe_get(sim_info, "aspiration_tracker")
+    if tracker is None:
+        lines.append("aspiration_tracker= (not found)")
+        return lines
+    lines.append(f"aspiration_tracker_type={type(tracker).__name__}")
+    active = _safe_get(tracker, "active_aspiration") or _safe_get(
+        tracker, "_active_aspiration"
+    )
+    if active is None:
+        lines.append("active_aspiration= (none)")
+    else:
+        lines.append(f"active_aspiration={_affordance_label(active)}")
+    milestone_attr, milestone_value = _find_first_attr(
+        tracker,
+        (
+            "current_milestone",
+            "_current_milestone",
+            "active_milestone",
+            "milestone",
+            "_milestone",
+            "current_goal",
+        ),
+    )
+    if milestone_value is None and callable(_safe_get(tracker, "get_current_milestone")):
+        ok, result, error = _safe_call(tracker, "get_current_milestone")
+        milestone_attr = "get_current_milestone()"
+        milestone_value = result if ok else f"error {error}"
+    lines.append(f"current_milestone_source={milestone_attr}")
+    lines.append(f"current_milestone={_trim_repr(milestone_value)}")
+    list_attrs = (
+        "completed_milestones",
+        "_completed_milestones",
+        "completed_objectives",
+        "_completed_objectives",
+        "completed_goals",
+        "_completed_goals",
+        "objectives",
+        "milestones",
+    )
+    for name in list_attrs:
+        value = _safe_get(tracker, name)
+        if value is None:
+            continue
+        if callable(value):
+            ok, result, error = _safe_call(tracker, name)
+            if not ok:
+                lines.append(f"{name}=error {error}")
+                continue
+            value = result
+        if isinstance(value, (list, tuple, set)):
+            items = list(value)
+            lines.append(f"{name}_count={len(items)}")
+            if items:
+                lines.append(
+                    f"{name}_sample={[ _trim_repr(item) for item in items[:3] ]}"
+                )
+        else:
+            lines.append(f"{name}={_trim_repr(value)}")
+    return lines
+
+
 def _collect_plan_preview(sim, now):
     director = importlib.import_module("simulation_mode.director")
     guardian = importlib.import_module("simulation_mode.guardian")
@@ -505,8 +605,150 @@ def _cancel_sim_interactions(sim):
     return False, "cancel_unavailable"
 
 
+def _schedule_skill_plan_push(sim_info, goal_skill, reason, delay_sim_seconds=3):
+    if sim_info is None:
+        return False, "no sim_info"
+    sim_id = getattr(sim_info, "sim_id", None)
+    if sim_id is None:
+        return False, "no sim_id"
+    _PENDING_SKILL_PLAN_PUSHES[sim_id] = {
+        "goal_skill": goal_skill,
+        "reason": reason,
+        "delay_sim_seconds": delay_sim_seconds,
+        "scheduled_at": time.time(),
+    }
+    alarms = importlib.import_module("alarms")
+    clock = importlib.import_module("clock")
+    time_span = clock.interval_in_real_seconds(float(delay_sim_seconds))
+
+    def _on_retry(_handle=None, _sim_id=sim_id):
+        _execute_skill_plan_push(_sim_id)
+
+    try:
+        alarms.add_alarm_real_time(
+            _SKILL_PLAN_ALARM_OWNER,
+            time_span,
+            _on_retry,
+            repeating=False,
+            use_sleep_time=True,
+        )
+    except Exception as exc:
+        return False, f"alarm_failed: {exc}"
+    return True, "scheduled"
+
+
+def _format_push_attempts(lines, attempts, label):
+    lines.append(f"{label}_push_attempts_count={len(attempts)}")
+    if not attempts:
+        return
+    lines.append(f"{label}_push_attempts:")
+    for idx, attempt in enumerate(attempts):
+        lines.append(
+            "  [{}] aff_name={} aff_class={} is_picker={} push_ok={} "
+            "push_sig_names={} push_reason={}".format(
+                idx,
+                attempt.get("affordance_name"),
+                attempt.get("affordance_class"),
+                attempt.get("affordance_is_picker"),
+                attempt.get("push_ok"),
+                attempt.get("push_sig_names"),
+                attempt.get("push_reason"),
+            )
+        )
+
+
+def _resolve_sim_info_by_id(sim_id):
+    services = importlib.import_module("services")
+    manager = services.sim_info_manager()
+    getter = getattr(manager, "get", None)
+    if callable(getter):
+        try:
+            sim_info = getter(sim_id)
+            if sim_info is not None:
+                return sim_info
+        except Exception:
+            pass
+    getter = getattr(manager, "get_sim_info_by_id", None)
+    if callable(getter):
+        try:
+            sim_info = getter(sim_id)
+            if sim_info is not None:
+                return sim_info
+        except Exception:
+            pass
+    try:
+        for sim_info in manager.get_all():
+            if getattr(sim_info, "sim_id", None) == sim_id:
+                return sim_info
+    except Exception:
+        return None
+    return None
+
+
+def _execute_skill_plan_push(sim_id):
+    payload = _PENDING_SKILL_PLAN_PUSHES.pop(sim_id, None)
+    if not payload:
+        return False
+    director = importlib.import_module("simulation_mode.director")
+    logging_utils = importlib.import_module("simulation_mode.logging_utils")
+    sim_info = _resolve_sim_info_by_id(sim_id)
+    result_lines = [
+        "skill_plan_now_retry=SKILL_PLAN_NOW_RETRY",
+        f"sim_id={sim_id}",
+        f"goal_skill={payload.get('goal_skill')}",
+        f"original_reason={payload.get('reason')}",
+        f"delay_sim_seconds={payload.get('delay_sim_seconds')}",
+    ]
+    if sim_info is None:
+        result_lines.append("skill_plan_retry_result=FAIL reason=sim_info_missing")
+        payload_text = "\n".join(result_lines)
+        logging_utils.append_log_block(
+            settings.collect_log_filename, "SimulationMode SKILL_PLAN_NOW_RETRY", payload_text
+        )
+        return False
+    sim = None
+    getter = getattr(sim_info, "get_sim_instance", None)
+    if callable(getter):
+        try:
+            sim = getter()
+        except Exception:
+            sim = None
+    if sim is None:
+        sim = getattr(sim_info, "sim", None)
+    if sim is None:
+        result_lines.append("skill_plan_retry_result=FAIL reason=sim_instance_missing")
+        payload_text = "\n".join(result_lines)
+        logging_utils.append_log_block(
+            settings.collect_log_filename, "SimulationMode SKILL_PLAN_NOW_RETRY", payload_text
+        )
+        return False
+    probe_details = {}
+    ok = director.try_push_skill_interaction(
+        sim, payload.get("goal_skill"), force=True, probe_details=probe_details
+    )
+    result_lines.append(f"push_ok={ok}")
+    result_lines.append(f"chosen_object={probe_details.get('target_label')}")
+    result_lines.append(f"chosen_affordance={probe_details.get('chosen_affordance')}")
+    attempts = probe_details.get("push_attempts", [])
+    _format_push_attempts(result_lines, attempts, "retry")
+    candidate_details = probe_details.get("candidate_affordances", [])
+    candidate_names = [entry.get("affordance_name") for entry in candidate_details]
+    result_lines.append(f"candidate_affordances={candidate_names}")
+    if probe_details.get("failure_reason"):
+        result_lines.append(f"failure_reason={probe_details.get('failure_reason')}")
+    payload_text = "\n".join(result_lines)
+    logging_utils.append_log_block(
+        settings.collect_log_filename, "SimulationMode SKILL_PLAN_NOW_RETRY", payload_text
+    )
+    if ok:
+        director._record_push(director._sim_identifier(sim_info), time.time())
+        director._record_action(sim_info, payload.get("goal_skill"), "skill_plan_now(retry)", time.time())
+    return ok
+
+
 def _build_collect_payload():
     director = importlib.import_module("simulation_mode.director")
+    services = importlib.import_module("services")
     lines = []
     lines.extend(_collect_config_snapshot())
     lines.append("")
@@ -537,11 +779,16 @@ def _build_collect_payload():
             lines.append("aspiration_summary:")
             lines.extend(_collect_aspiration_summary(sim_info))
     lines.append("")
+    active_sim = _get_active_sim(services)
+    lines.extend(_collect_active_sim_details(active_sim))
+    lines.append("")
     sim_info = _active_sim_info()
     if sim_info is None:
         lines.append("COLLECT: INTERNAL PROBES")
         lines.append("active_sim= (none)")
     else:
+        lines.extend(_collect_aspiration_probe_lines(sim_info))
+        lines.append("")
         lines.extend(_collect_internal_probes(sim_info))
     return "\n".join(lines)
 
@@ -1586,63 +1833,94 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
                 skill_key, reason = goal
                 result_lines.append(f"chosen_skill_key={skill_key}")
                 result_lines.append(f"chosen_skill_reason={reason}")
-                details = {}
-                ok = director.try_push_skill_interaction(
-                    sim, skill_key, force=True, probe_details=details
-                )
-                result_lines.append(f"push_attempt_1_ok={ok}")
-                attempts = details.get("push_attempts", [])
-                if attempts:
-                    first_attempt = attempts[0]
-                    result_lines.append(
-                        "push_signature_1={} push_affordance_1={} push_ok_1={}".format(
-                            first_attempt.get("push_sig_names"),
-                            first_attempt.get("affordance_name"),
-                            first_attempt.get("push_ok"),
-                        )
+                rule = director._SKILL_RULES.get(skill_key, {})
+                target_obj = None
+                try:
+                    objects = list(director.iter_objects())
+                    target_obj = director._find_target_object(sim, rule, objects=objects)
+                except Exception:
+                    target_obj = None
+                candidate_affordances = []
+                if target_obj is not None:
+                    candidate_affordances = director.find_affordance_candidates(
+                        target_obj, rule.get("affordance_keywords", []), sim=sim
                     )
-                result_lines.append(f"target_object={details.get('target_label')}")
+                candidate_affordance_names = [
+                    director.affordance_name(aff) for aff in candidate_affordances
+                ]
+                chosen_object = (
+                    director._get_object_probe_label(target_obj)
+                    if target_obj is not None
+                    else None
+                )
+                result_lines.append(f"chosen_object={chosen_object}")
                 result_lines.append(
-                    f"chosen_affordance={details.get('chosen_affordance')}"
+                    f"candidate_affordances={candidate_affordance_names}"
                 )
-                if details.get("failure_reason"):
-                    result_lines.append(f"failure_reason={details.get('failure_reason')}")
-                if details.get("candidate_affordances"):
-                    result_lines.append(
-                        f"candidate_affordances={details.get('candidate_affordances')}"
+                running = getattr(sim, "queue", None)
+                running = getattr(running, "running", None) if running is not None else None
+                if running is not None:
+                    running_affordance = _safe_get(running, "super_affordance") or _safe_get(
+                        running, "affordance"
                     )
-                if not ok:
-                    cancelled, cancel_reason = _cancel_sim_interactions(sim)
-                    result_lines.append(
-                        f"cancel_attempted={cancelled} cancel_reason={cancel_reason}"
+                    running_aff_name = (
+                        director.affordance_name(running_affordance)
+                        if running_affordance is not None
+                        else None
                     )
-                    retry_details = {}
+                    result_lines.append(
+                        f"running_affordance_name={running_aff_name}"
+                    )
+                    if running_aff_name and running_aff_name in candidate_affordance_names:
+                        result_lines.append(
+                            "skill_plan_result=SUCCESS_ALREADY_RUNNING"
+                        )
+                        success = True
+                    else:
+                        cancel_ok = False
+                        cancel_error = None
+                        try:
+                            sim.queue.cancel_all()
+                            cancel_ok = True
+                        except Exception as exc:
+                            cancel_error = f"{type(exc).__name__}: {exc}"
+                        result_lines.append("cancel_method=queue.cancel_all")
+                        result_lines.append(f"cancel_ok={cancel_ok}")
+                        result_lines.append(f"cancel_error={cancel_error}")
+                        scheduled_ok, schedule_reason = _schedule_skill_plan_push(
+                            sim_info,
+                            skill_key,
+                            reason,
+                            delay_sim_seconds=3,
+                        )
+                        result_lines.append("scheduled_retry=True")
+                        result_lines.append("scheduled_retry_delay_seconds=3")
+                        result_lines.append(
+                            f"scheduled_retry_ok={scheduled_ok} reason={schedule_reason}"
+                        )
+                        success = scheduled_ok
+                else:
+                    details = {}
                     ok = director.try_push_skill_interaction(
-                        sim, skill_key, force=True, probe_details=retry_details
+                        sim, skill_key, force=True, probe_details=details
                     )
-                    result_lines.append(f"push_attempt_2_ok={ok}")
-                    retry_attempts = retry_details.get("push_attempts", [])
-                    if retry_attempts:
-                        retry_first = retry_attempts[0]
-                        result_lines.append(
-                            "push_signature_2={} push_affordance_2={} push_ok_2={}".format(
-                                retry_first.get("push_sig_names"),
-                                retry_first.get("affordance_name"),
-                                retry_first.get("push_ok"),
-                            )
-                        )
-                    result_lines.append(f"target_object_retry={retry_details.get('target_label')}")
+                    result_lines.append(f"push_ok={ok}")
                     result_lines.append(
-                        f"chosen_affordance_retry={retry_details.get('chosen_affordance')}"
+                        f"chosen_object={details.get('target_label')}"
                     )
-                    if retry_details.get("failure_reason"):
+                    result_lines.append(
+                        f"chosen_affordance={details.get('chosen_affordance')}"
+                    )
+                    attempts = details.get("push_attempts", [])
+                    _format_push_attempts(result_lines, attempts, "primary")
+                    if details.get("failure_reason"):
                         result_lines.append(
-                            f"failure_reason_retry={retry_details.get('failure_reason')}"
+                            f"failure_reason={details.get('failure_reason')}"
                         )
-                success = ok
-                if ok:
-                    director._record_push(director._sim_identifier(sim_info), now)
-                    director._record_action(sim_info, skill_key, reason, now)
+                    success = ok
+                    if ok:
+                        director._record_push(director._sim_identifier(sim_info), now)
+                        director._record_action(sim_info, skill_key, reason, now)
         payload = "\n".join(result_lines)
         path = logging_utils.append_log_block(
             settings.collect_log_filename, "SimulationMode SKILL_PLAN_NOW", payload

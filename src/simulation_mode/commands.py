@@ -277,6 +277,13 @@ def _log_identifiers(lines, prefix, obj):
             lines.append(f"{prefix}{attr}={value!r}")
 
 
+def _log(message):
+    try:
+        _append_simulation_log([str(message)])
+    except Exception:
+        pass
+
+
 def _append_simulation_log(lines):
     log_dump = importlib.import_module("simulation_mode.log_dump")
     path = log_dump.get_log_path()
@@ -628,7 +635,7 @@ def _schedule_skill_plan_push(sim_info, goal_skill, reason, delay_sim_seconds=3)
     clock = importlib.import_module("clock")
     delay_seconds = float(delay_sim_seconds)
 
-    # Before scheduling, cancel any prior pending alarm for this sim_id.
+    # Cancel any existing pending alarm for this sim.
     old_handle = _PENDING_SKILL_PLAN_ALARMS.pop(sim_id, None)
     if old_handle is not None:
         try:
@@ -636,21 +643,30 @@ def _schedule_skill_plan_push(sim_info, goal_skill, reason, delay_sim_seconds=3)
         except Exception:
             pass
 
+    def _skill_plan_retry_cb(handle, _sim_id=sim_id):
+        # Callback receives handle; we ignore it except to keep signature valid.
+        _PENDING_SKILL_PLAN_ALARMS.pop(_sim_id, None)
+        try:
+            _execute_skill_plan_push(_sim_id)
+        except Exception as e:
+            # Keep failure visible in logs.
+            _log(f"skill_plan retry callback failed sim_id={_sim_id}: {e}")
+
     try:
+        # CRITICAL: call add_alarm_real_time with ONLY (owner, timespan, callback)
         handle = alarms.add_alarm_real_time(
-            sim_info,  # OWNER MUST BE sim_info (weakref-capable)
+            sim_info,
             clock.interval_in_real_seconds(delay_seconds),
-            _execute_skill_plan_push,
-            sim_id=sim_id,
+            _skill_plan_retry_cb,
         )
         _PENDING_SKILL_PLAN_ALARMS[sim_id] = handle
         scheduled_retry_ok = True
         scheduled_retry_reason = "ok"
-    except Exception as exc:
+    except Exception as e:
         _PENDING_SKILL_PLAN_PUSHES.pop(sim_id, None)
         _PENDING_SKILL_PLAN_ALARMS.pop(sim_id, None)
         scheduled_retry_ok = False
-        scheduled_retry_reason = f"alarm_failed: {exc}"
+        scheduled_retry_reason = f"alarm_failed: {e}"
     return scheduled_retry_ok, scheduled_retry_reason
 
 
@@ -1608,7 +1624,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         if parsed:
             if success:
-                output("Simulation daemon started successfully (build 44).")
+                output("Simulation daemon started successfully (build 45).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True

@@ -99,14 +99,13 @@ def make_interaction_context(sim, *, force=False, source=None):
     except Exception:
         insert = QueueInsertStrategy.NEXT
 
+    # IMPORTANT: match build-29 takeover behavior.
+    # Forced pushes must use DEFAULT bucket when available.
     bucket = None
     try:
-        bucket = InteractionBucketType.AUTONOMY
+        bucket = InteractionBucketType.DEFAULT
     except Exception:
-        try:
-            bucket = InteractionBucketType.DEFAULT
-        except Exception:
-            bucket = None
+        bucket = None
 
     kwargs = {"insert_strategy": insert}
     if bucket is not None:

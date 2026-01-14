@@ -12,7 +12,8 @@ _TICK_MIN_SECONDS = 1
 _TICK_MAX_SECONDS = 120
 _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
-_SKILL_PLAN_ALARM_OWNER = object()
+# Keep alarm handles alive per-sim so they are not garbage-collected.
+_PENDING_SKILL_PLAN_ALARMS = {}
 
 
 def _parse_bool(arg: str):
@@ -625,22 +626,32 @@ def _schedule_skill_plan_push(sim_info, goal_skill, reason, delay_sim_seconds=3)
     }
     alarms = importlib.import_module("alarms")
     clock = importlib.import_module("clock")
-    time_span = clock.interval_in_real_seconds(float(delay_sim_seconds))
+    delay_seconds = float(delay_sim_seconds)
 
-    def _on_retry(_handle=None, _sim_id=sim_id):
-        _execute_skill_plan_push(_sim_id)
+    # Before scheduling, cancel any prior pending alarm for this sim_id.
+    old_handle = _PENDING_SKILL_PLAN_ALARMS.pop(sim_id, None)
+    if old_handle is not None:
+        try:
+            old_handle.cancel()
+        except Exception:
+            pass
 
     try:
-        alarms.add_alarm_real_time(
-            _SKILL_PLAN_ALARM_OWNER,
-            time_span,
-            _on_retry,
-            repeating=False,
-            use_sleep_time=True,
+        handle = alarms.add_alarm_real_time(
+            sim_info,  # OWNER MUST BE sim_info (weakref-capable)
+            clock.interval_in_real_seconds(delay_seconds),
+            _execute_skill_plan_push,
+            sim_id=sim_id,
         )
+        _PENDING_SKILL_PLAN_ALARMS[sim_id] = handle
+        scheduled_retry_ok = True
+        scheduled_retry_reason = "ok"
     except Exception as exc:
-        return False, f"alarm_failed: {exc}"
-    return True, "scheduled"
+        _PENDING_SKILL_PLAN_PUSHES.pop(sim_id, None)
+        _PENDING_SKILL_PLAN_ALARMS.pop(sim_id, None)
+        scheduled_retry_ok = False
+        scheduled_retry_reason = f"alarm_failed: {exc}"
+    return scheduled_retry_ok, scheduled_retry_reason
 
 
 def _format_push_attempts(lines, attempts, label):
@@ -692,6 +703,7 @@ def _resolve_sim_info_by_id(sim_id):
 
 
 def _execute_skill_plan_push(sim_id):
+    _PENDING_SKILL_PLAN_ALARMS.pop(sim_id, None)
     payload = _PENDING_SKILL_PLAN_PUSHES.pop(sim_id, None)
     if not payload:
         return False
@@ -1596,7 +1608,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         if parsed:
             if success:
-                output("Simulation daemon started successfully (build 41).")
+                output("Simulation daemon started successfully (build 44).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True

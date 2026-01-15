@@ -63,6 +63,15 @@ def _safe_bool(obj, name, default=False):
         return default
 
 
+def _bool_attr_or_call(value):
+    if callable(value):
+        try:
+            return bool(value())
+        except Exception:
+            return False
+    return bool(value)
+
+
 def _aff_name(aff):
     try:
         return (
@@ -162,6 +171,7 @@ def scan_zone_catalog(
     records = []
     scanned_objects = 0
     scanned_affordances = 0
+    written_records = 0
     truncated = False
     zone_id = _zone_id()
 
@@ -183,13 +193,20 @@ def scan_zone_catalog(
                 notes.append(f"get_super_affordances error obj_id={_safe_get(obj, 'id')} err={exc}")
                 continue
 
-            if not affordances:
+            if affordances is None:
                 continue
 
             try:
                 affordance_list = list(affordances)
-            except Exception:
-                affordance_list = []
+            except Exception as exc:
+                obj_type = _safe_get(_safe_get(obj, "__class__"), "__name__")
+                notes.append(f"affordances not iterable obj_type={obj_type} err={exc}")
+                continue
+
+            scanned_affordances += len(affordance_list)
+
+            if not affordance_list:
+                continue
 
             if len(affordance_list) > max_affordances_per_object:
                 truncated = True
@@ -198,9 +215,12 @@ def scan_zone_catalog(
                 )
 
             for aff in affordance_list[:max_affordances_per_object]:
-                scanned_affordances += 1
-                allow_user_directed = _safe_bool(aff, "allow_user_directed", default=False)
-                allow_autonomous = _safe_bool(aff, "allow_autonomous", default=False)
+                allow_user_directed = _bool_attr_or_call(
+                    _safe_get(aff, "allow_user_directed", False)
+                )
+                allow_autonomous = _bool_attr_or_call(
+                    _safe_get(aff, "allow_autonomous", False)
+                )
                 is_cheat = _safe_bool(aff, "cheat", default=False)
                 is_debug = _safe_bool(aff, "debug", default=False)
                 is_picker_like = _is_picker_like(aff)
@@ -229,6 +249,7 @@ def scan_zone_catalog(
                     "advertisement_hint": _advertisement_hint(aff),
                 }
                 records.append(record)
+                written_records += 1
     except Exception as exc:
         notes.append(f"scan error: {exc}")
         return {
@@ -242,14 +263,27 @@ def scan_zone_catalog(
         }
 
     path = get_catalog_log_path()
-    write_catalog_records(records, path)
+    if records:
+        write_catalog_records(records, path)
+    elif path:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8"):
+                pass
+        except Exception:
+            pass
+
+    if scanned_affordances > 0 and written_records == 0:
+        notes.append(
+            "all_affordances_filtered_out; check allow_ud/allow_auto extraction and picker/debug flags"
+        )
 
     return {
         "ok": True,
         "path": path,
         "scanned_objects": scanned_objects,
         "scanned_affordances": scanned_affordances,
-        "written_records": len(records),
+        "written_records": written_records,
         "truncated": truncated,
         "notes": notes,
     }

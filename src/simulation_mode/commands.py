@@ -8,7 +8,7 @@ import traceback
 import sims4.commands
 from sims4.commands import BOOL_TRUE, CommandType
 
-from simulation_mode import settings as sm_settings
+import simulation_mode.settings as sm_settings
 from simulation_mode.settings import get_config_path, load_settings, settings
 
 _FALSE_STRINGS = {"false", "f", "0", "off", "no", "n"}
@@ -2379,9 +2379,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             if success:
                 story_log = importlib.import_module("simulation_mode.story_log")
                 story_log.append_event(
-                    "daemon_started", sim_info=_active_sim_info(), build="57"
+                    "daemon_started", sim_info=_active_sim_info(), build="58"
                 )
-                output("Simulation daemon started successfully (build 57).")
+                output("Simulation daemon started successfully (build 58).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -2601,20 +2601,23 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         story_log = importlib.import_module("simulation_mode.story_log")
         _reload_settings(_connection, output)
         story_log.append_event("collect_ran", sim_info=_active_sim_info())
+        collect_failed = False
         try:
             payload = _build_collect_payload()
         except Exception as exc:
+            collect_failed = True
             payload = ["COLLECT FAILED", str(exc)]
             trace_lines = traceback.format_exc().strip().splitlines()
             payload.extend(trace_lines[-20:])
         path = logging_utils.append_log_block(
             settings.collect_log_filename, "SimulationMode COLLECT", payload
         )
+        if collect_failed:
+            output("collect FAILED (see collect log)")
         output(f"collect_written={path}")
         return True
 
     if action_key == "force_scan":
-        object_catalog = importlib.import_module("simulation_mode.object_catalog")
         logging_utils = importlib.import_module("simulation_mode.logging_utils")
         story_log = importlib.import_module("simulation_mode.story_log")
         sim_info = _active_sim_info()
@@ -2622,14 +2625,26 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             output("No active sim found.")
             return True
         _reload_settings(_connection, output)
-        result = object_catalog.scan_zone_catalog(
-            sim_info,
-            include_sims=None,
-            include_non_autonomous=None,
-            max_objects=None,
-            max_affordances_per_object=None,
-            filename=None,
-        )
+        try:
+            object_catalog = importlib.import_module("simulation_mode.object_catalog")
+            result = object_catalog.scan_zone_catalog(
+                sim_info,
+                include_sims=None,
+                include_non_autonomous=None,
+                max_objects=None,
+                max_affordances_per_object=None,
+                filename=None,
+            )
+        except Exception as exc:
+            err_repr = repr(exc)
+            output(f"force_scan FAILED err={err_repr}")
+            trace_text = traceback.format_exc()
+            story_log.append_event(
+                "force_scan_failed",
+                {"err": err_repr, "traceback": trace_text[:1000]},
+            )
+            output("force_scan ok=False (see story log)")
+            return True
         story_log.append_event(
             "force_scan",
             {
@@ -2663,6 +2678,14 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             summary_lines.extend(notes[:3])
             for note in notes[:3]:
                 output(f"note={note}")
+        if result.get("ok"):
+            output(
+                "force_scan ok=True written_records={} truncated={}".format(
+                    result.get("written_records"), result.get("truncated")
+                )
+            )
+        else:
+            output("force_scan ok=False (see story log)")
         logging_utils.append_log_block(
             settings.collect_log_filename,
             "SimulationMode FORCE_SCAN",

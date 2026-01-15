@@ -3,7 +3,7 @@ import os
 import time
 
 import simulation_mode.push_utils as push_utils
-from simulation_mode import settings as sm_settings
+import simulation_mode.settings as sm_settings
 from simulation_mode.settings import get_config_path
 
 
@@ -220,20 +220,30 @@ def scan_zone_catalog(
     include_non_autonomous=None,
     filename: str = None,
 ):
-    if include_sims is None:
-        include_sims = sm_settings.get_bool("catalog_include_sims", False)
-    if include_non_autonomous is None:
-        include_non_autonomous = sm_settings.get_bool(
-            "catalog_include_non_autonomous", False
-        )
-    if max_objects is None:
-        max_objects = sm_settings.get_int("catalog_max_objects", 2000)
-    if max_affordances_per_object is None:
-        max_affordances_per_object = sm_settings.get_int(
-            "catalog_max_affordances_per_object", 80
-        )
-
     notes = []
+    try:
+        if include_sims is None:
+            include_sims = sm_settings.get_bool("catalog_include_sims", False)
+        if include_non_autonomous is None:
+            include_non_autonomous = sm_settings.get_bool(
+                "catalog_include_non_autonomous", False
+            )
+        if max_objects is None:
+            max_objects = sm_settings.get_int("catalog_max_objects", 2000)
+        if max_affordances_per_object is None:
+            max_affordances_per_object = sm_settings.get_int(
+                "catalog_max_affordances_per_object", 80
+            )
+    except Exception as exc:
+        include_sims = False if include_sims is None else include_sims
+        include_non_autonomous = (
+            False if include_non_autonomous is None else include_non_autonomous
+        )
+        max_objects = 2000 if max_objects is None else max_objects
+        max_affordances_per_object = (
+            80 if max_affordances_per_object is None else max_affordances_per_object
+        )
+        notes.append(f"settings_read_error err={exc!r}")
     records = []
     sample = []
     scanned_objects = 0

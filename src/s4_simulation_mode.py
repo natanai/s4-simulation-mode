@@ -1,11 +1,5 @@
 try:
-    import simulation_mode  # triggers __init__.py where commands are registered
-    import simulation_mode.settings as sm_settings
-
-    if sm_settings.settings.enabled is True:
-        import simulation_mode.daemon as daemon
-
-        daemon.start()
+    import simulation_mode  # triggers simulation_mode/__init__.py which imports commands for registration
 except Exception as e:
     import sims4.log
 

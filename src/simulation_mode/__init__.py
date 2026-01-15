@@ -1,3 +1,3 @@
-__version__ = "0.5.0+build56"
-
-from simulation_mode.commands import *  # noqa: F401,F403
+__version__ = "0.5.0+build58"
+# Import commands module for side-effects (console command registration).
+from . import commands  # noqa: F401

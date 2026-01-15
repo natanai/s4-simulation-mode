@@ -1,7 +1,7 @@
 # Simulation Mode (The Sims 4) — Settings
 # Edit this file, then in-game run: simulation reload
 
-enabled=false
+enabled=true
 auto_unpause=true
 allow_death=false
 allow_pregnancy=false
@@ -32,6 +32,20 @@ director_fallback_to_started_skills=true
 director_skill_allow_list=
 director_skill_block_list=
 collect_log_filename=simulation-mode-collect.log
+
+# catalog defaults (Build 56)
+catalog_include_sims=false
+catalog_include_non_autonomous=false
+catalog_max_objects=2000
+catalog_max_affordances_per_object=80
+
+# collect-integrated sampling caps (Build 56)
+catalog_collect_sample_objects=150
+catalog_collect_sample_affordances_per_object=60
+catalog_collect_top_auto_n=40
+
+# affordance meta probe list (pipe-delimited)
+aff_meta_substrings=acting|cook|sleep|toilet|shower|program
 
 # Optional integration if you ALSO installed a mod that defines this trait ID
 integrate_better_autonomy_trait=false

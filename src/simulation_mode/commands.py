@@ -1,11 +1,13 @@
 import importlib
 import inspect
+import json
 import os
 import time
 
 import sims4.commands
 from sims4.commands import BOOL_TRUE, CommandType
 
+from simulation_mode import settings as sm_settings
 from simulation_mode.settings import get_config_path, load_settings, settings
 
 _FALSE_STRINGS = {"false", "f", "0", "off", "no", "n"}
@@ -64,6 +66,15 @@ def _filter_names(obj, contains):
     return sorted(set(out))
 
 
+def _safe_bool_attr(value, default=False):
+    if value is None:
+        return default
+    try:
+        return bool(value() if callable(value) else value)
+    except Exception:
+        return default
+
+
 def _status_lines():
     running, daemon_error, daemon_tick_count = _daemon_snapshot()
     try:
@@ -102,6 +113,14 @@ def _status_lines():
         f"collect_log_filename={settings.collect_log_filename}",
         f"story_log_enabled={settings.story_log_enabled}",
         f"story_log_filename={settings.story_log_filename}",
+        f"catalog_include_sims={settings.catalog_include_sims}",
+        f"catalog_include_non_autonomous={settings.catalog_include_non_autonomous}",
+        f"catalog_max_objects={settings.catalog_max_objects}",
+        f"catalog_max_affordances_per_object={settings.catalog_max_affordances_per_object}",
+        f"catalog_collect_sample_objects={settings.catalog_collect_sample_objects}",
+        f"catalog_collect_sample_affordances_per_object={settings.catalog_collect_sample_affordances_per_object}",
+        f"catalog_collect_top_auto_n={settings.catalog_collect_top_auto_n}",
+        f"aff_meta_substrings={settings.aff_meta_substrings}",
         f"integrate_better_autonomy_trait={settings.integrate_better_autonomy_trait}",
         f"better_autonomy_trait_id={settings.better_autonomy_trait_id}",
         f"daemon_running={running}",
@@ -663,6 +682,184 @@ def _collect_affordance_probe_lines(sim_info):
             "found in sample."
         )
 
+    return lines
+
+
+def _collect_catalog_sample(sim_info):
+    object_catalog = importlib.import_module("simulation_mode.object_catalog")
+    max_objects = sm_settings.get_int("catalog_collect_sample_objects", 150)
+    max_aff = sm_settings.get_int("catalog_collect_sample_affordances_per_object", 60)
+    result = object_catalog.scan_zone_catalog(
+        sim_info,
+        max_objects=max_objects,
+        max_affordances_per_object=max_aff,
+        include_sims=None,
+        include_non_autonomous=None,
+    )
+    lines = ["CATALOG SAMPLE (PROBE)"]
+    lines.append(f"catalog_path={result.get('path')}")
+    lines.append(
+        "scanned_objects={} unresolved_objects={} scanned_affordances={} "
+        "written_records={} truncated={}".format(
+            result.get("scanned_objects"),
+            result.get("unresolved_objects"),
+            result.get("scanned_affordances"),
+            result.get("written_records"),
+            result.get("truncated"),
+        )
+    )
+    lines.append(
+        "skipped_sims={} filtered_flags={} filtered_non_autonomy={}".format(
+            result.get("skipped_sims"),
+            result.get("filtered_flags"),
+            result.get("filtered_non_autonomy"),
+        )
+    )
+    return lines
+
+
+def _collect_catalog_top_auto(_sim_info):
+    object_catalog = importlib.import_module("simulation_mode.object_catalog")
+    n_limit = sm_settings.get_int("catalog_collect_top_auto_n", 40)
+    path = object_catalog.get_catalog_log_path()
+    if not path or not os.path.exists(path):
+        return ["CATALOG TOP AUTO (PROBE)", "no_catalog_data=true"]
+    records = []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw in handle:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    record = json.loads(raw)
+                except Exception:
+                    continue
+                if record.get("type") == "meta":
+                    continue
+                if record.get("allow_autonomous") is True:
+                    records.append(record)
+    except Exception:
+        return ["CATALOG TOP AUTO (PROBE)", "no_catalog_data=true"]
+    if not records:
+        return ["CATALOG TOP AUTO (PROBE)", "no_catalog_data=true"]
+
+    grouped = {}
+    total = 0
+    for record in records:
+        if total >= n_limit:
+            break
+        obj_name = record.get("obj_name") or "<obj?>"
+        obj_id = record.get("obj_id")
+        aff_name = record.get("aff_name") or "<aff?>"
+        aff_guid = record.get("aff_guid64")
+        group = grouped.setdefault(obj_name, {"obj_id": obj_id, "affs": []})
+        if len(group["affs"]) >= 6:
+            continue
+        group["affs"].append((aff_name, aff_guid))
+        total += 1
+
+    lines = [f"CATALOG TOP AUTO (PROBE) n={n_limit}"]
+    for obj_name, details in grouped.items():
+        lines.append(f"obj={obj_name} (id={details.get('obj_id')})")
+        for aff_name, aff_guid in details["affs"]:
+            lines.append(f"  - {aff_name} (guid64={aff_guid})")
+    return lines
+
+
+def _collect_aff_meta_batch(sim_info):
+    substr = sm_settings.get_str(
+        "aff_meta_substrings", "acting|cook|sleep|toilet|shower|program"
+    )
+    substrings = [item for item in substr.split("|") if item]
+    if not substrings:
+        return ["AFF_META substring= (none) found=false scanned_objects=0"]
+
+    MAX_OBJS_PER_SUBSTRING = 250
+    MAX_HINT_ATTRS = 12
+    hint_tokens = ["advert", "commodity", "motive", "skill", "statistic", "autonomy"]
+    push_utils = importlib.import_module("simulation_mode.push_utils")
+
+    sim = None
+    if sim_info is not None:
+        getter = getattr(sim_info, "get_sim_instance", None)
+        if callable(getter):
+            try:
+                sim = getter()
+            except Exception:
+                sim = None
+
+    lines = []
+    for substring in substrings:
+        substring_lower = substring.lower()
+        found = False
+        scanned = 0
+        if sim is None:
+            lines.append(
+                f"AFF_META substring={substring} found=false scanned_objects=0"
+            )
+            continue
+        for obj in push_utils.iter_objects():
+            scanned += 1
+            if scanned > MAX_OBJS_PER_SUBSTRING:
+                break
+            obj_name = None
+            try:
+                definition = _safe_get(obj, "definition")
+                if definition is not None:
+                    obj_name = _safe_get(definition, "name")
+                if not obj_name:
+                    obj_class = _safe_get(obj, "__class__")
+                    obj_name = _safe_get(obj_class, "__name__")
+            except Exception:
+                obj_name = None
+            if not obj_name:
+                obj_name = "<obj?>"
+            try:
+                affordances = push_utils.iter_super_affordances(obj, sim=sim)
+            except Exception:
+                affordances = []
+            for aff in affordances:
+                aff_name = (
+                    _safe_get(aff, "__name__")
+                    or _safe_get(aff, "__qualname__")
+                    or str(aff)
+                )
+                if aff_name is None:
+                    aff_name = "<aff?>"
+                if substring_lower not in aff_name.lower():
+                    continue
+                allow_ud = _safe_bool_attr(_safe_get(aff, "allow_user_directed"))
+                allow_auto = _safe_bool_attr(_safe_get(aff, "allow_autonomous"))
+                guid64 = _safe_get(aff, "guid64")
+                obj_id = _safe_get(obj, "id")
+                lines.append(f"AFF_META substring={substring} found=true")
+                lines.append(
+                    "obj={}({}) aff={}({}) allow_ud={} allow_auto={}".format(
+                        obj_name,
+                        f"id={obj_id}",
+                        aff_name,
+                        f"guid64={guid64}",
+                        allow_ud,
+                        allow_auto,
+                    )
+                )
+                attr_names = [
+                    name
+                    for name in dir(aff)
+                    if any(token in name.lower() for token in hint_tokens)
+                ]
+                for name in attr_names[:MAX_HINT_ATTRS]:
+                    value = _safe_get(aff, name)
+                    lines.append(f"hint {name}={_trim_repr(value)}")
+                found = True
+                break
+            if found:
+                break
+        if not found:
+            lines.append(
+                f"AFF_META substring={substring} found=false scanned_objects={min(scanned, MAX_OBJS_PER_SUBSTRING)}"
+            )
     return lines
 
 
@@ -1354,6 +1551,12 @@ def _build_collect_payload():
         lines.extend(_collect_aspiration_probe_lines(sim_info))
         lines.append("")
         lines.extend(_collect_internal_probes(sim_info))
+    lines.append("")
+    lines.extend(_collect_catalog_sample(sim_info))
+    lines.append("")
+    lines.extend(_collect_catalog_top_auto(sim_info))
+    lines.append("")
+    lines.extend(_collect_aff_meta_batch(sim_info))
     return "\n".join(lines)
 
 
@@ -2157,9 +2360,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             if success:
                 story_log = importlib.import_module("simulation_mode.story_log")
                 story_log.append_event(
-                    "daemon_started", sim_info=_active_sim_info(), build="55"
+                    "daemon_started", sim_info=_active_sim_info(), build="56"
                 )
-                output("Simulation daemon started successfully (build 55).")
+                output("Simulation daemon started successfully (build 56).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -2393,7 +2596,13 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         if sim_info is None:
             output("No active sim found.")
             return True
-        result = object_catalog.scan_zone_catalog(sim_info)
+        result = object_catalog.scan_zone_catalog(
+            sim_info,
+            include_sims=None,
+            include_non_autonomous=None,
+            max_objects=None,
+            max_affordances_per_object=None,
+        )
         summary_lines = [
             f"force_scan ok={result.get('ok')}",
             f"catalog_path={result.get('path')}",

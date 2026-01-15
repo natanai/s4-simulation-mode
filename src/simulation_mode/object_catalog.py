@@ -3,6 +3,7 @@ import os
 import time
 
 import simulation_mode.push_utils as push_utils
+from simulation_mode import settings as sm_settings
 from simulation_mode.settings import get_config_path
 
 
@@ -147,6 +148,18 @@ def _obj_def_id(obj):
     return None
 
 
+def _is_sim_object(obj):
+    if obj is None:
+        return False
+    if _safe_bool(obj, "is_sim", default=False):
+        return True
+    sim_info = _safe_get(obj, "sim_info")
+    if sim_info is not None:
+        return True
+    class_name = _safe_get(_safe_get(obj, "__class__"), "__name__") or ""
+    return class_name.lower() == "sim"
+
+
 def _zone_id():
     try:
         services = __import__("services")
@@ -200,10 +213,24 @@ def _resolve_object(obj):
 def scan_zone_catalog(
     sim_info,
     *,
-    max_objects=2000,
-    max_affordances_per_object=80,
-    include_non_autonomous=False,
+    max_objects=None,
+    max_affordances_per_object=None,
+    include_sims=None,
+    include_non_autonomous=None,
 ):
+    if include_sims is None:
+        include_sims = sm_settings.get_bool("catalog_include_sims", False)
+    if include_non_autonomous is None:
+        include_non_autonomous = sm_settings.get_bool(
+            "catalog_include_non_autonomous", False
+        )
+    if max_objects is None:
+        max_objects = sm_settings.get_int("catalog_max_objects", 2000)
+    if max_affordances_per_object is None:
+        max_affordances_per_object = sm_settings.get_int(
+            "catalog_max_affordances_per_object", 80
+        )
+
     notes = []
     records = []
     sample = []
@@ -212,6 +239,9 @@ def scan_zone_catalog(
     scanned_affordances = 0
     written_records = 0
     truncated = False
+    skipped_sims = 0
+    filtered_flags = 0
+    filtered_non_autonomy = 0
     zone_id = _zone_id()
     ok = True
 
@@ -247,6 +277,9 @@ def scan_zone_catalog(
                 )
             if obj is None:
                 unresolved_objects += 1
+                continue
+            if not include_sims and _is_sim_object(obj):
+                skipped_sims += 1
                 continue
             if scanned_objects >= max_objects:
                 truncated = True
@@ -287,8 +320,12 @@ def scan_zone_catalog(
                 is_staging_like = _is_staging_like(aff)
 
                 if is_cheat or is_debug or is_picker_like or is_staging_like:
+                    filtered_flags += 1
                     continue
-                if not include_non_autonomous and not (allow_user_directed or allow_autonomous):
+                if not include_non_autonomous and not (
+                    allow_user_directed or allow_autonomous
+                ):
+                    filtered_non_autonomy += 1
                     continue
 
                 record = {
@@ -331,6 +368,10 @@ def scan_zone_catalog(
         "unresolved_objects": unresolved_objects,
         "scanned_affordances": scanned_affordances,
         "written_records": written_records + 1,
+        "truncated": truncated,
+        "skipped_sims": skipped_sims,
+        "filtered_flags": filtered_flags,
+        "filtered_non_autonomy": filtered_non_autonomy,
         "notes": notes,
         "sample": sample,
     }
@@ -346,5 +387,8 @@ def scan_zone_catalog(
         "scanned_affordances": scanned_affordances,
         "written_records": written_records,
         "truncated": truncated,
+        "skipped_sims": skipped_sims,
+        "filtered_flags": filtered_flags,
+        "filtered_non_autonomy": filtered_non_autonomy,
         "notes": notes,
     }

@@ -473,13 +473,25 @@ def _collect_affordance_probe_lines(sim_info):
                 and obj.definition is not None
                 and hasattr(obj.definition, "name")
             ):
-                return obj.definition.name
+                if obj.definition.name:
+                    return obj.definition.name
         except Exception:
             pass
         try:
+            class_name = getattr(getattr(obj, "__class__", None), "__name__", None)
+            if class_name:
+                definition = getattr(obj, "definition", None)
+                if definition is not None:
+                    def_id = getattr(definition, "id", None) or getattr(
+                        definition, "guid64", None
+                    )
+                    if def_id:
+                        return f"{class_name}(def={def_id})"
+                return class_name
             return str(obj)
         except Exception:
             return "<obj?>"
+        return "<obj?>"
 
     # Evaluate tests if possible
     def _tests_pass(aff, target_obj):
@@ -721,10 +733,51 @@ def _collect_aspiration_objectives(sim_info):
             "current_goal",
         ),
     )
+
+    def _set_milestone(attr_name, ok, result, error=None):
+        nonlocal milestone_attr, milestone_value
+        if ok and result is not None:
+            milestone_attr = attr_name
+            milestone_value = result
+            lines.append(f"milestone_discovery={attr_name}")
+            return True
+        if not ok and error:
+            lines.append(f"milestone_discovery_error={attr_name} error={error}")
+        return False
+
     if milestone_value is None and callable(_safe_get(tracker, "get_current_milestone")):
         ok, result, error = _safe_call(tracker, "get_current_milestone")
-        milestone_attr = "get_current_milestone()"
-        milestone_value = result if ok else f"error {error}"
+        _set_milestone("get_current_milestone()", ok, result, error)
+    if milestone_value is None and callable(_safe_get(tracker, "get_active_milestone")):
+        ok, result, error = _safe_call(tracker, "get_active_milestone")
+        _set_milestone("get_active_milestone()", ok, result, error)
+    if milestone_value is None and callable(_safe_get(tracker, "_get_milestone_manager")):
+        ok, mgr, error = _safe_call(tracker, "_get_milestone_manager")
+        if ok and mgr is not None:
+            if callable(_safe_get(mgr, "get_current_milestone")):
+                ok, result, error = _safe_call(mgr, "get_current_milestone")
+                if _set_milestone("milestone_manager.get_current_milestone()", ok, result, error):
+                    pass
+            if milestone_value is None and callable(_safe_get(mgr, "get_active_milestone")):
+                ok, result, error = _safe_call(mgr, "get_active_milestone")
+                _set_milestone("milestone_manager.get_active_milestone()", ok, result, error)
+        elif not ok:
+            lines.append(f"milestone_discovery_error=_get_milestone_manager error={error}")
+    if milestone_value is None:
+        active = _safe_get(tracker, "_active_aspiration") or _safe_get(
+            tracker, "active_aspiration"
+        )
+        if active is not None and callable(_safe_get(active, "get_current_milestone")):
+            ok, result, error = _safe_call(active, "get_current_milestone")
+            _set_milestone("active_aspiration.get_current_milestone()", ok, result, error)
+        if milestone_value is None and active is not None and callable(_safe_get(active, "get_active_milestone")):
+            ok, result, error = _safe_call(active, "get_active_milestone")
+            _set_milestone("active_aspiration.get_active_milestone()", ok, result, error)
+    if milestone_value is None:
+        hint_names = _filter_names(
+            tracker, ("mile", "goal", "track", "stage", "objective")
+        )
+        lines.append(f"MILESTONE DISCOVERY HINT: {hint_names[:20]}")
     lines.append(f"current_milestone_source={milestone_attr}")
     lines.append(f"current_milestone={_trim_repr(milestone_value)}")
 
@@ -775,9 +828,17 @@ def _collect_aspiration_objectives(sim_info):
                     lines.append(f"get_objectives_error={error}")
             elif required == 1:
                 if milestone_value is None:
-                    lines.append(
-                        "get_objectives_requires_milestone_but_milestone_missing"
-                    )
+                    ok, result, error = _safe_call(provider, "get_objectives", None)
+                    if ok and result:
+                        objectives = result
+                        lines.append("get_objectives_called_with_None=success")
+                    else:
+                        if ok:
+                            lines.append("get_objectives_called_with_None=failed:empty")
+                        else:
+                            lines.append(
+                                f"get_objectives_called_with_None=failed:{error}"
+                            )
                 else:
                     ok, result, error = _safe_call(
                         provider, "get_objectives", milestone_value
@@ -1975,6 +2036,7 @@ def _usage_lines():
         "simulation guardian_now [force]",
         "simulation want_now",
         "simulation collect",
+        "simulation force_scan",
         "simulation skill_plan_now",
         "simulation configpath",
         "simulation dump_log",
@@ -2093,7 +2155,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         if parsed:
             if success:
-                output("Simulation daemon started successfully (build 51).")
+                output("Simulation daemon started successfully (build 52).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -2316,6 +2378,35 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             settings.collect_log_filename, "SimulationMode COLLECT", payload
         )
         output(f"collect_written={path}")
+        return True
+
+    if action_key == "force_scan":
+        object_catalog = importlib.import_module("simulation_mode.object_catalog")
+        logging_utils = importlib.import_module("simulation_mode.logging_utils")
+        sim_info = _active_sim_info()
+        if sim_info is None:
+            output("No active sim found.")
+            return True
+        result = object_catalog.scan_zone_catalog(sim_info)
+        summary_lines = [
+            f"force_scan ok={result.get('ok')}",
+            f"catalog_path={result.get('path')}",
+            f"scanned_objects={result.get('scanned_objects')}",
+            f"scanned_affordances={result.get('scanned_affordances')}",
+            f"written_records={result.get('written_records')}",
+            f"truncated={result.get('truncated')}",
+        ]
+        for line in summary_lines:
+            output(line)
+        notes = result.get("notes") or []
+        if notes:
+            summary_lines.append("notes:")
+            summary_lines.extend(notes[:10])
+        logging_utils.append_log_block(
+            settings.collect_log_filename,
+            "SimulationMode FORCE_SCAN",
+            "\n".join(summary_lines),
+        )
         return True
 
     if action_key == "skill_plan_now":

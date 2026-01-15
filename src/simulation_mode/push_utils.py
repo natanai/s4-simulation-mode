@@ -281,13 +281,6 @@ def is_safe_for_script_push(aff):
     return True, "ok"
 
 
-def evaluate_affordance(sim, target_obj, aff, context):
-    safe, reason = is_safe_for_script_push(aff)
-    if not safe:
-        return False, f"unsafe:{reason}" if reason else "unsafe"
-    return True, "ok"
-
-
 def _score_affordance(affordance, keywords):
     name = affordance_name(affordance)
     score = 0
@@ -334,10 +327,9 @@ def call_push_super_affordance(sim, super_affordance, target, context):
     if fn is None:
         return False, "no push_super_affordance on sim", []
 
-    safe, reason = evaluate_affordance(sim, target, super_affordance, context)
+    safe, reason = is_safe_for_script_push(super_affordance)
     if not safe:
-        short_reason = reason.split(":", 1)[-1]
-        return False, f"unsafe affordance: {short_reason}", []
+        return False, f"unsafe affordance: {reason}", []
 
     try:
         sig = inspect.signature(fn)

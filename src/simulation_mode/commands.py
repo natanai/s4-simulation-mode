@@ -1,4 +1,5 @@
 import importlib
+import inspect
 import os
 import time
 
@@ -425,7 +426,10 @@ def _collect_affordance_probe_lines(sim_info):
     excl_no_tests = 0
     excl_tests_unknown = 0
     excl_tests_fail = 0
-    good_candidates = 0
+    pass_total = 0
+    pass_user_directed = 0
+    pass_autonomous_allowed = 0
+    pass_lines = 0
 
     # Helper to read tuning-ish fields safely
     def _get_bool(obj, *names, default=False):
@@ -474,11 +478,6 @@ def _collect_affordance_probe_lines(sim_info):
             return str(obj)
         except Exception:
             return "<obj?>"
-
-    # Decide whether an affordance “looks user-directed”
-    # (i.e., allowed user-directed, not cheat/debug, not picker-like)
-    def _looks_user_directed(aff, allow_ud, cheat, debug, is_picker):
-        return bool(allow_ud) and (not cheat) and (not debug) and (not is_picker)
 
     # Evaluate tests if possible
     def _tests_pass(aff, target_obj):
@@ -594,31 +593,41 @@ def _collect_affordance_probe_lines(sim_info):
                 elif status.startswith("fail"):
                     excl_tests_fail += 1
 
-                looks_ud = _looks_user_directed(aff, allow_ud, cheat, debug, is_picker)
+                is_passing = (
+                    status == "pass"
+                    and passed is True
+                    and (not cheat)
+                    and (not debug)
+                    and (not is_picker)
+                )
 
-                # We only list “good candidates” in detail to keep logs readable:
-                # requirement: tests PASS (True) AND looks user-directed.
-                if passed is True and looks_ud:
-                    good_candidates += 1
-                    lines.append(
-                        f"  CANDIDATE obj={_obj_name(obj)}(id={getattr(obj,'id',None)}) "
-                        f"aff={_aff_name(aff)}(guid64={guid64}) "
-                        f"allow_ud={allow_ud} allow_auto={allow_auto} "
-                        f"cheat={cheat} debug={debug} picker={is_picker} tests={status}"
-                    )
-                    if good_candidates >= MAX_RESULTS:
-                        break
-
-            if good_candidates >= MAX_RESULTS:
-                break
+                if is_passing:
+                    pass_total += 1
+                    if allow_ud:
+                        pass_user_directed += 1
+                    if allow_auto:
+                        pass_autonomous_allowed += 1
+                    if pass_lines < MAX_RESULTS:
+                        lines.append(
+                            f"  PASS obj={_obj_name(obj)}(id={getattr(obj,'id',None)}) "
+                            f"aff={_aff_name(aff)}(guid64={guid64}) "
+                            f"allow_ud={allow_ud} allow_auto={allow_auto} "
+                            f"picker_like={is_picker} tests={status}"
+                        )
+                        pass_lines += 1
 
     except Exception as e:
         lines.append(f"  ERROR during enumeration: {e!r}")
 
     # Summary
     lines.append(
-        "  SUMMARY scanned_objects={} scanned_affordances={} good_candidates={}".format(
-            scanned_objects, scanned_affordances, good_candidates
+        "  SUMMARY scanned_objects={} scanned_affordances={} "
+        "pass_total={} pass_user_directed={} pass_autonomous_allowed={}".format(
+            scanned_objects,
+            scanned_affordances,
+            pass_total,
+            pass_user_directed,
+            pass_autonomous_allowed,
         )
     )
     lines.append(
@@ -634,14 +643,10 @@ def _collect_affordance_probe_lines(sim_info):
         )
     )
 
-    if good_candidates == 0:
+    if pass_total == 0:
         lines.append(
-            "  NOTE: No test-passing user-directed candidates found in sample. "
-            "This is a SIGNAL for later (not a behavior change)."
-        )
-        lines.append(
-            "  NOTE: If this repeats, increase caps or improve resolver choice; "
-            "do NOT change director behavior in this build."
+            "  NOTE: No test-passing non-picker non-cheat non-debug affordances "
+            "found in sample."
         )
 
     return lines
@@ -694,44 +699,168 @@ def _collect_aspiration_summary(sim_info):
             tracker, ("aspir", "milestone", "goal", "track", "current", "active")
         )
         lines.append(f"aspiration_tracker_attrs_hint={attr_names[:12]}")
-    try:
-        obj_tracker = getattr(active, "objective_tracker", None)
-        if obj_tracker is None:
-            obj_tracker = getattr(sim_info, "aspiration_tracker", None)
-        objectives = None
-        if obj_tracker is not None:
-            getter = getattr(obj_tracker, "get_objectives", None)
-            if callable(getter):
-                objectives = getter()
-            elif hasattr(obj_tracker, "objectives"):
-                objectives = getattr(obj_tracker, "objectives")
-            elif hasattr(obj_tracker, "_objectives"):
-                objectives = getattr(obj_tracker, "_objectives")
-        if objectives:
-            lines.append("aspiration_objectives:")
-            for objective in list(objectives)[:20]:
-                objective_name = objective.__class__.__name__
-                guid64 = getattr(objective, "guid64", None)
-                completed = getattr(objective, "completed", None)
-                if completed is None:
-                    completed = getattr(objective, "is_completed", None)
-                if callable(completed):
-                    completed = completed()
-                current = getattr(objective, "current_value", None)
-                if callable(current):
-                    current = current()
-                target = getattr(objective, "target_value", None)
-                if callable(target):
-                    target = target()
+    return lines
+
+
+def _collect_aspiration_objectives(sim_info):
+    lines = ["ASPIRATION OBJECTIVES (PROBE)"]
+    tracker = _safe_get(sim_info, "aspiration_tracker")
+    if tracker is None:
+        lines.append("aspiration_tracker=(not found)")
+        return lines
+    milestone_attr, milestone_value = _find_first_attr(
+        tracker,
+        (
+            "current_milestone",
+            "_current_milestone",
+            "active_milestone",
+            "milestone",
+            "_milestone",
+            "current_goal",
+        ),
+    )
+    if milestone_value is None and callable(_safe_get(tracker, "get_current_milestone")):
+        ok, result, error = _safe_call(tracker, "get_current_milestone")
+        milestone_attr = "get_current_milestone()"
+        milestone_value = result if ok else f"error {error}"
+    lines.append(f"current_milestone_source={milestone_attr}")
+    lines.append(f"current_milestone={_trim_repr(milestone_value)}")
+
+    active = _safe_get(tracker, "active_aspiration") or _safe_get(
+        tracker, "_active_aspiration"
+    )
+    providers = [tracker]
+    objective_tracker = _safe_get(tracker, "objective_tracker") or _safe_get(
+        tracker, "_objective_tracker"
+    )
+    if objective_tracker is not None:
+        providers.append(objective_tracker)
+    if active is not None:
+        active_obj_tracker = _safe_get(active, "objective_tracker") or _safe_get(
+            active, "_objective_tracker"
+        )
+        if active_obj_tracker is not None:
+            providers.append(active_obj_tracker)
+
+    objectives = None
+
+    for provider in providers:
+        if provider is None:
+            continue
+        getter = _safe_get(provider, "get_objectives")
+        if callable(getter):
+            try:
+                signature = inspect.signature(getter)
+            except (TypeError, ValueError) as exc:
                 lines.append(
-                    "  objective type={} guid64={} completed={} current={} target={}".format(
-                        objective_name, guid64, completed, current, target
-                    )
+                    f"get_objectives_signature_unsupported={exc!r}"
                 )
-        else:
-            lines.append("aspiration_objectives= (none)")
-    except Exception as exc:
-        lines.append(f"objective probe unavailable: {exc!r}")
+                continue
+            required = 0
+            for param in signature.parameters.values():
+                if param.kind in (
+                    param.VAR_POSITIONAL,
+                    param.VAR_KEYWORD,
+                ):
+                    continue
+                if param.default is param.empty:
+                    required += 1
+            if required == 0:
+                ok, result, error = _safe_call(provider, "get_objectives")
+                if ok:
+                    objectives = result
+                else:
+                    lines.append(f"get_objectives_error={error}")
+            elif required == 1:
+                if milestone_value is None:
+                    lines.append(
+                        "get_objectives_requires_milestone_but_milestone_missing"
+                    )
+                else:
+                    ok, result, error = _safe_call(
+                        provider, "get_objectives", milestone_value
+                    )
+                    if ok:
+                        objectives = result
+                    else:
+                        lines.append(f"get_objectives_error={error}")
+            else:
+                lines.append(
+                    f"get_objectives_signature_unsupported={signature}"
+                )
+        elif hasattr(provider, "objectives"):
+            objectives = _safe_get(provider, "objectives")
+        elif hasattr(provider, "_objectives"):
+            objectives = _safe_get(provider, "_objectives")
+
+        if isinstance(objectives, (list, tuple, set)):
+            break
+        objectives = None
+
+    if objectives is None:
+        lines.append("objectives=(not found)")
+        return lines
+
+    objective_list = list(objectives)
+    lines.append(f"objectives_count={len(objective_list)}")
+    for objective in objective_list[:15]:
+        obj_type = type(objective).__name__
+        obj_name = (
+            _safe_get(objective, "name")
+            or _safe_get(objective, "display_name")
+            or _safe_get(objective, "__name__")
+            or _trim_repr(objective)
+        )
+        obj_ids = _probe_item_ids(objective)
+        parts = [
+            f"obj_type={obj_type}",
+            f"obj_name={_trim_repr(obj_name)}",
+            f"obj_ids={obj_ids if obj_ids else 'none'}",
+        ]
+        tokens = {}
+        for attr in (
+            "completed",
+            "is_completed",
+            "_completed",
+            "current_value",
+            "_current_value",
+            "target_value",
+            "_target_value",
+        ):
+            value = _safe_get(objective, attr)
+            if value is None or callable(value):
+                continue
+            if attr in ("completed", "is_completed", "_completed"):
+                tokens.setdefault("completed", value)
+            elif attr in ("current_value", "_current_value"):
+                tokens.setdefault("progress", value)
+            elif attr in ("target_value", "_target_value"):
+                tokens.setdefault("target", value)
+        for method in (
+            "is_completed",
+            "completed",
+            "get_completed",
+            "get_completion",
+            "get_progress",
+            "get_progress_value",
+        ):
+            fn = _safe_get(objective, method)
+            if not callable(fn):
+                continue
+            ok, result, error = _safe_call(objective, method)
+            if not ok:
+                continue
+            if method in ("is_completed", "completed", "get_completed", "get_completion"):
+                tokens.setdefault("completed", result)
+            elif method in ("get_progress", "get_progress_value"):
+                tokens.setdefault("progress", result)
+        if "completed" in tokens:
+            parts.append(f"completed={_trim_repr(tokens['completed'])}")
+        if "progress" in tokens:
+            parts.append(f"progress={_trim_repr(tokens['progress'])}")
+        if "target" in tokens:
+            parts.append(f"target={_trim_repr(tokens['target'])}")
+        lines.append("  " + " ".join(parts))
     return lines
 
 
@@ -916,6 +1045,7 @@ def _collect_internal_probes(sim_info):
     lines.extend(_collect_career_summary(sim_info))
     lines.append("ASPIRATION SUMMARY (PROBE)")
     lines.extend(_collect_aspiration_summary(sim_info))
+    lines.extend(_collect_aspiration_objectives(sim_info))
     lines += [""] + _collect_affordance_probe_lines(sim_info)
     tracker = _safe_get(sim_info, "career_tracker")
     if tracker is not None:
@@ -1961,7 +2091,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         if parsed:
             if success:
-                output("Simulation daemon started successfully (build 47).")
+                output("Simulation daemon started successfully (build 50).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True

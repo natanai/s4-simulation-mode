@@ -178,17 +178,32 @@ def ensure_capabilities(sim_info=None, force_rebuild=False):
             sim_info,
             include_sims=None,
             include_non_autonomous=None,
-            max_objects=sm_settings.get_int("catalog_max_objects", 2000),
-            max_affordances_per_object=sm_settings.get_int("catalog_max_affordances_per_object", 80),
+            max_objects=None,
+            max_affordances_per_object=None,
             filename=None,
         )
     except Exception:
         return caps
     if not result or not result.get("ok"):
         return caps
+    if result.get("truncated"):
+        return caps if caps is not None else None
     catalog_path = result.get("catalog_path") or result.get("path")
     built = build_capabilities_from_catalog_jsonl(catalog_path)
     ok, _err = write_capabilities(built)
     if not ok:
         return built
     return load_capabilities() or built
+
+
+def ensure_full_capabilities(sim_info=None, force_rebuild=False):
+    caps = load_capabilities()
+    meta = caps.get("meta") if isinstance(caps, dict) else None
+    current_zone = _current_zone_id()
+    meta_zone = meta.get("zone_id") if meta else None
+    meta_truncated = meta.get("truncated") if meta else None
+    if not force_rebuild and caps is not None:
+        if meta_zone == current_zone and meta_truncated is False:
+            return caps
+    ensure_capabilities(sim_info, force_rebuild=True)
+    return load_capabilities()

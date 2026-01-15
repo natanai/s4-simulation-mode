@@ -46,9 +46,9 @@ KNOWN_DEFAULTS = [
     ("capabilities_auto_build_on_enable", "true"),
     ("catalog_include_sims", "false"),
     ("catalog_include_non_autonomous", "false"),
-    ("catalog_max_records", "50000"),
-    ("catalog_max_objects", "2000"),
-    ("catalog_max_affordances_per_object", "200"),
+    ("catalog_max_records", "0"),
+    ("catalog_max_objects", "0"),
+    ("catalog_max_affordances_per_object", "0"),
     ("catalog_collect_sample_objects", "150"),
     ("catalog_collect_sample_affordances_per_object", "60"),
     ("catalog_collect_top_auto_n", "40"),
@@ -140,7 +140,7 @@ def _build_default_template_text():
         )
     )
     lines.append("")
-    lines.append("# catalog defaults (Build 56)")
+    lines.append("# catalog defaults (Build 60)")
     lines.append("catalog_include_sims={}".format(defaults["catalog_include_sims"]))
     lines.append(
         "catalog_include_non_autonomous={}".format(
@@ -155,7 +155,7 @@ def _build_default_template_text():
         )
     )
     lines.append("")
-    lines.append("# collect-integrated sampling caps (Build 56)")
+    lines.append("# collect-integrated sampling caps (Build 60)")
     lines.append(
         "catalog_collect_sample_objects={}".format(
             defaults["catalog_collect_sample_objects"]
@@ -279,9 +279,9 @@ def _append_missing_keys(path):
             "# Optional integration if you ALSO installed a mod that defines this trait ID",
             lambda key: key.startswith("integrate_") or key.startswith("better_autonomy_"),
         )
-        _append_group("# catalog defaults (Build 56)", lambda key: key in catalog_defaults)
+        _append_group("# catalog defaults (Build 60)", lambda key: key in catalog_defaults)
         _append_group(
-            "# collect-integrated sampling caps (Build 56)", lambda key: key in collect_caps
+            "# collect-integrated sampling caps (Build 60)", lambda key: key in collect_caps
         )
         _append_group(
             "# affordance meta probe list (pipe-delimited)", lambda key: key in aff_meta

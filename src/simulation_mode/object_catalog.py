@@ -8,6 +8,7 @@ from simulation_mode.settings import get_config_path
 
 
 _DEFAULT_FILENAME = "simulation-mode-object-catalog.jsonl"
+META_RESERVE_BYTES = 4096
 
 
 def get_catalog_log_path(filename: str = None) -> str:
@@ -35,6 +36,39 @@ def write_catalog_records(records, path: str, mode: str = "a"):
     except Exception as exc:
         return False, repr(exc)
     return True, ""
+
+
+def _normalize_limit(value):
+    if value is None:
+        return None
+    try:
+        numeric = int(value)
+    except Exception:
+        return None
+    if numeric <= 0:
+        return None
+    return numeric
+
+
+def _build_padded_meta_line(meta):
+    line = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
+    raw = line.encode("utf-8")
+    limit = META_RESERVE_BYTES - 1
+    if len(raw) > limit:
+        notes = list(meta.get("notes") or [])
+        while notes and len(raw) > limit:
+            notes.pop()
+            meta["notes"] = notes
+            line = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
+            raw = line.encode("utf-8")
+        if len(raw) > limit:
+            meta["notes"] = []
+            line = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
+            raw = line.encode("utf-8")
+    if len(raw) > limit:
+        raise ValueError("meta line exceeds reserved bytes")
+    padded = raw + (b" " * (limit - len(raw)))
+    return padded + b"\n"
 
 
 def _trim_repr(value, limit=180):
@@ -360,35 +394,63 @@ def scan_zone_catalog(
                 "catalog_include_non_autonomous", False
             )
         if max_objects is None:
-            max_objects = sm_settings.get_int("catalog_max_objects", 2000)
+            max_objects = sm_settings.get_int("catalog_max_objects", 0)
         if max_affordances_per_object is None:
             max_affordances_per_object = sm_settings.get_int(
-                "catalog_max_affordances_per_object", 80
+                "catalog_max_affordances_per_object", 0
             )
+        max_records = sm_settings.get_int("catalog_max_records", 0)
     except Exception as exc:
         include_sims = False if include_sims is None else include_sims
         include_non_autonomous = (
             False if include_non_autonomous is None else include_non_autonomous
         )
-        max_objects = 2000 if max_objects is None else max_objects
+        max_objects = 0 if max_objects is None else max_objects
         max_affordances_per_object = (
-            80 if max_affordances_per_object is None else max_affordances_per_object
+            0 if max_affordances_per_object is None else max_affordances_per_object
         )
+        max_records = 0
         notes.append(f"settings_read_error err={exc!r}")
-    records = []
+    max_objects = _normalize_limit(max_objects)
+    max_affordances_per_object = _normalize_limit(max_affordances_per_object)
+    max_records = _normalize_limit(max_records)
+    if max_records is None and max_objects is None and max_affordances_per_object is None:
+        notes.append("unlimited caps enabled")
     sample = []
     scanned_objects = 0
     unresolved_objects = 0
     scanned_affordances = 0
-    written_records = 0
+    record_lines_written = 0
     truncated = False
     skipped_sims = 0
     filtered_flags = 0
     filtered_non_autonomy = 0
     zone_id = _zone_id()
     ok = True
+    write_ok = False
+    write_error = ""
+    handle = None
+    record_limit_hit = False
+    write_failed = False
+    path = get_catalog_log_path(filename)
 
     try:
+        if path:
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                handle = open(path, "w+b")
+                placeholder = {
+                    "type": "meta",
+                    "generated_ts": time.time(),
+                    "zone_id": zone_id,
+                    "notes": ["pending_scan"],
+                }
+                handle.write(_build_padded_meta_line(placeholder))
+            except Exception as exc:
+                ok = False
+                write_error = repr(exc)
+                handle = None
+
         sim = None
         try:
             sim = sim_info.get_sim_instance()
@@ -396,6 +458,8 @@ def scan_zone_catalog(
             sim = None
 
         for raw in push_utils.iter_objects():
+            if record_limit_hit or write_failed:
+                break
             obj = _resolve_object(raw)
             if len(sample) < 10:
                 sample_target = obj or raw
@@ -427,7 +491,7 @@ def scan_zone_catalog(
             if not include_sims and _is_sim_object(obj):
                 skipped_sims += 1
                 continue
-            if scanned_objects >= max_objects:
+            if max_objects is not None and scanned_objects >= max_objects:
                 truncated = True
                 notes.append("max_objects cap reached")
                 break
@@ -447,13 +511,21 @@ def scan_zone_catalog(
             if not affordance_list:
                 continue
 
-            if len(affordance_list) > max_affordances_per_object:
+            if max_affordances_per_object is not None and len(affordance_list) > max_affordances_per_object:
                 truncated = True
                 notes.append(
                     f"affordance cap applied obj_id={_safe_get(obj, 'id')} count={len(affordance_list)}"
                 )
 
-            for aff in affordance_list[:max_affordances_per_object]:
+            capped_affordances = (
+                affordance_list
+                if max_affordances_per_object is None
+                else affordance_list[:max_affordances_per_object]
+            )
+
+            for aff in capped_affordances:
+                if record_limit_hit or write_failed:
+                    break
                 safe_ok, safe_reason = push_utils.is_safe_for_script_push(aff)
                 allow_user_directed = _bool_attr_or_call(
                     _safe_get(aff, "allow_user_directed", False)
@@ -504,6 +576,12 @@ def scan_zone_catalog(
                     filtered_non_autonomy += 1
                     continue
 
+                if max_records is not None and record_lines_written >= max_records:
+                    truncated = True
+                    notes.append("max_records cap reached")
+                    record_limit_hit = True
+                    break
+
                 record = {
                     "ts": time.time(),
                     "zone_id": zone_id,
@@ -531,45 +609,63 @@ def scan_zone_catalog(
                     "skill_loot_call_ok": skill_loot_call_ok,
                     "skill_loot_err": skill_loot_err,
                 }
-                records.append(record)
-                written_records += 1
+                if handle is not None:
+                    try:
+                        line = json.dumps(
+                            record, ensure_ascii=False, separators=(",", ":")
+                        ).encode("utf-8")
+                        handle.write(line + b"\n")
+                    except Exception as exc:
+                        ok = False
+                        write_error = repr(exc)
+                        write_failed = True
+                        notes.append(f"write_error err={write_error}")
+                        break
+                record_lines_written += 1
     except Exception as exc:
         ok = False
         notes.append(f"scan error: {exc}")
 
-    path = get_catalog_log_path(filename)
     if scanned_affordances == 0 and scanned_objects > 0:
         notes.append(
             "ZERO_AFFORDANCES: iter_super_affordances returned empty for all scanned objects; "
             "check iter_objects source or sim resolution"
         )
-    if scanned_affordances > 0 and written_records == 0:
+    if scanned_affordances > 0 and record_lines_written == 0:
         notes.append(
             "all_affordances_filtered_out; check allow_ud/allow_auto extraction and picker/debug flags"
         )
+    notes = [note for note in notes if note][:10]
+    written_records = record_lines_written + (1 if handle is not None else 0)
     meta_record = {
         "type": "meta",
-        "ts": time.time(),
+        "generated_ts": time.time(),
         "zone_id": zone_id,
         "scanned_objects": scanned_objects,
         "unresolved_objects": unresolved_objects,
         "scanned_affordances": scanned_affordances,
-        "written_records": written_records + 1,
-        "truncated": truncated,
+        "written_records": written_records,
+        "truncated": bool(truncated),
         "skipped_sims": skipped_sims,
         "filtered_flags": filtered_flags,
         "filtered_non_autonomy": filtered_non_autonomy,
         "notes": notes,
-        "sample": sample,
     }
-    write_ok = False
-    write_error = ""
-    if path:
-        write_ok, write_error = write_catalog_records([meta_record] + records, path, mode="w")
-        if write_ok:
-            written_records += 1
-        else:
+    if sample:
+        meta_record["sample"] = sample
+    if handle is not None:
+        try:
+            handle.seek(0)
+            handle.write(_build_padded_meta_line(meta_record))
+            handle.flush()
+            write_ok = True if not write_failed else False
+        except Exception as exc:
             ok = False
+            write_error = repr(exc)
+        try:
+            handle.close()
+        except Exception:
+            pass
 
     file_exists = bool(path and os.path.exists(path))
     file_bytes = os.path.getsize(path) if file_exists else 0

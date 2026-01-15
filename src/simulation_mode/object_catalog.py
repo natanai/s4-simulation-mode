@@ -20,20 +20,21 @@ def get_catalog_log_path(filename: str = None) -> str:
         return ""
 
 
-def write_catalog_records(records, path: str, mode: str = "a") -> None:
+def write_catalog_records(records, path: str, mode: str = "a"):
     if not path:
-        return
+        return False, "missing path"
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-    except Exception:
-        return
+    except Exception as exc:
+        return False, repr(exc)
     try:
         with open(path, mode, encoding="utf-8") as handle:
             for record in records:
                 handle.write(json.dumps(record, ensure_ascii=False))
                 handle.write("\n")
-    except Exception:
-        return
+    except Exception as exc:
+        return False, repr(exc)
+    return True, ""
 
 
 def _trim_repr(value, limit=180):
@@ -217,6 +218,7 @@ def scan_zone_catalog(
     max_affordances_per_object=None,
     include_sims=None,
     include_non_autonomous=None,
+    filename: str = None,
 ):
     if include_sims is None:
         include_sims = sm_settings.get_bool("catalog_include_sims", False)
@@ -351,7 +353,7 @@ def scan_zone_catalog(
         ok = False
         notes.append(f"scan error: {exc}")
 
-    path = get_catalog_log_path()
+    path = get_catalog_log_path(filename)
     if scanned_affordances == 0 and scanned_objects > 0:
         notes.append(
             "ZERO_AFFORDANCES: iter_super_affordances returned empty for all scanned objects; "
@@ -375,13 +377,26 @@ def scan_zone_catalog(
         "notes": notes,
         "sample": sample,
     }
+    write_ok = False
+    write_error = ""
     if path:
-        write_catalog_records([meta_record] + records, path, mode="w")
-        written_records += 1
+        write_ok, write_error = write_catalog_records([meta_record] + records, path, mode="w")
+        if write_ok:
+            written_records += 1
+        else:
+            ok = False
+
+    file_exists = bool(path and os.path.exists(path))
+    file_bytes = os.path.getsize(path) if file_exists else 0
 
     return {
         "ok": ok,
         "path": path,
+        "catalog_path": path,
+        "write_ok": write_ok,
+        "write_error": write_error,
+        "file_exists": file_exists,
+        "file_bytes": file_bytes,
         "scanned_objects": scanned_objects,
         "unresolved_objects": unresolved_objects,
         "scanned_affordances": scanned_affordances,

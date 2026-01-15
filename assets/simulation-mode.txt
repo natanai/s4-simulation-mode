@@ -32,6 +32,8 @@ director_fallback_to_started_skills=true
 director_skill_allow_list=
 director_skill_block_list=
 collect_log_filename=simulation-mode-collect.log
+story_log_enabled=true
+story_log_filename=simulation-mode-story.log
 
 # catalog defaults (Build 56)
 catalog_include_sims=false

@@ -12,6 +12,7 @@ import services
 from simulation_mode import clock_utils
 from simulation_mode import guardian
 from simulation_mode import probe_log
+from simulation_mode import capabilities
 from simulation_mode.push_utils import (
     affordance_name,
     call_push_super_affordance,
@@ -20,23 +21,10 @@ from simulation_mode.push_utils import (
     iter_objects,
     iter_super_affordances,
     make_interaction_context,
+    push_by_def_and_aff_guid,
 )
 from simulation_mode.settings import settings
-from simulation_mode import skills
 
-_CAREER_TO_SKILLS = {
-    "TechGuru": ["programming", "video_gaming"],
-    "Writer": ["writing"],
-    "Culinary": ["cooking"],
-    "Athlete": ["fitness"],
-    "Painter": ["painting"],
-    "Entertainer": ["guitar", "piano", "violin"],
-    "Criminal": ["mischief", "fitness"],
-    "Astronaut": ["fitness", "logic"],
-    "Scientist": ["logic"],
-    "Business": ["charisma"],
-    "ActorCareer": ["acting", "charisma"],
-}
 
 _WHIM_RULES = {
     "fun": {
@@ -419,23 +407,35 @@ def _record_push(sim_id, now):
     _per_sim_push_count_in_window[sim_id] = _per_sim_push_count_in_window.get(sim_id, 0) + 1
 
 
-def _skill_allowed(skill_key):
-    allow_list = settings.director_skill_allow_list
-    block_list = settings.director_skill_block_list
-    if allow_list and skill_key not in allow_list:
+def _skill_guid64(skill_obj):
+    if skill_obj is None:
+        return None
+    guid = getattr(skill_obj, "guid64", None)
+    if guid:
+        return guid
+    skill_type = getattr(skill_obj, "skill_type", None)
+    return getattr(skill_type, "guid64", None)
+
+
+def _skill_is_allowed(skill_obj):
+    allow_list = settings.director_skill_allow_list or []
+    block_list = settings.director_skill_block_list or []
+    if not allow_list and not block_list:
+        return True
+    guid = _skill_guid64(skill_obj)
+    class_name = getattr(getattr(skill_obj, "__class__", None), "__name__", None)
+    tokens = set()
+    if guid is not None:
+        tokens.add(str(guid))
+    if class_name:
+        tokens.add(class_name.lower())
+    allow_set = {str(item).strip().lower() for item in allow_list if str(item).strip()}
+    block_set = {str(item).strip().lower() for item in block_list if str(item).strip()}
+    if allow_set and not (tokens & allow_set):
         return False
-    if block_list and skill_key in block_list:
+    if block_set and (tokens & block_set):
         return False
     return True
-
-
-def _extract_skill_name(skill):
-    return (
-        getattr(skill, "__name__", None)
-        or getattr(skill, "__qualname__", None)
-        or getattr(type(skill), "__name__", None)
-        or str(skill)
-    )
 
 
 def _trim_repr(value, limit=200):
@@ -448,10 +448,6 @@ def _trim_repr(value, limit=200):
     if len(text) > limit:
         return f"{text[:limit]}..."
     return text
-
-
-def _skill_key_from_name(name):
-    return skills.skill_key_from_name(name)
 
 
 def _skill_level_from_tracker(skill_tracker, skill):
@@ -511,13 +507,8 @@ def _skill_max_from_skill(skill):
     return None
 
 
-def _skill_level_for_key(sim_info, skill_key):
-    level, _max_level = _skill_level_and_max_for_key(sim_info, skill_key)
-    return level
-
-
-def _skill_level_and_max_for_key(sim_info, skill_key):
-    if sim_info is None or not skill_key:
+def _skill_level_and_max_for_guid(sim_info, guid64):
+    if sim_info is None or not guid64:
         return None, None
     skill_tracker = getattr(sim_info, "skill_tracker", None)
     get_skills = None
@@ -532,10 +523,8 @@ def _skill_level_and_max_for_key(sim_info, skill_key):
     except Exception:
         return None, None
     for skill in skills:
-        name = _extract_skill_name(skill)
-        if not name:
-            continue
-        if _skill_key_from_name(name) != skill_key:
+        skill_guid = _skill_guid64(skill)
+        if skill_guid != guid64:
             continue
         level = _skill_level_from_skill(skill)
         if level is None and skill_tracker is not None:
@@ -599,10 +588,9 @@ def _iter_skill_tuning_values(value):
 def _extract_skill_candidates_from_value(value):
     candidates = []
     for item in _iter_skill_tuning_values(value):
-        name = _extract_skill_name(item)
-        skill_key = _skill_key_from_name(name)
-        if skill_key and _skill_allowed(skill_key):
-            candidates.append((skill_key, name))
+        guid = _skill_guid64(item)
+        if guid is not None:
+            candidates.append(guid)
     return candidates
 
 
@@ -642,50 +630,27 @@ def _get_career_skill_candidates(sim_info):
                 _LAST_CAREER_PROBE.append(
                     f"{career_name}.{obj_label}.{attr} type={type(value).__name__} repr={_trim_repr(value)}"
                 )
-                for skill_key, skill_name in _extract_skill_candidates_from_value(value):
-                    detail = (
-                        f"career_requirement:{career_name}.{obj_label}.{attr} skill={skill_name}"
-                    )
+                for guid in _extract_skill_candidates_from_value(value):
+                    detail = f"career_requirement:{career_name}.{obj_label}.{attr} guid64={guid}"
                     if career_guid is not None:
                         detail = f"{detail} career_id={career_guid}"
-                    rationale = f"career_skill: {skill_key} because {detail}"
-                    candidates.append((skill_key, rationale))
-    if candidates:
-        deduped = []
-        seen = set()
-        for skill_key, rationale in candidates:
-            if skill_key in seen:
-                continue
-            seen.add(skill_key)
-            deduped.append((skill_key, rationale))
-
-        def _level_sort(item):
-            level = _skill_level_for_key(sim_info, item[0])
-            return (level if level is not None else 999, item[0])
-
-        deduped.sort(key=_level_sort)
-        return deduped
-
-    fallback = []
-    for career in careers:
-        career_name = getattr(getattr(career, "__class__", None), "__name__", "") or ""
-        career_guid = getattr(career, "guid64", None)
-        lowered = career_name.lower()
-        for key, skills in _CAREER_TO_SKILLS.items():
-            if key.lower() in lowered:
-                for skill_key in skills:
-                    if not _skill_allowed(skill_key):
-                        continue
-                    rationale = (
-                        f"career_skill: {skill_key} because career requirements not discoverable "
-                        f"via tuning probe; using curated career mapping for career id={career_guid}"
-                    )
-                    fallback.append((skill_key, rationale))
-        if fallback:
-            break
-    if fallback:
-        _LAST_CAREER_PROBE.append("career_probe=fallback_mapping_used")
-    return fallback
+                    _LAST_CAREER_PROBE.append(detail)
+                    candidates.append(guid)
+    if not candidates:
+        return []
+    deduped = []
+    seen = set()
+    for guid in candidates:
+        if guid in seen:
+            continue
+        seen.add(guid)
+        deduped.append(guid)
+    deduped.sort(
+        key=lambda guid: _skill_level_and_max_for_guid(sim_info, guid)[0]
+        if _skill_level_and_max_for_guid(sim_info, guid)[0] is not None
+        else 999
+    )
+    return deduped
 
 
 def _choose_career_skill(sim_info):
@@ -694,22 +659,21 @@ def _choose_career_skill(sim_info):
     candidates, _satisfied = _filter_unmet_career_skills(
         sim_info, _get_career_skill_candidates(sim_info)
     )
-    for skill_key, rationale in candidates:
-        if _skill_allowed(skill_key):
-            return skill_key, rationale
+    for guid in candidates:
+        return guid, f"career_skill_guid64={guid}"
     return None
 
 
 def _filter_unmet_career_skills(sim_info, candidates):
     unmet = []
     satisfied = []
-    for skill_key, rationale in candidates:
-        level, max_level = _skill_level_and_max_for_key(sim_info, skill_key)
+    for guid in candidates:
+        level, max_level = _skill_level_and_max_for_guid(sim_info, guid)
         max_level = max_level if max_level is not None else 10
         if level is not None and level >= max_level:
-            satisfied.append(skill_key)
+            satisfied.append(guid)
             continue
-        unmet.append((skill_key, rationale))
+        unmet.append(guid)
     return unmet, satisfied
 
 
@@ -729,17 +693,11 @@ def _get_started_skill_candidates(sim_info):
     except Exception:
         skills = []
     candidates = []
+    skill_levels = {}
     for skill in skills:
         try:
-            name = _extract_skill_name(skill)
-            if not name:
+            if not _skill_is_allowed(skill):
                 continue
-            matched_key = _skill_key_from_name(name)
-            if matched_key is None:
-                continue
-            if not _skill_allowed(matched_key):
-                continue
-
             level = _skill_level_from_skill(skill)
             if level is None and skill_tracker is not None:
                 level = _skill_level_from_tracker(skill_tracker, skill)
@@ -748,21 +706,16 @@ def _get_started_skill_candidates(sim_info):
                 max_level = _skill_max_from_tracker(skill_tracker, skill)
             if level is None:
                 continue
-            if level <= 0 or level >= 10:
-                continue
             max_level = max_level if max_level is not None else 10
-            if level >= max_level:
+            if level <= 0 or level >= max_level:
                 continue
-            candidates.append(
-                (
-                    matched_key,
-                    f"started_skill: {matched_key} because level={level}",
-                    level,
-                )
-            )
+            candidates.append(skill)
+            skill_levels[id(skill)] = level
         except Exception:
             continue
-    candidates.sort(key=lambda item: (item[2], item[0]))
+    candidates.sort(
+        key=lambda item: (skill_levels.get(id(item), 999), str(_skill_guid64(item)))
+    )
     return candidates
 
 
@@ -771,8 +724,10 @@ def _choose_started_skill(sim_info):
         return None
     candidates = _get_started_skill_candidates(sim_info)
     if candidates:
-        skill_key, rationale, _level = candidates[0]
-        return skill_key, rationale
+        skill_obj = candidates[0]
+        level = _skill_level_from_skill(skill_obj)
+        guid = _skill_guid64(skill_obj)
+        return guid, f"started_skill_guid64={guid} level={level}"
     return None
 
 
@@ -787,16 +742,20 @@ def build_skill_plan(sim_info):
         career_candidates, _satisfied = _filter_unmet_career_skills(
             sim_info, _get_career_skill_candidates(sim_info)
         )
-        for skill_key, rationale in career_candidates:
-            candidates.append((skill_key, rationale))
+        for guid in career_candidates:
+            candidates.append((guid, f"career_skill_guid64={guid}"))
         if career_candidates:
-            selected = career_candidates[0]
+            selected = (career_candidates[0], f"career_skill_guid64={career_candidates[0]}")
     if selected is None and settings.director_fallback_to_started_skills:
         started_candidates = _get_started_skill_candidates(sim_info)
-        for skill_key, rationale, _level in started_candidates:
-            candidates.append((skill_key, rationale))
+        for skill_obj in started_candidates:
+            guid = _skill_guid64(skill_obj)
+            level = _skill_level_from_skill(skill_obj)
+            candidates.append((guid, f"started_skill_guid64={guid} level={level}"))
         if started_candidates:
-            selected = (started_candidates[0][0], started_candidates[0][1])
+            guid = _skill_guid64(started_candidates[0])
+            level = _skill_level_from_skill(started_candidates[0])
+            selected = (guid, f"started_skill_guid64={guid} level={level}")
     return selected, candidates
 
 
@@ -832,46 +791,55 @@ def run_skill_plan(sim_info, sim, now, force=False, source="director"):
         started_candidates = _get_started_skill_candidates(sim_info)
     _log_started_skill_order(started_candidates)
 
-    for skill_key, rationale in career_candidates:
-        level = _skill_level_for_key(sim_info, skill_key)
-        attempt = _attempt_skill_candidate(
-            sim, skill_key, level, source="career", force=force
+    for guid in career_candidates:
+        level, _max_level = _skill_level_and_max_for_guid(sim_info, guid)
+        attempt_ok = try_push_skill_interaction(
+            sim, guid, force=force, probe_details=None
         )
-        if attempt["success"]:
+        if attempt_ok:
             _append_debug(
-                f"Director: skill_result=success skill={skill_key} source=career"
+                f"Director: skill_result=success skill_guid64={guid} source=career"
             )
             return {
                 "success": True,
-                "skill_key": skill_key,
-                "skill_reason": rationale,
+                "skill_key": guid,
+                "skill_reason": f"career_skill_guid64={guid}",
                 "skill_source": "career",
                 "wants_reason": wants_reason,
                 "career_reason": career_reason,
                 "started_candidates": started_candidates,
             }
+        _log_try_skill(
+            "career",
+            guid,
+            level,
+            "push_failed",
+            details="capability_push_failed",
+        )
 
     failure_counts = {"no_object": 0, "no_affordance": 0, "push_failed": 0}
     attempted = 0
-    for skill_key, rationale, level in started_candidates:
+    for skill_obj in started_candidates:
         attempted += 1
-        attempt = _attempt_skill_candidate(
-            sim, skill_key, level, source="started", force=force
+        guid = _skill_guid64(skill_obj)
+        level = _skill_level_from_skill(skill_obj)
+        attempt_ok = try_push_skill_interaction(
+            sim, skill_obj, force=force, probe_details=None
         )
-        if attempt["success"]:
+        if attempt_ok:
             _append_debug(
-                f"Director: skill_result=success skill={skill_key} source=started"
+                f"Director: skill_result=success skill_guid64={guid} source=started"
             )
             return {
                 "success": True,
-                "skill_key": skill_key,
-                "skill_reason": rationale,
+                "skill_key": guid,
+                "skill_reason": f"started_skill_guid64={guid} level={level}",
                 "skill_source": "started",
                 "wants_reason": wants_reason,
                 "career_reason": career_reason,
                 "started_candidates": started_candidates,
             }
-        failure_counts[attempt["result"]] += 1
+        failure_counts["push_failed"] += 1
 
     _append_debug(
         "Director: skill_result=failure attempted={} no_object={} "
@@ -1411,7 +1379,7 @@ def _push_want(sim, rule_key, want_name, want_obj=None, force=False, return_deta
                 details["failure_reason"] = "no skill goal available"
                 return False, "WANT no skill goal available", details
             return False, "WANT no skill goal available"
-        # choose_skill_goal returns (skill_key, reason)
+        # choose_skill_goal returns (skill_guid64, reason)
         if isinstance(choice, (tuple, list)) and len(choice) >= 1:
             skill_key = choice[0]
             reason = choice[1] if len(choice) > 1 else ""
@@ -1954,81 +1922,66 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
         except Exception:
             sim_name = None
     sim_name = sim_name or getattr(sim, "first_name", None) or "Sim"
-    resolution = skills.resolve_skill_action(sim, skill_key)
-    rule = skills.SKILL_RULES.get(skill_key)
-    reason = resolution.get("reason")
-    if reason == "no_rule":
-        _append_debug(f"{sim_name}: FAIL no rule for skill={skill_key}")
+    if isinstance(skill_key, str):
         if probe_details is not None:
             probe_details["resolution_type"] = "FAIL"
-            probe_details["failure_reason"] = "no rule for skill key"
+            probe_details["failure_reason"] = "string_goal_skill_not_supported_in_kernel"
+        _append_debug(f"{sim_name}: FAIL skill goal string not supported skill={skill_key}")
         return False
-    if reason == "no_object":
+
+    skill_guid64 = None
+    if isinstance(skill_key, int):
+        skill_guid64 = skill_key
+    else:
+        skill_guid64 = _skill_guid64(skill_key)
+
+    if not skill_guid64:
         if probe_details is not None:
             probe_details["resolution_type"] = "FAIL"
-            probe_details["object_keywords"] = list(rule.get("object_keywords", [])) if rule else []
-            probe_details["failure_reason"] = "no object match"
-        _append_debug(f"{sim_name}: FAIL no object for skill={skill_key}")
+            probe_details["failure_reason"] = "missing_skill_guid64"
+        _append_debug(f"{sim_name}: FAIL missing skill guid64")
         return False
-    if reason == "no_affordance":
+
+    sim_info = getattr(sim, "sim_info", None)
+    caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+    if not caps:
         if probe_details is not None:
             probe_details["resolution_type"] = "FAIL"
-            probe_details["failure_reason"] = "no safe affordance candidates"
-        _append_debug(f"{sim_name}: FAIL no affordance for skill={skill_key}")
+            probe_details["failure_reason"] = "capabilities_missing"
+        _append_debug(f"{sim_name}: FAIL capabilities missing for skill_guid64={skill_guid64}")
         return False
-    target_obj = resolution.get("target_obj")
-    affordances = list(resolution.get("affordances") or [])
+
+    candidates = capabilities.get_candidates_for_loot_guid(skill_guid64, caps)
+    candidates = [entry for entry in candidates if entry.get("allow_autonomous") is True]
     if probe_details is not None:
-        probe_details["resolution_type"] = "SKILL_OBJECT"
-        probe_details["target_label"] = _get_object_probe_label(target_obj)
-        probe_details["target_type"] = "object"
+        probe_details["resolution_type"] = "CAPABILITY_INDEX"
+        probe_details["skill_guid64"] = skill_guid64
+        probe_details["candidate_count"] = len(candidates)
         probe_details["push_attempts"] = []
-        probe_details["candidate_affordances"] = [
-            {
-                "affordance_name": affordance_name(aff),
-                "affordance_class": _get_affordance_class_name(aff),
-                "blocked_reason": None,
-                "requires_target_sim": False,
-            }
-            for aff in affordances
-        ]
-    if not affordances:
-        _append_debug(f"{sim_name}: FAIL no affordance for skill={skill_key}")
+    if not candidates:
         if probe_details is not None:
-            probe_details["failure_reason"] = "no safe affordance candidates"
+            probe_details["failure_reason"] = "no_capability_candidates_or_all_failed"
+        _append_debug(f"{sim_name}: FAIL no capability candidates for skill_guid64={skill_guid64}")
         return False
-    for affordance in affordances[:8]:
-        if skill_key == "acting" and "programming" in affordance_name(affordance):
-            _append_debug("WARN acting_mapped_to_programming_affordance")
-            continue
-        ok, failure_reason, sig_names, _client_attached = _push_affordance_with_details(
-            sim, target_obj, affordance, reason=skill_key, force=force
+
+    for entry in candidates:
+        def_id = entry.get("obj_def_id")
+        aff_guid = entry.get("aff_guid64")
+        ok = push_by_def_and_aff_guid(
+            sim,
+            def_id,
+            aff_guid,
+            reason=f"director_skill_guid64={skill_guid64}",
+            probe_details=probe_details,
         )
-        if probe_details is not None:
-            probe_details["push_attempts"].append(
-                {
-                    "affordance_name": affordance_name(affordance),
-                    "affordance_class": _get_affordance_class_name(affordance),
-                    "affordance_is_picker": is_picker_affordance(affordance),
-                    "push_ok": ok,
-                    "push_sig_names": list(sig_names or []),
-                    "push_reason": failure_reason,
-                }
-            )
         if ok:
-            if probe_details is not None:
-                probe_details["chosen_affordance"] = affordance_name(affordance)
-                probe_details["chosen_affordance_class"] = _get_affordance_class_name(affordance)
             _append_debug(
-                f"{sim_name}: SUCCESS push skill={skill_key} aff={_aff_label(affordance)}"
+                f"{sim_name}: SUCCESS push skill_guid64={skill_guid64} def_id={def_id} aff_guid={aff_guid}"
             )
             return True
-        _append_debug(
-            f"{sim_name}: candidate failed skill={skill_key} aff={_aff_label(affordance)}"
-        )
-    _append_debug(f"{sim_name}: FAIL all candidates failed for skill={skill_key}")
     if probe_details is not None:
-        probe_details["failure_reason"] = "all candidates failed"
+        probe_details["failure_reason"] = "no_capability_candidates_or_all_failed"
+    _append_debug(f"{sim_name}: FAIL all candidates failed for skill_guid64={skill_guid64}")
     return False
 
 
@@ -2132,7 +2085,8 @@ def _append_action(action):
 def _log_started_skill_order(candidates):
     total = len(candidates)
     preview = ", ".join(
-        f"({skill_key},{level})" for skill_key, _reason, level in candidates[:20]
+        f"({ _skill_guid64(skill_obj)},{_skill_level_from_skill(skill_obj)})"
+        for skill_obj in candidates[:20]
     )
     _append_debug(f"Director: started_skills_order=[{preview}] total={total}")
 
@@ -2168,78 +2122,23 @@ def _log_try_skill(
 
 
 def _attempt_skill_candidate(sim, skill_key, level, source, force=False):
-    resolution = skills.resolve_skill_action(sim, skill_key)
-    reason = resolution.get("reason")
-    if reason == "no_rule":
+    ok = try_push_skill_interaction(sim, skill_key, force=force)
+    if ok:
         _log_try_skill(
             source,
             skill_key,
             level,
-            "no_object",
-            details="no_rule_for_skill_key",
+            "success",
+            details="capability_push_ok",
+            push_ok=True,
         )
-        return {"success": False, "result": "no_object"}
-    if reason == "no_object":
-        _log_try_skill(
-            source,
-            skill_key,
-            level,
-            "no_object",
-            details="no_matching_object",
-        )
-        return {"success": False, "result": "no_object"}
-    if reason == "no_affordance":
-        _log_try_skill(
-            source,
-            skill_key,
-            level,
-            "no_affordance",
-            details="no_safe_affordance",
-        )
-        return {"success": False, "result": "no_affordance"}
-    target_obj = resolution.get("target_obj")
-    affordances = list(resolution.get("affordances") or [])
-    if not affordances:
-        _log_try_skill(
-            source,
-            skill_key,
-            level,
-            "no_affordance",
-            details="no_safe_affordance",
-        )
-        return {"success": False, "result": "no_affordance"}
-    last_failure = None
-    last_sig = None
-    last_aff_label = None
-    for affordance in affordances[:8]:
-        ok, failure_reason, sig_names, _client_attached = _push_affordance_with_details(
-            sim, target_obj, affordance, reason=skill_key, force=force
-        )
-        last_aff_label = affordance_name(affordance)
-        last_sig = list(sig_names or [])
-        if ok:
-            _log_try_skill(
-                source,
-                skill_key,
-                level,
-                "success",
-                obj_label=_get_object_probe_label(target_obj),
-                aff_label=last_aff_label,
-                details="push_ok",
-                push_signature=last_sig,
-                push_ok=True,
-            )
-            return {"success": True, "result": "success"}
-        last_failure = failure_reason or "push_failed"
+        return {"success": True, "result": "success"}
     _log_try_skill(
         source,
         skill_key,
         level,
         "push_failed",
-        obj_label=_get_object_probe_label(target_obj),
-        aff_label=last_aff_label,
-        details=last_failure,
-        push_signature=last_sig,
+        details="capability_push_failed",
         push_ok=False,
     )
     return {"success": False, "result": "push_failed"}

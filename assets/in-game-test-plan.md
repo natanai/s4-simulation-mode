@@ -56,12 +56,12 @@ executes guardian/director behavior safely during live gameplay.
 4. Run `simulation director_why`.
    * **Expected:** recent director debug lines or an empty set message.
 5. Run `simulation want_now`.
-   * **Expected:** console prints `want_now pushed=<True|False>` and a one-line detail message.
+   * **Expected:** console prints `want_now result=<SUCCESS|FAIL>` plus the probe log path.
 6. Optional: run `simulation director_push <skill_key>` on a known skill.
    * **Expected:** success/failure message plus last action/debug.
 7. Optional: run `simulation director_takeover <skill_key>` to cancel current interactions and push.
 8. Run `simulation skill_plan_now` while the Sim is already performing an unrelated interaction.
-   * **Expected:** current interaction is canceled and a delayed retry is scheduled; retry should push a skill plan shortly after.
+   * **Expected:** a result is logged to the collect log file and the console reports success/failure.
 
 ## Settings reload
 
@@ -82,7 +82,9 @@ executes guardian/director behavior safely during live gameplay.
    * **Expected:** console prompts you to run `simulation dump_log` when complete.
 2. Run `simulation dump_log`.
    * **Expected:** `simulation-mode.log` is written to disk.
-3. Run `simulation probe_wants`, `simulation probe_want 0`, `simulation probe_career`,
+3. Run `simulation collect`.
+   * **Expected:** a new `SimulationMode COLLECT` block is appended to the collect log file.
+4. Run `simulation probe_wants`, `simulation probe_want 0`, `simulation probe_career`,
    and `simulation probe_aspiration`.
    * **Expected:** each writes diagnostics to the probe log (`simulation-mode-probe.log`).
 

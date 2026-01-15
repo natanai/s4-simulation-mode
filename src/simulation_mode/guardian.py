@@ -41,12 +41,30 @@ _AFFORDANCE_KEYWORDS = {
     "motive_social": ["chat", "talk", "social", "call", "text"],
 }
 
+_RUNNING_CARE_KEYWORDS = {
+    "motive_energy": ["sleep", "nap", "bed_sleep", "bed_nap"],
+    "motive_hunger": [
+        "consume_food",
+        "eat",
+        "grab_a_serving",
+        "cook",
+        "microwave",
+        "get_leftovers",
+        "have_meal",
+    ],
+    "motive_bladder": ["toilet", "use_toilet", "pee", "bladder"],
+    "motive_hygiene": ["shower", "bath", "wash_hands", "brush_teeth", "hygiene"],
+    "motive_fun": ["watch", "tv", "game", "play", "fun"],
+    "motive_social": ["social", "chat", "talk", "hug", "friendly", "kiss", "compliment"],
+}
+
 _LAST_GLOBAL_CHECK = 0.0
 _LAST_AUTONOMY_LOG = 0.0
 _LAST_NO_OBJECT_LOG = 0.0
 _LAST_NO_MOTIVE_LOG = 0.0
 _PER_SIM_LAST_PUSH = {}
 _PER_SIM_PUSH_HISTORY = {}
+_PER_SIM_LAST_CHOSEN_MOTIVE = {}
 _MOTIVE_STATS = {}
 _LAST_CARE_DETAILS = None
 
@@ -288,6 +306,51 @@ def _motive_snapshot(sim_info):
     return snapshot
 
 
+def _running_interaction_info(sim):
+    queue = getattr(sim, "queue", None)
+    if queue is None:
+        return None, None, None
+    running = getattr(queue, "running", None)
+    if running is None:
+        return None, None, None
+    running_type = None
+    try:
+        running_type = str(running)
+    except Exception:
+        running_type = None
+    if not running_type:
+        running_type = getattr(running.__class__, "__name__", None)
+    affordance = getattr(running, "affordance", None)
+    if affordance is None:
+        affordance = getattr(running, "super_affordance", None)
+    affordance_name = None
+    if affordance is not None:
+        affordance_name = getattr(affordance, "__name__", None)
+        if not affordance_name:
+            try:
+                affordance_name = str(affordance)
+            except Exception:
+                affordance_name = None
+    running_label = affordance_name or running_type
+    return running_type, affordance_name, running_label
+
+
+def _is_running_care_for_motive(sim, motive_key: str) -> bool:
+    queue = getattr(sim, "queue", None)
+    if queue is None:
+        return False
+    running = getattr(queue, "running", None)
+    if running is None:
+        return False
+    running_type, affordance_name, _running_label = _running_interaction_info(sim)
+    running_type = (running_type or "").lower()
+    affordance_name = (affordance_name or "").lower()
+    keywords = _RUNNING_CARE_KEYWORDS.get(motive_key, [])
+    return any(
+        keyword in running_type or keyword in affordance_name for keyword in keywords
+    )
+
+
 def _select_lowest_motive(snapshot):
     lowest_key = None
     lowest_value = None
@@ -377,8 +440,14 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
         return False, "no care goal found"
 
     sim_id = _sim_identifier(sim_info)
-    if not _can_push_for_sim(sim_id, now, bypass_cooldown=bypass_cooldown):
+    _PER_SIM_LAST_CHOSEN_MOTIVE[sim_id] = motive_key
+    motive_unsafe = motive_value is not None and motive_value < settings.guardian_min_motive
+    if not _cooldown_allows_push(
+        sim, sim_id, now, motive_key, motive_unsafe, bypass_cooldown=bypass_cooldown
+    ):
         return False, "guardian cooldown"
+    if not _can_push_for_sim(sim_id, now):
+        return False, "guardian max pushes"
 
     busy_state = _is_sim_busy(sim)
     if busy_state:
@@ -389,6 +458,7 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
     non_social_keys = [key for key, _ in ordered if key != "motive_social"]
     attempted = []
     attempted_non_social = False
+    last_failure_message = None
     if lowest_key != "motive_social":
         for key in non_social_keys:
             attempted.append(key)
@@ -399,6 +469,7 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
             if pushed:
                 _record_push(sim_id, now)
                 return True, message
+            last_failure_message = message
     else:
         attempted.append(lowest_key)
         value = snapshot_dict.get(lowest_key)
@@ -407,6 +478,7 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
         if pushed:
             _record_push(sim_id, now)
             return True, message
+        last_failure_message = message
 
     if "motive_social" in snapshot_dict:
         allow_social = (
@@ -422,7 +494,14 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
             if pushed:
                 _record_push(sim_id, now)
                 return True, message
+            last_failure_message = message
 
+    if last_failure_message:
+        logger.warn(f"Guardian push failed: {last_failure_message}")
+    else:
+        logger.warn(
+            f"Guardian push failed: no viable self-care interaction (sim_id={sim_id})"
+        )
     return False, "no viable self-care interaction"
 
 
@@ -430,12 +509,38 @@ def last_care_details():
     return _LAST_CARE_DETAILS
 
 
-def _can_push_for_sim(sim_id, now, bypass_cooldown: bool = False):
+def _cooldown_allows_push(sim, sim_id, now, motive_key, motive_unsafe, bypass_cooldown: bool):
     cooldown = settings.guardian_per_sim_cooldown_seconds
     last_push = _PER_SIM_LAST_PUSH.get(sim_id)
-    if not bypass_cooldown and last_push is not None and now - last_push < cooldown:
-        return False
+    if bypass_cooldown:
+        return True
+    if last_push is None or cooldown <= 0:
+        return True
+    secs_since_last = now - last_push
+    if secs_since_last >= cooldown:
+        return True
 
+    _running_type, _affordance_name, running_label = _running_interaction_info(sim)
+    running_label = running_label or "none"
+    care_relevant = False
+    if motive_unsafe:
+        care_relevant = _is_running_care_for_motive(sim, motive_key)
+        if not care_relevant:
+            logger.warn(
+                "CARE guardian cooldown bypassed motive={} secs_since_last={} running={} "
+                "care_relevant={}".format(motive_key, secs_since_last, running_label, care_relevant)
+            )
+            return True
+
+    logger.warn(
+        "CARE guardian cooldown motive={} secs_since_last={} running={} care_relevant={}".format(
+            motive_key, secs_since_last, running_label, care_relevant
+        )
+    )
+    return False
+
+
+def _can_push_for_sim(sim_id, now):
     history = _PER_SIM_PUSH_HISTORY.setdefault(sim_id, [])
     history[:] = [ts for ts in history if now - ts < 3600]
     max_pushes = settings.guardian_max_pushes_per_sim_per_hour
@@ -477,6 +582,9 @@ def _process_sim(sim_info, now):
         return
 
     sim_id = _sim_identifier(sim_info)
+    _PER_SIM_LAST_CHOSEN_MOTIVE[sim_id] = motive_key
+    if not _cooldown_allows_push(sim, sim_id, now, motive_key, True, bypass_cooldown=False):
+        return
     if not _can_push_for_sim(sim_id, now):
         return
 
@@ -509,6 +617,34 @@ def _process_sim(sim_info, now):
                 )
         else:
             logger.warn(f"Guardian push failed: {message}")
+
+
+def get_last_push_timestamp(sim_id):
+    return _PER_SIM_LAST_PUSH.get(sim_id)
+
+
+def get_last_chosen_motive(sim_id):
+    return _PER_SIM_LAST_CHOSEN_MOTIVE.get(sim_id)
+
+
+def get_guardian_cooldown_debug(sim_info, now):
+    if sim_info is None:
+        return "motive=None secs_since_last=None running=none care_relevant=False"
+    sim = sim_info.get_sim_instance()
+    sim_id = _sim_identifier(sim_info)
+    last_push = _PER_SIM_LAST_PUSH.get(sim_id)
+    secs_since_last = None if last_push is None else now - last_push
+    motive_key = _PER_SIM_LAST_CHOSEN_MOTIVE.get(sim_id)
+    _running_type, _affordance_name, running_label = _running_interaction_info(sim)
+    running_label = running_label or "none"
+    care_relevant = False
+    if motive_key is not None:
+        care_relevant = _is_running_care_for_motive(sim, motive_key)
+    return (
+        "motive={} secs_since_last={} running={} care_relevant={}".format(
+            motive_key, secs_since_last, running_label, care_relevant
+        )
+    )
 
 
 def run_guardian():

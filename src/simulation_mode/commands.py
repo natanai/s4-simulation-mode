@@ -520,7 +520,21 @@ def _collect_plan_preview(sim, now):
     lines = []
     sim_info = getattr(sim, "sim_info", None)
     sim_name = director._sim_display_name(sim_info) if sim_info is not None else "Sim"
+    sim_id = director._sim_identifier(sim_info) if sim_info is not None else None
     lines.append(f"sim_name={sim_name}")
+    last_push = guardian.get_last_push_timestamp(sim_id)
+    secs_since_last = None if last_push is None else now - last_push
+    chosen_motive = guardian.get_last_chosen_motive(sim_id)
+    running_care_relevant = False
+    if chosen_motive is not None:
+        running_care_relevant = guardian._is_running_care_for_motive(sim, chosen_motive)
+    lines.append(f"guardian_last_push_ts={last_push}")
+    lines.append(f"guardian_secs_since_last={secs_since_last}")
+    lines.append(
+        f"guardian_cooldown_seconds={settings.guardian_per_sim_cooldown_seconds}"
+    )
+    lines.append(f"guardian_chosen_motive={chosen_motive}")
+    lines.append(f"guardian_running_care_relevant={running_care_relevant}")
     lines.append(
         f"busy={preview['busy']} reason={preview['busy_reason']}"
     )
@@ -1624,7 +1638,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         if parsed:
             if success:
-                output("Simulation daemon started successfully (build 46).")
+                output("Simulation daemon started successfully (build 47).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -1850,9 +1864,15 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         success = False
         if motive_unsafe and settings.director_use_guardian_when_low:
             ok, detail = guardian.push_self_care(
-                sim_info, now, settings.director_green_motive_percent
+                sim_info,
+                now,
+                settings.director_green_motive_percent,
+                bypass_cooldown=True,
             )
             result_lines.append(f"guardian_invoked={ok} detail={detail}")
+            result_lines.append(
+                f"skill_plan_now: motive_unsafe=True -> guardian(force=True) result={detail}"
+            )
             success = ok
         else:
             result = director.run_skill_plan(

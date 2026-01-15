@@ -2257,7 +2257,11 @@ def _evaluate(now: float, force: bool = False):
                             _append_action(action)
                             last_director_time = now
                         else:
-                            _dbg(f"{sim_name}: CARE {debug_message}")
+                            if debug_message == "guardian cooldown":
+                                cooldown_detail = guardian.get_guardian_cooldown_debug(sim_info, now)
+                                _dbg(f"{sim_name}: CARE guardian cooldown {cooldown_detail}")
+                            else:
+                                _dbg(f"{sim_name}: CARE {debug_message}")
                     else:
                         _dbg(f"{sim_name}: CARE disabled (unsafe motive)")
                     continue

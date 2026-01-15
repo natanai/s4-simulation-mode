@@ -86,6 +86,7 @@ _LAST_WANT_DETAILS = None
 
 _last_motive_snapshot_by_sim = {}
 _LAST_CAREER_PROBE = []
+_LAST_STARTED_SKILL_VALUES = {}
 
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
@@ -489,6 +490,29 @@ def _skill_level_from_skill(skill):
     return None
 
 
+def _skill_value_from_skill(skill, skill_tracker=None):
+    getter = getattr(skill, "get_skill_value", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            return None
+    value = getattr(skill, "skill_value", None)
+    if value is not None:
+        try:
+            return value() if callable(value) else value
+        except Exception:
+            return None
+    if skill_tracker is not None:
+        tracker_getter = getattr(skill_tracker, "get_skill_value", None)
+        if callable(tracker_getter):
+            try:
+                return tracker_getter(skill)
+            except Exception:
+                return None
+    return None
+
+
 def _skill_max_from_skill(skill):
     for attr in ("max_level",):
         value = getattr(skill, attr, None)
@@ -694,6 +718,7 @@ def _get_started_skill_candidates(sim_info):
         skills = []
     candidates = []
     skill_levels = {}
+    skill_values = {}
     for skill in skills:
         try:
             if not _skill_is_allowed(skill):
@@ -704,10 +729,15 @@ def _get_started_skill_candidates(sim_info):
             max_level = _skill_max_from_skill(skill)
             if max_level is None and skill_tracker is not None:
                 max_level = _skill_max_from_tracker(skill_tracker, skill)
-            if level is None:
+            skill_value = _skill_value_from_skill(skill, skill_tracker=skill_tracker)
+            skill_values[id(skill)] = skill_value
+            has_progress = skill_value is not None and skill_value > 0
+            if level is None and not has_progress:
                 continue
             max_level = max_level if max_level is not None else 10
-            if level <= 0 or level >= max_level:
+            if level is not None and level >= max_level:
+                continue
+            if level is not None and level <= 0 and not has_progress:
                 continue
             candidates.append(skill)
             skill_levels[id(skill)] = level
@@ -716,6 +746,8 @@ def _get_started_skill_candidates(sim_info):
     candidates.sort(
         key=lambda item: (skill_levels.get(id(item), 999), str(_skill_guid64(item)))
     )
+    global _LAST_STARTED_SKILL_VALUES
+    _LAST_STARTED_SKILL_VALUES = skill_values
     return candidates
 
 
@@ -1951,7 +1983,7 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
         _append_debug(f"{sim_name}: FAIL capabilities missing for skill_guid64={skill_guid64}")
         return False
 
-    candidates = capabilities.get_candidates_for_loot_guid(skill_guid64, caps)
+    candidates = capabilities.get_candidates_for_skill_guid(skill_guid64, caps)
     candidates = [entry for entry in candidates if entry.get("allow_autonomous") is True]
     if probe_details is not None:
         probe_details["resolution_type"] = "CAPABILITY_INDEX"
@@ -1960,8 +1992,11 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
         probe_details["push_attempts"] = []
     if not candidates:
         if probe_details is not None:
-            probe_details["failure_reason"] = "no_capability_candidates_or_all_failed"
-        _append_debug(f"{sim_name}: FAIL no capability candidates for skill_guid64={skill_guid64}")
+            probe_details["failure_reason"] = "no capability candidates for skill guid"
+            probe_details["skill_guid64"] = skill_guid64
+        _append_debug(
+            f"{sim_name}: FAIL no capability candidates for skill guid skill_guid64={skill_guid64}"
+        )
         return False
 
     for entry in candidates:

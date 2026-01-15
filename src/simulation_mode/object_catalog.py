@@ -3,6 +3,9 @@ import json
 import os
 import time
 
+import services
+import sims4.resources
+
 import simulation_mode.settings as sm_settings
 from simulation_mode.settings import get_config_path
 
@@ -387,6 +390,10 @@ def scan_zone_catalog(
 
     notes = []
     try:
+        skill_manager = services.get_instance_manager(sims4.resources.Types.SKILL)
+    except Exception:
+        skill_manager = None
+    try:
         if include_sims is None:
             include_sims = sm_settings.get_bool("catalog_include_sims", False)
         if include_non_autonomous is None:
@@ -433,6 +440,20 @@ def scan_zone_catalog(
     record_limit_hit = False
     write_failed = False
     path = get_catalog_log_path(filename)
+
+    def _filter_skill_guids(guids):
+        if not guids or skill_manager is None:
+            return []
+        filtered = []
+        for guid in guids:
+            if guid is None:
+                continue
+            try:
+                if skill_manager.get(guid) is not None:
+                    filtered.append(int(guid))
+            except Exception:
+                continue
+        return sorted(set(filtered))
 
     try:
         if path:
@@ -554,6 +575,7 @@ def scan_zone_catalog(
                     )
 
                 loot_ref_guids = []
+                skill_guid_candidates = set()
                 skill_loot_sig = None
                 skill_loot_call_ok = False
                 skill_loot_err = None
@@ -566,6 +588,17 @@ def scan_zone_catalog(
                         skill_loot_err = err[:180]
                     if ok_call:
                         loot_ref_guids = sorted(_walk_for_guid64s(loot_result))
+                        skill_guid_candidates.update(loot_ref_guids)
+                getter = _safe_get(aff, "get_skill_loot_data")
+                if callable(getter):
+                    ok_call, loot_result, err = _safe_call_with_sim_guess(getter, sim)
+                    if ok_call:
+                        skill_guid_candidates.update(_walk_for_guid64s(loot_result))
+                    elif err:
+                        if skill_loot_err:
+                            skill_loot_err = f"{skill_loot_err}; get_skill_loot_data={err[:180]}"
+                        else:
+                            skill_loot_err = f"get_skill_loot_data={err[:180]}"
 
                 if is_cheat or is_debug or is_picker_like or is_staging_like:
                     filtered_flags += 1
@@ -605,6 +638,7 @@ def scan_zone_catalog(
                     "autonomy_ad_guids": autonomy_ad_guids,
                     "commodity_flag_guids": commodity_flag_guids,
                     "loot_ref_guids": loot_ref_guids,
+                    "skill_guids": _filter_skill_guids(skill_guid_candidates),
                     "skill_loot_sig": skill_loot_sig,
                     "skill_loot_call_ok": skill_loot_call_ok,
                     "skill_loot_err": skill_loot_err,

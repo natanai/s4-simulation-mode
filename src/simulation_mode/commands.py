@@ -18,7 +18,7 @@ _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
 # Keep alarm handles alive per-sim so they are not garbage-collected.
 _PENDING_SKILL_PLAN_ALARMS = {}
-BUILD_NUMBER = "60"
+BUILD_NUMBER = "61"
 
 
 def _parse_bool(arg: str):
@@ -331,6 +331,21 @@ def _collect_config_snapshot():
     return lines
 
 
+def _collect_effective_caps():
+    lines = ["EFFECTIVE CAPS"]
+    max_objects = sm_settings.get_int("catalog_max_objects", 0)
+    max_affordances = sm_settings.get_int("catalog_max_affordances_per_object", 0)
+    max_records = sm_settings.get_int("catalog_max_records", 0)
+    lines.append(f"catalog_max_objects={max_objects}")
+    lines.append(f"catalog_max_affordances_per_object={max_affordances}")
+    lines.append(f"catalog_max_records={max_records}")
+    if 1 in (max_objects, max_affordances, max_records):
+        lines.append(
+            "WARNING: effective cap == 1 will truncate scans and break the kernel"
+        )
+    return lines
+
+
 def _collect_daemon_snapshot():
     daemon = importlib.import_module("simulation_mode.daemon")
     lines = ["COLLECT: DAEMON"]
@@ -385,11 +400,18 @@ def _collect_started_skills(sim_info):
         lines.append("started_skills= (none)")
         return lines
     lines.append("started_skills:")
+    skill_values = getattr(director, "_LAST_STARTED_SKILL_VALUES", {}) or {}
     for skill_obj in candidates:
         guid64 = director._skill_guid64(skill_obj)
         level = director._skill_level_from_skill(skill_obj)
+        skill_value = skill_values.get(id(skill_obj))
         lines.append(
-            f"- skill={getattr(skill_obj.__class__, '__name__', 'Skill')} guid64={guid64} level={level}"
+            " - skill={name} guid64={guid} level={level} skill_value={skill_value}".format(
+                name=getattr(skill_obj.__class__, "__name__", "Skill"),
+                guid=guid64,
+                level=level,
+                skill_value=skill_value,
+            )
         )
     return lines
 
@@ -824,6 +846,15 @@ def _collect_kernel_index_status(_sim_info):
     lines.append(f"caps_meta_zone_id={caps_zone}")
     lines.append(f"caps_meta_zone_match={caps_zone == current_zone if caps_zone is not None else False}")
     lines.append(f"caps_meta_truncated={caps_meta.get('truncated') if caps_meta else None}")
+    by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
+    skill_keys = list(by_skill.keys()) if isinstance(by_skill, dict) else []
+    skill_entries = (
+        sum(len(by_skill.get(key, [])) for key in skill_keys)
+        if isinstance(by_skill, dict)
+        else 0
+    )
+    lines.append(f"capabilities.by_skill_guid_keys={len(skill_keys)}")
+    lines.append(f"capabilities.by_skill_guid_entries_total={skill_entries}")
     return lines
 
 
@@ -839,20 +870,30 @@ def _collect_capabilities_status(_sim_info):
     lines.append(f"meta_zone_id={meta.get('zone_id') if meta else None}")
     by_ad = caps.get("by_ad_guid") if isinstance(caps, dict) else {}
     by_loot = caps.get("by_loot_guid") if isinstance(caps, dict) else {}
+    by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
     ad_keys = list(by_ad.keys()) if isinstance(by_ad, dict) else []
     loot_keys = list(by_loot.keys()) if isinstance(by_loot, dict) else []
+    skill_keys = list(by_skill.keys()) if isinstance(by_skill, dict) else []
     lines.append(f"by_ad_guid_keys={len(ad_keys)}")
     lines.append(f"by_loot_guid_keys={len(loot_keys)}")
+    lines.append(f"by_skill_guid_keys={len(skill_keys)}")
     entries_total_ad = sum(len(by_ad.get(key, [])) for key in ad_keys) if isinstance(by_ad, dict) else 0
     entries_total_loot = sum(len(by_loot.get(key, [])) for key in loot_keys) if isinstance(by_loot, dict) else 0
+    entries_total_skill = (
+        sum(len(by_skill.get(key, [])) for key in skill_keys) if isinstance(by_skill, dict) else 0
+    )
     lines.append(f"entries_total_ad={entries_total_ad}")
     lines.append(f"entries_total_loot={entries_total_loot}")
+    lines.append(f"entries_total_skill={entries_total_skill}")
     for guid in sorted(ad_keys)[:10]:
         candidates = by_ad.get(guid, [])
         lines.append(f"ad_guid={guid} candidates={len(candidates)}")
     for guid in sorted(loot_keys)[:10]:
         candidates = by_loot.get(guid, [])
         lines.append(f"loot_guid={guid} candidates={len(candidates)}")
+    for guid in sorted(skill_keys)[:10]:
+        candidates = by_skill.get(guid, [])
+        lines.append(f"skill_guid={guid} candidates={len(candidates)}")
     return lines
 
 
@@ -1601,6 +1642,8 @@ def _build_collect_payload():
     services = importlib.import_module("services")
     lines = []
     lines.extend(_collect_config_snapshot())
+    lines.append("")
+    lines.extend(_collect_effective_caps())
     lines.append("")
     lines.extend(_collect_daemon_snapshot())
     lines.append("")
@@ -2479,6 +2522,12 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
                 after_meta = caps.get("meta") if isinstance(caps, dict) else None
                 truncated = after_meta.get("truncated") if after_meta else None
                 rebuilt = needs_rebuild and ok and (caps is not caps_before or not had_existing_caps)
+                error_detail = None
+                if not ok:
+                    error_detail = "kernel missing"
+                elif truncated:
+                    ok = False
+                    error_detail = "TRUNCATED KERNEL (caps interpreted as 1)"
                 story_log.append_event(
                     "bootstrap_index",
                     sim_info=sim_info,
@@ -2488,10 +2537,14 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
                     caps_path=capabilities.get_capabilities_path(),
                     zone_id=current_zone,
                     truncated=truncated,
+                    error=error_detail,
                 )
-                output(
+                status_line = (
                     f"bootstrap_index ok={ok} rebuilt={rebuilt} truncated={truncated}"
                 )
+                if error_detail:
+                    status_line = f"{status_line} error={error_detail}"
+                output(status_line)
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -2758,11 +2811,54 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             )
             output("force_scan ok=False (see story log)")
             return True
+        catalog_path = result.get("catalog_path") or result.get("path")
+        if not result.get("ok") or result.get("truncated"):
+            error_detail = (
+                "TRUNCATED KERNEL (caps interpreted as 1)"
+                if result.get("truncated")
+                else "scan failed"
+            )
+            output(f"force_scan FAILED: {error_detail}")
+            story_log.append_event(
+                "force_scan_failed",
+                sim_info=sim_info,
+                ok=False,
+                path=catalog_path,
+                bytes=result.get("file_bytes"),
+                written_records=result.get("written_records"),
+                truncated=result.get("truncated"),
+                error=error_detail,
+            )
+            summary_lines = [
+                f"force_scan ok={result.get('ok')}",
+                f"config_path={get_config_path()}",
+                f"catalog_path={catalog_path}",
+                f"write_ok={result.get('write_ok')}",
+                f"file_exists={result.get('file_exists')}",
+                f"file_bytes={result.get('file_bytes')}",
+                f"catalog_meta_written={'yes' if result.get('written_records') else 'no'}",
+                f"scanned_objects={result.get('scanned_objects')}",
+                f"unresolved_objects={result.get('unresolved_objects')}",
+                f"scanned_affordances={result.get('scanned_affordances')}",
+                f"written_records={result.get('written_records')}",
+                f"truncated={result.get('truncated')}",
+                f"error={error_detail}",
+            ]
+            write_error = result.get("write_error")
+            if write_error:
+                summary_lines.append(f"write_error={write_error}")
+            for line in summary_lines:
+                output(line)
+            logging_utils.append_log_block(
+                settings.collect_log_filename,
+                "SimulationMode FORCE_SCAN",
+                "\n".join(summary_lines),
+            )
+            return True
         capabilities_path = None
         capabilities_ok = None
         capabilities_err = None
         capabilities_truncated = None
-        catalog_path = result.get("catalog_path") or result.get("path")
         if result.get("ok") and catalog_path:
             capabilities = importlib.import_module("simulation_mode.capabilities")
             try:

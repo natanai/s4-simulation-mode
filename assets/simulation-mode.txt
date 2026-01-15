@@ -1,7 +1,7 @@
-# Simulation Mode (The Sims 4) — Settings (Build 60)
+# Simulation Mode (The Sims 4) — Settings (Build 61)
 # Edit this file, then in-game run: simulation reload
 
-enabled=false
+enabled=true
 auto_unpause=true
 allow_death=false
 allow_pregnancy=false
@@ -37,14 +37,14 @@ story_log_filename=simulation-mode-story.log
 capabilities_filename=simulation-mode-capabilities.json
 capabilities_auto_build_on_enable=true
 
-# catalog defaults (Build 60)
+# catalog defaults (Build 61)
 catalog_include_sims=0
 catalog_include_non_autonomous=0
 catalog_max_records=0
 catalog_max_objects=0
 catalog_max_affordances_per_object=0
 
-# collect-integrated sampling caps (Build 60)
+# collect-integrated sampling caps (Build 61)
 catalog_collect_sample_objects=150
 catalog_collect_sample_affordances_per_object=60
 catalog_collect_top_auto_n=40

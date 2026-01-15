@@ -95,6 +95,8 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 | `simulation director_takeover <skill_key>` | Cancel current interactions, then push a skill. |
 | `simulation guardian_now [force]` | Force a guardian self-care push for the active Sim. |
 | `simulation want_now` | Force the want resolver to push an active want for the active Sim. |
+| `simulation collect` | Append a snapshot block to the collect log file (defaults to `simulation-mode-collect.log`). |
+| `simulation skill_plan_now` | Force a skill plan evaluation for the active Sim and log the result. |
 | `simulation configpath` | Print the resolved `simulation-mode.txt` path and existence. |
 | `simulation dump_log` | Write a `simulation-mode.log` snapshot to disk. |
 | `simulation probe_all` | Run all probe diagnostics and report to the probe log. |
@@ -111,11 +113,12 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 `director_enabled`, `director_check_seconds`, `director_min_safe_motive`,
 `director_green_motive_percent`, `director_green_min_commodities`,
 `director_allow_social_goals`, `director_allow_social_wants`,
-`director_use_guardian_when_low`, `director_per_sim_cooldown_seconds`,
+`director_enable_wants`, `director_use_guardian_when_low`,
+`director_per_sim_cooldown_seconds`,
 `director_max_pushes_per_sim_per_hour`, `director_prefer_career_skills`,
 `director_fallback_to_started_skills`, `director_skill_allow_list`,
-`director_skill_block_list`, `integrate_better_autonomy_trait`,
-`better_autonomy_trait_id`.
+`director_skill_block_list`, `collect_log_filename`,
+`integrate_better_autonomy_trait`, `better_autonomy_trait_id`.
 
 Settings are stored in the manually editable file:
 

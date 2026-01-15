@@ -407,3 +407,103 @@ def push_best_affordance(
                 )
             )
     return False, None, "all safe candidates failed"
+
+
+def find_objects_by_definition_id(def_id: int):
+    if def_id is None:
+        return []
+    results = []
+    for obj in iter_objects():
+        if getattr(obj, "is_sim", False):
+            continue
+        definition = getattr(obj, "definition", None)
+        if definition is None:
+            continue
+        try:
+            if getattr(definition, "id", None) == def_id:
+                results.append(obj)
+        except Exception:
+            continue
+    return results
+
+
+def resolve_affordance_by_guid(obj, aff_guid64: int):
+    if obj is None or aff_guid64 is None:
+        return None
+    for affordance in iter_super_affordances(obj):
+        try:
+            guid = getattr(affordance, "guid64", None)
+        except Exception:
+            guid = None
+        if guid == aff_guid64:
+            return affordance
+    return None
+
+
+def _distance(sim, obj):
+    sim_pos = getattr(sim, "position", None)
+    obj_pos = getattr(obj, "position", None)
+    if sim_pos is None or obj_pos is None:
+        return None
+    if all(hasattr(sim_pos, axis) for axis in ("x", "y", "z")) and all(
+        hasattr(obj_pos, axis) for axis in ("x", "y", "z")
+    ):
+        try:
+            dx = sim_pos.x - obj_pos.x
+            dy = sim_pos.y - obj_pos.y
+            dz = sim_pos.z - obj_pos.z
+            return (dx * dx + dy * dy + dz * dz) ** 0.5
+        except Exception:
+            return None
+    try:
+        delta = sim_pos - obj_pos
+        magnitude = getattr(delta, "magnitude", None)
+        return magnitude() if callable(magnitude) else magnitude
+    except Exception:
+        return None
+
+
+def push_by_def_and_aff_guid(sim, def_id: int, aff_guid64: int, reason: str, probe_details=None):
+    if sim is None or def_id is None or aff_guid64 is None:
+        return False
+    objects = find_objects_by_definition_id(def_id)
+    if not objects:
+        if probe_details is not None:
+            probe_details.setdefault("push_attempts", []).append(
+                {"obj_def_id": def_id, "aff_guid64": aff_guid64, "result": "no_objects"}
+            )
+        return False
+    sorted_objects = []
+    for obj in objects:
+        distance = _distance(sim, obj)
+        sorted_objects.append((distance if distance is not None else float("inf"), obj))
+    sorted_objects.sort(key=lambda item: item[0])
+    context, _client_attached = make_interaction_context(sim, force=False)
+    for _distance_value, obj in sorted_objects:
+        aff = resolve_affordance_by_guid(obj, aff_guid64)
+        if aff is None:
+            if probe_details is not None:
+                probe_details.setdefault("push_attempts", []).append(
+                    {
+                        "obj_def_id": def_id,
+                        "aff_guid64": aff_guid64,
+                        "result": "aff_not_found",
+                    }
+                )
+            continue
+        ok, failure_reason, _sig_names = call_push_super_affordance(
+            sim, aff, obj, context
+        )
+        if probe_details is not None:
+            probe_details.setdefault("push_attempts", []).append(
+                {
+                    "obj_def_id": def_id,
+                    "aff_guid64": aff_guid64,
+                    "result": "ok" if ok else "push_failed",
+                    "failure_reason": failure_reason,
+                    "reason": reason,
+                }
+            )
+        if ok:
+            return True
+    return False

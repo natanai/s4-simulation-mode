@@ -42,14 +42,17 @@ KNOWN_DEFAULTS = [
     ("collect_log_filename", "simulation-mode-collect.log"),
     ("story_log_enabled", "true"),
     ("story_log_filename", "simulation-mode-story.log"),
+    ("capabilities_filename", "simulation-mode-capabilities.json"),
+    ("capabilities_auto_build_on_enable", "true"),
     ("catalog_include_sims", "false"),
     ("catalog_include_non_autonomous", "false"),
+    ("catalog_max_records", "50000"),
     ("catalog_max_objects", "2000"),
-    ("catalog_max_affordances_per_object", "80"),
+    ("catalog_max_affordances_per_object", "200"),
     ("catalog_collect_sample_objects", "150"),
     ("catalog_collect_sample_affordances_per_object", "60"),
     ("catalog_collect_top_auto_n", "40"),
-    ("aff_meta_substrings", "acting|cook|sleep|toilet|shower|program"),
+    ("aff_meta_substrings", ""),
     ("integrate_better_autonomy_trait", "false"),
     ("better_autonomy_trait_id", "3985292068"),
 ]
@@ -130,6 +133,12 @@ def _build_default_template_text():
     lines.append("collect_log_filename={}".format(defaults["collect_log_filename"]))
     lines.append("story_log_enabled={}".format(defaults["story_log_enabled"]))
     lines.append("story_log_filename={}".format(defaults["story_log_filename"]))
+    lines.append("capabilities_filename={}".format(defaults["capabilities_filename"]))
+    lines.append(
+        "capabilities_auto_build_on_enable={}".format(
+            defaults["capabilities_auto_build_on_enable"]
+        )
+    )
     lines.append("")
     lines.append("# catalog defaults (Build 56)")
     lines.append("catalog_include_sims={}".format(defaults["catalog_include_sims"]))
@@ -138,6 +147,7 @@ def _build_default_template_text():
             defaults["catalog_include_non_autonomous"]
         )
     )
+    lines.append("catalog_max_records={}".format(defaults["catalog_max_records"]))
     lines.append("catalog_max_objects={}".format(defaults["catalog_max_objects"]))
     lines.append(
         "catalog_max_affordances_per_object={}".format(
@@ -220,9 +230,14 @@ def _append_missing_keys(path):
             "story_log_filename",
             "collect_log_filename",
         }
+        capability_keys = {
+            "capabilities_filename",
+            "capabilities_auto_build_on_enable",
+        }
         catalog_defaults = {
             "catalog_include_sims",
             "catalog_include_non_autonomous",
+            "catalog_max_records",
             "catalog_max_objects",
             "catalog_max_affordances_per_object",
         }
@@ -259,6 +274,7 @@ def _append_missing_keys(path):
             lambda key: key.startswith("director_"),
         )
         _append_group("# Logging", lambda key: key in story_keys)
+        _append_group("# Capability kernel", lambda key: key in capability_keys)
         _append_group(
             "# Optional integration if you ALSO installed a mod that defines this trait ID",
             lambda key: key.startswith("integrate_") or key.startswith("better_autonomy_"),
@@ -323,14 +339,17 @@ class SimulationModeSettings:
         collect_log_filename="simulation-mode-collect.log",
         story_log_enabled=True,
         story_log_filename="simulation-mode-story.log",
+        capabilities_filename="simulation-mode-capabilities.json",
+        capabilities_auto_build_on_enable=True,
         catalog_include_sims=False,
         catalog_include_non_autonomous=False,
+        catalog_max_records=50000,
         catalog_max_objects=2000,
-        catalog_max_affordances_per_object=80,
+        catalog_max_affordances_per_object=200,
         catalog_collect_sample_objects=150,
         catalog_collect_sample_affordances_per_object=60,
         catalog_collect_top_auto_n=40,
-        aff_meta_substrings="acting|cook|sleep|toilet|shower|program",
+        aff_meta_substrings="",
         integrate_better_autonomy_trait=False,
         better_autonomy_trait_id=3985292068,
     ):
@@ -363,8 +382,11 @@ class SimulationModeSettings:
         self.collect_log_filename = collect_log_filename
         self.story_log_enabled = story_log_enabled
         self.story_log_filename = story_log_filename
+        self.capabilities_filename = capabilities_filename
+        self.capabilities_auto_build_on_enable = capabilities_auto_build_on_enable
         self.catalog_include_sims = catalog_include_sims
         self.catalog_include_non_autonomous = catalog_include_non_autonomous
+        self.catalog_max_records = catalog_max_records
         self.catalog_max_objects = catalog_max_objects
         self.catalog_max_affordances_per_object = catalog_max_affordances_per_object
         self.catalog_collect_sample_objects = catalog_collect_sample_objects
@@ -664,6 +686,16 @@ def load_settings(target):
             elif key == "story_log_filename":
                 value = str(raw_value).strip()
                 target.story_log_filename = value if value else "simulation-mode-story.log"
+            elif key == "capabilities_filename":
+                value = str(raw_value).strip()
+                target.capabilities_filename = (
+                    value if value else "simulation-mode-capabilities.json"
+                )
+            elif key == "capabilities_auto_build_on_enable":
+                if isinstance(value, bool):
+                    target.capabilities_auto_build_on_enable = value
+                else:
+                    _log_invalid_value(key, raw_value)
             elif key == "catalog_include_sims":
                 if isinstance(value, bool):
                     target.catalog_include_sims = value
@@ -673,6 +705,11 @@ def load_settings(target):
                 if isinstance(value, bool):
                     target.catalog_include_non_autonomous = value
                 else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "catalog_max_records":
+                try:
+                    target.catalog_max_records = max(1, int(value))
+                except Exception:
                     _log_invalid_value(key, raw_value)
             elif key == "catalog_max_objects":
                 try:

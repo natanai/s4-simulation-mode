@@ -114,8 +114,11 @@ def _status_lines():
         f"collect_log_filename={settings.collect_log_filename}",
         f"story_log_enabled={settings.story_log_enabled}",
         f"story_log_filename={settings.story_log_filename}",
+        f"capabilities_filename={settings.capabilities_filename}",
+        f"capabilities_auto_build_on_enable={settings.capabilities_auto_build_on_enable}",
         f"catalog_include_sims={settings.catalog_include_sims}",
         f"catalog_include_non_autonomous={settings.catalog_include_non_autonomous}",
+        f"catalog_max_records={settings.catalog_max_records}",
         f"catalog_max_objects={settings.catalog_max_objects}",
         f"catalog_max_affordances_per_object={settings.catalog_max_affordances_per_object}",
         f"catalog_collect_sample_objects={settings.catalog_collect_sample_objects}",
@@ -381,8 +384,12 @@ def _collect_started_skills(sim_info):
         lines.append("started_skills= (none)")
         return lines
     lines.append("started_skills:")
-    for skill_key, _reason, level in candidates:
-        lines.append(f"- {skill_key} level={level}")
+    for skill_obj in candidates:
+        guid64 = director._skill_guid64(skill_obj)
+        level = director._skill_level_from_skill(skill_obj)
+        lines.append(
+            f"- skill={getattr(skill_obj.__class__, '__name__', 'Skill')} guid64={guid64} level={level}"
+        )
     return lines
 
 
@@ -779,6 +786,35 @@ def _collect_catalog_top_auto(_sim_info):
         lines.append(f"obj={obj_name} (id={details.get('obj_id')})")
         for aff_name, aff_guid in details["affs"]:
             lines.append(f"  - {aff_name} (guid64={aff_guid})")
+    return lines
+
+
+def _collect_capabilities_status(_sim_info):
+    capabilities = importlib.import_module("simulation_mode.capabilities")
+    lines = ["CAPABILITIES (KERNEL)"]
+    path = capabilities.get_capabilities_path()
+    lines.append(f"capabilities_file={path if path and os.path.exists(path) else '(missing)'}")
+    caps = capabilities.load_capabilities()
+    loaded = caps is not None
+    lines.append(f"loaded={loaded}")
+    meta = caps.get("meta") if isinstance(caps, dict) else None
+    lines.append(f"meta_zone_id={meta.get('zone_id') if meta else None}")
+    by_ad = caps.get("by_ad_guid") if isinstance(caps, dict) else {}
+    by_loot = caps.get("by_loot_guid") if isinstance(caps, dict) else {}
+    ad_keys = list(by_ad.keys()) if isinstance(by_ad, dict) else []
+    loot_keys = list(by_loot.keys()) if isinstance(by_loot, dict) else []
+    lines.append(f"by_ad_guid_keys={len(ad_keys)}")
+    lines.append(f"by_loot_guid_keys={len(loot_keys)}")
+    entries_total_ad = sum(len(by_ad.get(key, [])) for key in ad_keys) if isinstance(by_ad, dict) else 0
+    entries_total_loot = sum(len(by_loot.get(key, [])) for key in loot_keys) if isinstance(by_loot, dict) else 0
+    lines.append(f"entries_total_ad={entries_total_ad}")
+    lines.append(f"entries_total_loot={entries_total_loot}")
+    for guid in sorted(ad_keys)[:10]:
+        candidates = by_ad.get(guid, [])
+        lines.append(f"ad_guid={guid} candidates={len(candidates)}")
+    for guid in sorted(loot_keys)[:10]:
+        candidates = by_loot.get(guid, [])
+        lines.append(f"loot_guid={guid} candidates={len(candidates)}")
     return lines
 
 
@@ -1571,7 +1607,7 @@ def _build_collect_payload():
     lines.append("")
     lines.extend(_collect_catalog_top_auto(sim_info))
     lines.append("")
-    lines.extend(_collect_aff_meta_batch(sim_info))
+    lines.extend(_collect_capabilities_status(sim_info))
     return "\n".join(lines)
 
 
@@ -2381,7 +2417,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
                 story_log.append_event(
                     "daemon_started", sim_info=_active_sim_info(), build="58"
                 )
-                output("Simulation daemon started successfully (build 58).")
+                output("Simulation daemon started successfully (build 59).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -2641,22 +2677,39 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             trace_text = traceback.format_exc()
             story_log.append_event(
                 "force_scan_failed",
-                {"err": err_repr, "traceback": trace_text[:1000]},
+                sim_info=sim_info,
+                err=err_repr,
+                path=None,
+                traceback=trace_text[:1000],
             )
             output("force_scan ok=False (see story log)")
             return True
         story_log.append_event(
             "force_scan",
-            {
-                "ok": result.get("write_ok"),
-                "path": result.get("catalog_path") or result.get("path"),
-                "bytes": result.get("file_bytes"),
-            },
+            sim_info=sim_info,
+            ok=result.get("write_ok"),
+            path=result.get("catalog_path") or result.get("path"),
+            bytes=result.get("file_bytes"),
+            written_records=result.get("written_records"),
+            truncated=result.get("truncated"),
         )
+        capabilities_path = None
+        capabilities_ok = None
+        capabilities_err = None
+        catalog_path = result.get("catalog_path") or result.get("path")
+        if result.get("ok") and catalog_path:
+            capabilities = importlib.import_module("simulation_mode.capabilities")
+            try:
+                caps = capabilities.build_capabilities_from_catalog_jsonl(catalog_path)
+                capabilities_ok, capabilities_err = capabilities.write_capabilities(caps)
+                capabilities_path = capabilities.get_capabilities_path()
+            except Exception as exc:
+                capabilities_ok = False
+                capabilities_err = repr(exc)
         summary_lines = [
             f"force_scan ok={result.get('ok')}",
             f"config_path={get_config_path()}",
-            f"catalog_path={result.get('catalog_path') or result.get('path')}",
+            f"catalog_path={catalog_path}",
             f"write_ok={result.get('write_ok')}",
             f"file_exists={result.get('file_exists')}",
             f"file_bytes={result.get('file_bytes')}",
@@ -2667,6 +2720,13 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             f"written_records={result.get('written_records')}",
             f"truncated={result.get('truncated')}",
         ]
+        if capabilities_path:
+            summary_lines.append(f"capabilities_path={capabilities_path}")
+            summary_lines.append(f"capabilities_written={capabilities_ok}")
+        if capabilities_err:
+            summary_lines.append(f"capabilities_error={capabilities_err}")
+        if capabilities_path:
+            output(f"capabilities_written={capabilities_path} ok={capabilities_ok}")
         write_error = result.get("write_error")
         if write_error:
             summary_lines.append(f"write_error={write_error}")

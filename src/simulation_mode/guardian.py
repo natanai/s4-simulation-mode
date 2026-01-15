@@ -1,13 +1,13 @@
 import time
 
-from interactions.context import InteractionSource
 import services
 from server_commands.argument_helpers import get_tunable_instance
 import sims4.log
 import sims4.resources
 
+from simulation_mode import capabilities
 from simulation_mode import clock_utils
-from simulation_mode.push_utils import iter_objects, push_best_affordance
+from simulation_mode.push_utils import push_by_def_and_aff_guid
 from simulation_mode.settings import settings
 
 logger = sims4.log.Logger("SimulationModeGuardian")
@@ -22,24 +22,6 @@ _MOTIVE_ALIASES = {
 }
 
 _MOTIVE_KEYS = list(_MOTIVE_ALIASES.keys())
-
-_OBJECT_KEYWORDS = {
-    "motive_hunger": ["fridge", "refriger", "microwave"],
-    "motive_bladder": ["toilet", "urinal", "potty"],
-    "motive_energy": ["bed", "tent", "coffin", "sleeping"],
-    "motive_hygiene": ["shower", "bath", "sink"],
-    "motive_fun": ["tv", "stereo", "radio", "computer", "console", "game", "toy"],
-    "motive_social": ["phone", "computer"],
-}
-
-_AFFORDANCE_KEYWORDS = {
-    "motive_hunger": ["quickmeal", "quick_meal", "leftover", "grab", "snack", "eat"],
-    "motive_bladder": ["use"],
-    "motive_energy": ["sleep", "nap"],
-    "motive_hygiene": ["shower", "bath", "wash", "brush"],
-    "motive_fun": ["watch", "play", "listen", "dance"],
-    "motive_social": ["chat", "talk", "social", "call", "text"],
-}
 
 _RUNNING_CARE_KEYWORDS = {
     "motive_energy": ["sleep", "nap", "bed_sleep", "bed_nap"],
@@ -140,6 +122,16 @@ def _get_motive_value(sim_info, stat):
         return None
 
 
+def _motive_guid64_from_key(motive_key):
+    aliases = _MOTIVE_ALIASES.get(motive_key, [motive_key])
+    for alias in aliases:
+        stat = _get_motive_stat(alias)
+        guid = getattr(stat, "guid64", None)
+        if guid is not None:
+            return guid
+    return None
+
+
 def _sim_identifier(sim_info):
     sim_id = getattr(sim_info, "sim_id", None)
     return sim_id or id(sim_info)
@@ -163,82 +155,6 @@ def _is_sim_busy(sim):
         pass
 
     return False
-
-
-def _object_label(obj):
-    parts = [getattr(obj.__class__, "__name__", None)]
-    definition = getattr(obj, "definition", None)
-    if definition is not None:
-        name = getattr(definition, "name", None)
-        if name:
-            parts.append(name)
-    parts.append(str(obj))
-    return " ".join(part for part in parts if part).lower()
-
-
-def _norm(s: str) -> str:
-    s = (s or "").lower()
-    return "".join(ch for ch in s if ch.isalnum())
-
-
-def _distance(sim, obj):
-    sim_pos = getattr(sim, "position", None)
-    obj_pos = getattr(obj, "position", None)
-    if sim_pos is None or obj_pos is None:
-        return None
-    if all(hasattr(sim_pos, axis) for axis in ("x", "y", "z")) and all(
-        hasattr(obj_pos, axis) for axis in ("x", "y", "z")
-    ):
-        try:
-            dx = sim_pos.x - obj_pos.x
-            dy = sim_pos.y - obj_pos.y
-            dz = sim_pos.z - obj_pos.z
-            return (dx * dx + dy * dy + dz * dz) ** 0.5
-        except Exception:
-            return None
-    try:
-        delta = sim_pos - obj_pos
-        magnitude = getattr(delta, "magnitude", None)
-        return magnitude() if callable(magnitude) else magnitude
-    except Exception:
-        return None
-
-
-def _find_target_object(sim, motive_key):
-    keywords = _OBJECT_KEYWORDS.get(motive_key)
-    if not keywords:
-        return None
-    best = None
-    best_distance = None
-    for obj in iter_objects():
-        try:
-            in_inventory = getattr(obj, "is_in_inventory", None)
-            if in_inventory is True:
-                continue
-            if callable(in_inventory) and in_inventory():
-                continue
-            hidden = getattr(obj, "is_hidden", None)
-            if hidden is True:
-                continue
-            if callable(hidden) and hidden():
-                continue
-            if getattr(obj, "is_deleted", False):
-                continue
-            label = _object_label(obj)
-            norm_label = _norm(label)
-            if not any(_norm(keyword) in norm_label for keyword in keywords):
-                continue
-            distance = _distance(sim, obj)
-            if distance is None:
-                if best is None:
-                    best = obj
-                continue
-            if best_distance is None or distance < best_distance:
-                best = obj
-                best_distance = distance
-        except Exception:
-            continue
-    return best
 
 
 def _log_once_per_hour(message, last_timestamp_attr):
@@ -382,43 +298,51 @@ def pick_care_goal(sim_info, snapshot: dict, green_percent: float):
 
 
 def _attempt_care_push(sim, motive_key, force=False):
-    target_obj = _find_target_object(sim, motive_key)
-    if target_obj is None:
+    motive_guid = _motive_guid64_from_key(motive_key)
+    if not motive_guid:
         if _maybe_run_autonomy(sim):
-            return False, f"motive={motive_key} obj=none; autonomy refresh attempted"
-        return False, f"motive={motive_key} obj=none; autonomy refresh unavailable"
+            return False, f"motive={motive_key} guid=none; autonomy refresh attempted"
+        return False, f"motive={motive_key} guid=none; autonomy refresh unavailable"
+    sim_info = getattr(sim, "sim_info", None)
+    caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+    if not caps:
+        if _maybe_run_autonomy(sim):
+            return False, f"motive={motive_key} caps=missing; autonomy refresh attempted"
+        return False, f"motive={motive_key} caps=missing; autonomy refresh unavailable"
+    candidates = capabilities.get_candidates_for_ad_guid(motive_guid, caps)
+    candidates = [
+        entry
+        for entry in candidates
+        if entry.get("allow_autonomous") is True and entry.get("safe_push") is True
+    ]
+    if not candidates:
+        if _maybe_run_autonomy(sim):
+            return False, f"motive={motive_key} no candidates; autonomy refresh attempted"
+        return False, f"motive={motive_key} no candidates; autonomy refresh unavailable"
 
-    keywords = _AFFORDANCE_KEYWORDS.get(motive_key)
-    if not keywords:
-        return False, f"motive={motive_key} obj={_object_label(target_obj)} no keywords"
-
-    debug_lines = []
-    ok, affordance_label, reason = push_best_affordance(
-        sim,
-        target_obj,
-        keywords,
-        force=force,
-        source=InteractionSource.AUTONOMY,
-        debug_append=debug_lines.append,
-    )
-    if ok:
-        global _LAST_CARE_DETAILS
-        _LAST_CARE_DETAILS = (
-            motive_key,
-            f"{_object_label(target_obj)}:{affordance_label}",
+    for entry in candidates:
+        def_id = entry.get("obj_def_id")
+        aff_guid = entry.get("aff_guid64")
+        ok = push_by_def_and_aff_guid(
+            sim,
+            def_id,
+            aff_guid,
+            reason=f"guardian_motive_guid64={motive_guid}",
+            probe_details=None,
         )
-        return (
-            True,
-            f"motive={motive_key} obj={_object_label(target_obj)} aff={affordance_label}",
-        )
-
-    detail = debug_lines[-1] if debug_lines else "sig_names=[]"
-    fail_reason = reason or "push failed"
-    return (
-        False,
-        f"motive={motive_key} obj={_object_label(target_obj)} "
-        f"push_failed={fail_reason}; {detail}",
-    )
+        if ok:
+            global _LAST_CARE_DETAILS
+            _LAST_CARE_DETAILS = (
+                motive_key,
+                f"obj_def_id={def_id} aff_guid64={aff_guid}",
+            )
+            return (
+                True,
+                f"motive={motive_key} obj_def_id={def_id} aff_guid64={aff_guid}",
+            )
+    if _maybe_run_autonomy(sim):
+        return False, f"motive={motive_key} push_failed; autonomy refresh attempted"
+    return False, f"motive={motive_key} push_failed; autonomy refresh unavailable"
 
 
 def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: bool = False):

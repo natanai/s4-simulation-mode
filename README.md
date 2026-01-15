@@ -94,8 +94,12 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 | `simulation director_push <skill_key>` | Push a skill interaction on the active Sim. |
 | `simulation director_takeover <skill_key>` | Cancel current interactions, then push a skill. |
 | `simulation guardian_now [force]` | Force a guardian self-care push for the active Sim. |
+| `simulation story path` | Print the story log file path. |
+| `simulation story tail [n]` | Tail the last N story log lines (default 20). |
+| `simulation story clear` | Clear the story log. |
 | `simulation want_now` | Force the want resolver to push an active want for the active Sim. |
 | `simulation collect` | Append a snapshot block to the collect log file (defaults to `simulation-mode-collect.log`). |
+| `simulation force_scan` | Scan the active Sim's zone object catalog and write summary details to the collect log. |
 | `simulation skill_plan_now` | Force a skill plan evaluation for the active Sim and log the result. |
 | `simulation configpath` | Print the resolved `simulation-mode.txt` path and existence. |
 | `simulation dump_log` | Write a `simulation-mode.log` snapshot to disk. |

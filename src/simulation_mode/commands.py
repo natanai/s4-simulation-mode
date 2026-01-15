@@ -18,6 +18,7 @@ _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
 # Keep alarm handles alive per-sim so they are not garbage-collected.
 _PENDING_SKILL_PLAN_ALARMS = {}
+BUILD_NUMBER = "60"
 
 
 def _parse_bool(arg: str):
@@ -786,6 +787,43 @@ def _collect_catalog_top_auto(_sim_info):
         lines.append(f"obj={obj_name} (id={details.get('obj_id')})")
         for aff_name, aff_guid in details["affs"]:
             lines.append(f"  - {aff_name} (guid64={aff_guid})")
+    return lines
+
+
+def _collect_kernel_index_status(_sim_info):
+    object_catalog = importlib.import_module("simulation_mode.object_catalog")
+    capabilities = importlib.import_module("simulation_mode.capabilities")
+    lines = ["KERNEL INDEX STATUS"]
+    catalog_path = object_catalog.get_catalog_log_path()
+    catalog_exists = bool(catalog_path and os.path.exists(catalog_path))
+    catalog_bytes = os.path.getsize(catalog_path) if catalog_exists else 0
+    lines.append(f"main_catalog_path={catalog_path if catalog_exists else '(missing)'}")
+    lines.append(f"main_catalog_exists={catalog_exists}")
+    lines.append(f"main_catalog_bytes={catalog_bytes}")
+    meta = None
+    if catalog_exists:
+        try:
+            with open(catalog_path, "r", encoding="utf-8") as handle:
+                first_line = handle.readline().strip()
+            if first_line:
+                meta = json.loads(first_line)
+        except Exception:
+            meta = None
+    lines.append(f"catalog_meta_read={meta is not None}")
+    lines.append(f"catalog_meta_truncated={meta.get('truncated') if isinstance(meta, dict) else None}")
+    caps_path = capabilities.get_capabilities_path()
+    caps_exists = bool(caps_path and os.path.exists(caps_path))
+    caps_bytes = os.path.getsize(caps_path) if caps_exists else 0
+    lines.append(f"capabilities_path={caps_path if caps_exists else '(missing)'}")
+    lines.append(f"capabilities_exists={caps_exists}")
+    lines.append(f"capabilities_bytes={caps_bytes}")
+    caps = capabilities.load_capabilities()
+    caps_meta = caps.get("meta") if isinstance(caps, dict) else None
+    current_zone = capabilities._current_zone_id()
+    caps_zone = caps_meta.get("zone_id") if caps_meta else None
+    lines.append(f"caps_meta_zone_id={caps_zone}")
+    lines.append(f"caps_meta_zone_match={caps_zone == current_zone if caps_zone is not None else False}")
+    lines.append(f"caps_meta_truncated={caps_meta.get('truncated') if caps_meta else None}")
     return lines
 
 
@@ -1603,6 +1641,8 @@ def _build_collect_payload():
         lines.append("")
         lines.extend(_collect_internal_probes(sim_info))
     lines.append("")
+    lines.extend(_collect_kernel_index_status(sim_info))
+    lines.append("")
     lines.extend(_collect_catalog_sample(sim_info))
     lines.append("")
     lines.extend(_collect_catalog_top_auto(sim_info))
@@ -2415,9 +2455,43 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             if success:
                 story_log = importlib.import_module("simulation_mode.story_log")
                 story_log.append_event(
-                    "daemon_started", sim_info=_active_sim_info(), build="58"
+                    "daemon_started", sim_info=_active_sim_info(), build=BUILD_NUMBER
                 )
-                output("Simulation daemon started successfully (build 59).")
+                output(f"Simulation daemon started successfully (build {BUILD_NUMBER}).")
+                sim_info = _active_sim_info()
+                capabilities = importlib.import_module("simulation_mode.capabilities")
+                caps_before = capabilities.load_capabilities()
+                had_existing_caps = bool(caps_before)
+                before_meta = caps_before.get("meta") if isinstance(caps_before, dict) else None
+                current_zone = capabilities._current_zone_id()
+                before_zone = before_meta.get("zone_id") if before_meta else None
+                before_truncated = before_meta.get("truncated") if before_meta else None
+                needs_rebuild = not (
+                    before_meta is not None
+                    and before_zone == current_zone
+                    and before_truncated is False
+                )
+                try:
+                    caps = capabilities.ensure_full_capabilities(sim_info, force_rebuild=False)
+                except Exception:
+                    caps = None
+                ok = bool(caps)
+                after_meta = caps.get("meta") if isinstance(caps, dict) else None
+                truncated = after_meta.get("truncated") if after_meta else None
+                rebuilt = needs_rebuild and ok and (caps is not caps_before or not had_existing_caps)
+                story_log.append_event(
+                    "bootstrap_index",
+                    sim_info=sim_info,
+                    ok=ok,
+                    had_existing_caps=had_existing_caps,
+                    rebuilt=rebuilt,
+                    caps_path=capabilities.get_capabilities_path(),
+                    zone_id=current_zone,
+                    truncated=truncated,
+                )
+                output(
+                    f"bootstrap_index ok={ok} rebuilt={rebuilt} truncated={truncated}"
+                )
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -2684,6 +2758,23 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             )
             output("force_scan ok=False (see story log)")
             return True
+        capabilities_path = None
+        capabilities_ok = None
+        capabilities_err = None
+        capabilities_truncated = None
+        catalog_path = result.get("catalog_path") or result.get("path")
+        if result.get("ok") and catalog_path:
+            capabilities = importlib.import_module("simulation_mode.capabilities")
+            try:
+                caps = capabilities.build_capabilities_from_catalog_jsonl(catalog_path)
+                capabilities_ok, capabilities_err = capabilities.write_capabilities(caps)
+                capabilities_path = capabilities.get_capabilities_path()
+                caps_meta = caps.get("meta") if isinstance(caps, dict) else None
+                if caps_meta is not None:
+                    capabilities_truncated = caps_meta.get("truncated")
+            except Exception as exc:
+                capabilities_ok = False
+                capabilities_err = repr(exc)
         story_log.append_event(
             "force_scan",
             sim_info=sim_info,
@@ -2692,20 +2783,10 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             bytes=result.get("file_bytes"),
             written_records=result.get("written_records"),
             truncated=result.get("truncated"),
+            capabilities_ok=capabilities_ok,
+            capabilities_path=capabilities_path,
+            capabilities_truncated=capabilities_truncated,
         )
-        capabilities_path = None
-        capabilities_ok = None
-        capabilities_err = None
-        catalog_path = result.get("catalog_path") or result.get("path")
-        if result.get("ok") and catalog_path:
-            capabilities = importlib.import_module("simulation_mode.capabilities")
-            try:
-                caps = capabilities.build_capabilities_from_catalog_jsonl(catalog_path)
-                capabilities_ok, capabilities_err = capabilities.write_capabilities(caps)
-                capabilities_path = capabilities.get_capabilities_path()
-            except Exception as exc:
-                capabilities_ok = False
-                capabilities_err = repr(exc)
         summary_lines = [
             f"force_scan ok={result.get('ok')}",
             f"config_path={get_config_path()}",
@@ -2723,6 +2804,8 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         if capabilities_path:
             summary_lines.append(f"capabilities_path={capabilities_path}")
             summary_lines.append(f"capabilities_written={capabilities_ok}")
+        if capabilities_truncated is not None:
+            summary_lines.append(f"capabilities_truncated={capabilities_truncated}")
         if capabilities_err:
             summary_lines.append(f"capabilities_error={capabilities_err}")
         if capabilities_path:
@@ -2758,10 +2841,15 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         guardian = importlib.import_module("simulation_mode.guardian")
         logging_utils = importlib.import_module("simulation_mode.logging_utils")
         services = importlib.import_module("services")
+        capabilities = importlib.import_module("simulation_mode.capabilities")
         sim = _get_active_sim(services)
         sim_info = getattr(sim, "sim_info", None) if sim is not None else None
         if sim is None or sim_info is None:
             output("No active sim found.")
+            return True
+        caps = capabilities.ensure_full_capabilities(sim_info, force_rebuild=False)
+        if not caps:
+            output("skill_plan_now FAIL capabilities unavailable")
             return True
         now = time.time()
         sim_name = director._sim_display_name(sim_info)

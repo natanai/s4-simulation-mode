@@ -2157,9 +2157,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             if success:
                 story_log = importlib.import_module("simulation_mode.story_log")
                 story_log.append_event(
-                    "daemon_started", sim_info=_active_sim_info(), build="53"
+                    "daemon_started", sim_info=_active_sim_info(), build="54"
                 )
-                output("Simulation daemon started successfully (build 53).")
+                output("Simulation daemon started successfully (build 54).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -2398,6 +2398,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             f"force_scan ok={result.get('ok')}",
             f"catalog_path={result.get('path')}",
             f"scanned_objects={result.get('scanned_objects')}",
+            f"unresolved_objects={result.get('unresolved_objects')}",
             f"scanned_affordances={result.get('scanned_affordances')}",
             f"written_records={result.get('written_records')}",
             f"truncated={result.get('truncated')}",
@@ -2407,7 +2408,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         notes = result.get("notes") or []
         if notes:
             summary_lines.append("notes:")
-            summary_lines.extend(notes[:10])
+            summary_lines.extend(notes[:3])
+            for note in notes[:3]:
+                output(f"note={note}")
         logging_utils.append_log_block(
             settings.collect_log_filename,
             "SimulationMode FORCE_SCAN",

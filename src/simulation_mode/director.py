@@ -1998,6 +1998,9 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
             probe_details["failure_reason"] = "no safe affordance candidates"
         return False
     for affordance in affordances[:8]:
+        if skill_key == "acting" and "programming" in affordance_name(affordance):
+            _append_debug("WARN acting_mapped_to_programming_affordance")
+            continue
         ok, failure_reason, sig_names, _client_attached = _push_affordance_with_details(
             sim, target_obj, affordance, reason=skill_key, force=force
         )

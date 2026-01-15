@@ -86,9 +86,14 @@ SKILL_RULES = {
         "affordance_keywords": ["troll", "mischief", "prank"],
     },
     "acting": {
-        "object_keywords": ["mirror", "computer"],
-        "affordance_keywords": ["practice acting", "acting", "research acting", "practice"],
+        "object_keywords": ["mirror"],
+        "affordance_keywords": ["actingskill_practice", "acting"],
     },
+}
+
+_ACTING_FALLBACK_RULE = {
+    "object_keywords": ["mirror", "computer"],
+    "affordance_keywords": ["practice acting", "acting", "research acting", "practice"],
 }
 
 _AFFORDANCE_BLOCK_TOKENS = (
@@ -230,8 +235,7 @@ def _sort_affordances(affordances, target_obj, rule):
     return sorted(affordances, key=_score, reverse=True)
 
 
-def resolve_skill_action(sim, skill_key):
-    rule = SKILL_RULES.get(skill_key)
+def _resolve_with_rule(sim, skill_key, rule, objects):
     if rule is None:
         return {
             "ok": False,
@@ -239,7 +243,6 @@ def resolve_skill_action(sim, skill_key):
             "affordances": [],
             "reason": "no_rule",
         }
-    objects = list(iter_objects())
     matched_objects = 0
     for obj in _iter_matching_objects(objects, rule.get("object_keywords", [])):
         matched_objects += 1
@@ -256,6 +259,8 @@ def resolve_skill_action(sim, skill_key):
             try:
                 reason = skill_affordance_block_reason(affordance)
                 if reason is not None:
+                    continue
+                if skill_key == "acting" and "programming" in affordance_name(affordance):
                     continue
             except Exception:
                 continue
@@ -278,3 +283,21 @@ def resolve_skill_action(sim, skill_key):
         "affordances": [],
         "reason": reason,
     }
+
+
+def resolve_skill_action(sim, skill_key):
+    rule = SKILL_RULES.get(skill_key)
+    if rule is None:
+        return {
+            "ok": False,
+            "target_obj": None,
+            "affordances": [],
+            "reason": "no_rule",
+        }
+    objects = list(iter_objects())
+    if skill_key == "acting":
+        primary = _resolve_with_rule(sim, skill_key, rule, objects)
+        if primary.get("ok"):
+            return primary
+        return _resolve_with_rule(sim, skill_key, _ACTING_FALLBACK_RULE, objects)
+    return _resolve_with_rule(sim, skill_key, rule, objects)

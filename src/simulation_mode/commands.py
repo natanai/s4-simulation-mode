@@ -1624,7 +1624,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         if parsed:
             if success:
-                output("Simulation daemon started successfully (build 45).")
+                output("Simulation daemon started successfully (build 46).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -1855,106 +1855,43 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             result_lines.append(f"guardian_invoked={ok} detail={detail}")
             success = ok
         else:
-            goal, candidates = director.build_skill_plan(sim_info)
-            result_lines.append(f"skill_candidates_count={len(candidates)}")
-            if candidates:
-                result_lines.append("skill_candidates_top5:")
-                for skill_key, reason in candidates[:5]:
-                    result_lines.append(f"- {skill_key} ({reason})")
-            if goal is None:
-                result_lines.append("skill_plan_result=FAIL reason=no skill candidates")
+            result = director.run_skill_plan(
+                sim_info, sim, now, force=True, source="skill_plan_now"
+            )
+            result_lines.append(f"wants_reason={result.get('wants_reason')}")
+            result_lines.append(f"career_reason={result.get('career_reason')}")
+            started_candidates = result.get("started_candidates") or []
+            result_lines.append(
+                f"started_candidates_count={len(started_candidates)}"
+            )
+            if started_candidates:
+                result_lines.append("started_skills_order_top5:")
+                for skill_key, _reason, level in started_candidates[:5]:
+                    result_lines.append(f"- {skill_key} level={level}")
+            if result.get("success"):
+                skill_key = result.get("skill_key")
+                reason = result.get("skill_reason")
+                skill_source = result.get("skill_source")
+                result_lines.append("skill_plan_result=SUCCESS")
+                result_lines.append(f"skill_key={skill_key}")
+                result_lines.append(f"skill_source={skill_source}")
+                result_lines.append(f"skill_reason={reason}")
+                director._record_push(director._sim_identifier(sim_info), now)
+                director._record_action(sim_info, skill_key, reason, now)
+                success = True
             else:
-                skill_key, reason = goal
-                result_lines.append(f"chosen_skill_key={skill_key}")
-                result_lines.append(f"chosen_skill_reason={reason}")
-                rule = director._SKILL_RULES.get(skill_key, {})
-                target_obj = None
-                try:
-                    objects = list(director.iter_objects())
-                    target_obj = director._find_target_object(sim, rule, objects=objects)
-                except Exception:
-                    target_obj = None
-                candidate_affordances = []
-                if target_obj is not None:
-                    candidate_affordances = director.find_affordance_candidates(
-                        target_obj, rule.get("affordance_keywords", []), sim=sim
-                    )
-                candidate_affordance_names = [
-                    director.affordance_name(aff) for aff in candidate_affordances
-                ]
-                chosen_object = (
-                    director._get_object_probe_label(target_obj)
-                    if target_obj is not None
-                    else None
-                )
-                result_lines.append(f"chosen_object={chosen_object}")
+                result_lines.append("skill_plan_result=FAIL")
                 result_lines.append(
-                    f"candidate_affordances={candidate_affordance_names}"
+                    f"attempted_started={result.get('attempted', 0)}"
                 )
-                running = getattr(sim, "queue", None)
-                running = getattr(running, "running", None) if running is not None else None
-                if running is not None:
-                    running_affordance = _safe_get(running, "super_affordance") or _safe_get(
-                        running, "affordance"
+                failure_counts = result.get("failure_counts", {})
+                result_lines.append(
+                    "failure_counts no_object={} no_affordance={} push_failed={}".format(
+                        failure_counts.get("no_object", 0),
+                        failure_counts.get("no_affordance", 0),
+                        failure_counts.get("push_failed", 0),
                     )
-                    running_aff_name = (
-                        director.affordance_name(running_affordance)
-                        if running_affordance is not None
-                        else None
-                    )
-                    result_lines.append(
-                        f"running_affordance_name={running_aff_name}"
-                    )
-                    if running_aff_name and running_aff_name in candidate_affordance_names:
-                        result_lines.append(
-                            "skill_plan_result=SUCCESS_ALREADY_RUNNING"
-                        )
-                        success = True
-                    else:
-                        cancel_ok = False
-                        cancel_error = None
-                        try:
-                            sim.queue.cancel_all()
-                            cancel_ok = True
-                        except Exception as exc:
-                            cancel_error = f"{type(exc).__name__}: {exc}"
-                        result_lines.append("cancel_method=queue.cancel_all")
-                        result_lines.append(f"cancel_ok={cancel_ok}")
-                        result_lines.append(f"cancel_error={cancel_error}")
-                        scheduled_ok, schedule_reason = _schedule_skill_plan_push(
-                            sim_info,
-                            skill_key,
-                            reason,
-                            delay_sim_seconds=3,
-                        )
-                        result_lines.append("scheduled_retry=True")
-                        result_lines.append("scheduled_retry_delay_seconds=3")
-                        result_lines.append(
-                            f"scheduled_retry_ok={scheduled_ok} reason={schedule_reason}"
-                        )
-                        success = scheduled_ok
-                else:
-                    details = {}
-                    ok = director.try_push_skill_interaction(
-                        sim, skill_key, force=True, probe_details=details
-                    )
-                    result_lines.append(f"push_ok={ok}")
-                    result_lines.append(
-                        f"chosen_object={details.get('target_label')}"
-                    )
-                    result_lines.append(
-                        f"chosen_affordance={details.get('chosen_affordance')}"
-                    )
-                    attempts = details.get("push_attempts", [])
-                    _format_push_attempts(result_lines, attempts, "primary")
-                    if details.get("failure_reason"):
-                        result_lines.append(
-                            f"failure_reason={details.get('failure_reason')}"
-                        )
-                    success = ok
-                    if ok:
-                        director._record_push(director._sim_identifier(sim_info), now)
-                        director._record_action(sim_info, skill_key, reason, now)
+                )
         payload = "\n".join(result_lines)
         path = logging_utils.append_log_block(
             settings.collect_log_filename, "SimulationMode SKILL_PLAN_NOW", payload

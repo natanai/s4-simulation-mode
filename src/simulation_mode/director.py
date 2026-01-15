@@ -22,90 +22,7 @@ from simulation_mode.push_utils import (
     make_interaction_context,
 )
 from simulation_mode.settings import settings
-
-_SKILL_RULES = {
-    "programming": {
-        "object_keywords": ["computer"],
-        "affordance_keywords": [
-            "practice programming",
-            "program",
-            "hack",
-            "freelance",
-            "browse web",
-            "web",
-        ],
-    },
-    "video_gaming": {
-        "object_keywords": ["computer", "console"],
-        "affordance_keywords": ["play game", "play", "gaming"],
-    },
-    "writing": {
-        "object_keywords": ["computer"],
-        "affordance_keywords": ["write", "practice writing"],
-    },
-    "cooking": {
-        "object_keywords": ["fridge", "refriger", "stove", "oven"],
-        "affordance_keywords": ["cook", "have quick meal", "quick meal", "prepare"],
-    },
-    "fitness": {
-        "object_keywords": [
-            "treadmill",
-            "punch",
-            "weights",
-            "workout",
-            "basketball",
-            "pullup",
-            "exercise",
-            "bike",
-            "bicycle",
-            "stationary",
-        ],
-        "affordance_keywords": [
-            "workout",
-            "practice",
-            "train",
-            "jog",
-            "ride",
-            "cycle",
-            "spin",
-            "cardio",
-            "strength",
-            "run",
-        ],
-    },
-    "logic": {
-        "object_keywords": ["chess", "telescope", "microscope"],
-        "affordance_keywords": ["play chess", "use", "research", "practice logic"],
-    },
-    "painting": {
-        "object_keywords": ["easel"],
-        "affordance_keywords": ["paint", "practice painting"],
-    },
-    "guitar": {
-        "object_keywords": ["guitar"],
-        "affordance_keywords": ["practice", "play"],
-    },
-    "piano": {
-        "object_keywords": ["piano", "keyboard"],
-        "affordance_keywords": ["practice", "play"],
-    },
-    "violin": {
-        "object_keywords": ["violin"],
-        "affordance_keywords": ["practice", "play"],
-    },
-    "charisma": {
-        "object_keywords": ["mirror"],
-        "affordance_keywords": ["practice speech", "practice", "psych up", "pep talk"],
-    },
-    "mischief": {
-        "object_keywords": ["computer"],
-        "affordance_keywords": ["troll", "mischief", "prank"],
-    },
-    "acting": {
-        "object_keywords": ["mirror", "computer"],
-        "affordance_keywords": ["practice acting", "acting", "research acting", "practice"],
-    },
-}
+from simulation_mode import skills
 
 _CAREER_TO_SKILLS = {
     "TechGuru": ["programming", "video_gaming"],
@@ -120,17 +37,6 @@ _CAREER_TO_SKILLS = {
     "Business": ["charisma"],
     "ActorCareer": ["acting", "charisma"],
 }
-
-_AFFORDANCE_BLOCK_TOKENS = (
-    "offer",
-    "ask",
-    "invite",
-    "mentor",
-    "teach",
-    "discuss",
-    "chat",
-    "social",
-)
 
 _WHIM_RULES = {
     "fun": {
@@ -428,13 +334,7 @@ def _trim_repr(value, limit=200):
 
 
 def _skill_key_from_name(name):
-    if not name:
-        return None
-    lowered = name.lower()
-    for key in _SKILL_RULES:
-        if key in lowered:
-            return key
-    return None
+    return skills.skill_key_from_name(name)
 
 
 def _skill_level_from_tracker(skill_tracker, skill):
@@ -495,8 +395,13 @@ def _skill_max_from_skill(skill):
 
 
 def _skill_level_for_key(sim_info, skill_key):
+    level, _max_level = _skill_level_and_max_for_key(sim_info, skill_key)
+    return level
+
+
+def _skill_level_and_max_for_key(sim_info, skill_key):
     if sim_info is None or not skill_key:
-        return None
+        return None, None
     skill_tracker = getattr(sim_info, "skill_tracker", None)
     get_skills = None
     if skill_tracker is not None:
@@ -504,11 +409,11 @@ def _skill_level_for_key(sim_info, skill_key):
         if get_skills is None:
             get_skills = getattr(skill_tracker, "get_all_skill_types", None)
     if not callable(get_skills):
-        return None
+        return None, None
     try:
         skills = list(get_skills())
     except Exception:
-        return None
+        return None, None
     for skill in skills:
         name = _extract_skill_name(skill)
         if not name:
@@ -518,8 +423,11 @@ def _skill_level_for_key(sim_info, skill_key):
         level = _skill_level_from_skill(skill)
         if level is None and skill_tracker is not None:
             level = _skill_level_from_tracker(skill_tracker, skill)
-        return level
-    return None
+        max_level = _skill_max_from_skill(skill)
+        if max_level is None and skill_tracker is not None:
+            max_level = _skill_max_from_tracker(skill_tracker, skill)
+        return level, max_level
+    return None, None
 
 
 def _iter_careers(sim_info):
@@ -666,10 +574,26 @@ def _get_career_skill_candidates(sim_info):
 def _choose_career_skill(sim_info):
     if sim_info is None or not settings.director_prefer_career_skills:
         return None
-    for skill_key, rationale in _get_career_skill_candidates(sim_info):
+    candidates, _satisfied = _filter_unmet_career_skills(
+        sim_info, _get_career_skill_candidates(sim_info)
+    )
+    for skill_key, rationale in candidates:
         if _skill_allowed(skill_key):
             return skill_key, rationale
     return None
+
+
+def _filter_unmet_career_skills(sim_info, candidates):
+    unmet = []
+    satisfied = []
+    for skill_key, rationale in candidates:
+        level, max_level = _skill_level_and_max_for_key(sim_info, skill_key)
+        max_level = max_level if max_level is not None else 10
+        if level is not None and level >= max_level:
+            satisfied.append(skill_key)
+            continue
+        unmet.append((skill_key, rationale))
+    return unmet, satisfied
 
 
 def _get_started_skill_candidates(sim_info):
@@ -743,7 +667,9 @@ def build_skill_plan(sim_info):
     candidates = []
     selected = None
     if settings.director_prefer_career_skills:
-        career_candidates = _get_career_skill_candidates(sim_info)
+        career_candidates, _satisfied = _filter_unmet_career_skills(
+            sim_info, _get_career_skill_candidates(sim_info)
+        )
         for skill_key, rationale in career_candidates:
             candidates.append((skill_key, rationale))
         if career_candidates:
@@ -755,6 +681,101 @@ def build_skill_plan(sim_info):
         if started_candidates:
             selected = (started_candidates[0][0], started_candidates[0][1])
     return selected, candidates
+
+
+def run_skill_plan(sim_info, sim, now, force=False, source="director"):
+    wants_reason = None
+    want_targets = []
+    if not settings.director_enable_wants:
+        wants_reason = "disabled_by_setting"
+    else:
+        want_targets, _want_reason = _select_want_targets(sim_info)
+        wants_reason = "no_wants" if not want_targets else "not_attempted_in_this_build"
+    _append_debug(f"Director: wants=skipped reason={wants_reason}")
+
+    career_candidates = []
+    career_reason = "disabled_by_setting"
+    if settings.director_prefer_career_skills:
+        raw_candidates = _get_career_skill_candidates(sim_info)
+        career_candidates, satisfied = _filter_unmet_career_skills(sim_info, raw_candidates)
+        if career_candidates:
+            if any("career_probe=fallback_mapping_used" in line for line in _LAST_CAREER_PROBE):
+                career_reason = "not_discoverable"
+            else:
+                career_reason = "found"
+        else:
+            if satisfied:
+                career_reason = "already_satisfied"
+            else:
+                career_reason = "no_career_skills_found"
+    _append_debug(f"Director: career_skills={len(career_candidates)} reason={career_reason}")
+
+    started_candidates = []
+    if settings.director_fallback_to_started_skills:
+        started_candidates = _get_started_skill_candidates(sim_info)
+    _log_started_skill_order(started_candidates)
+
+    for skill_key, rationale in career_candidates:
+        level = _skill_level_for_key(sim_info, skill_key)
+        attempt = _attempt_skill_candidate(
+            sim, skill_key, level, source="career", force=force
+        )
+        if attempt["success"]:
+            _append_debug(
+                f"Director: skill_result=success skill={skill_key} source=career"
+            )
+            return {
+                "success": True,
+                "skill_key": skill_key,
+                "skill_reason": rationale,
+                "skill_source": "career",
+                "wants_reason": wants_reason,
+                "career_reason": career_reason,
+                "started_candidates": started_candidates,
+            }
+
+    failure_counts = {"no_object": 0, "no_affordance": 0, "push_failed": 0}
+    attempted = 0
+    for skill_key, rationale, level in started_candidates:
+        attempted += 1
+        attempt = _attempt_skill_candidate(
+            sim, skill_key, level, source="started", force=force
+        )
+        if attempt["success"]:
+            _append_debug(
+                f"Director: skill_result=success skill={skill_key} source=started"
+            )
+            return {
+                "success": True,
+                "skill_key": skill_key,
+                "skill_reason": rationale,
+                "skill_source": "started",
+                "wants_reason": wants_reason,
+                "career_reason": career_reason,
+                "started_candidates": started_candidates,
+            }
+        failure_counts[attempt["result"]] += 1
+
+    _append_debug(
+        "Director: skill_result=failure attempted={} no_object={} "
+        "no_affordance={} push_failed={}".format(
+            attempted,
+            failure_counts["no_object"],
+            failure_counts["no_affordance"],
+            failure_counts["push_failed"],
+        )
+    )
+    return {
+        "success": False,
+        "skill_key": None,
+        "skill_reason": None,
+        "skill_source": None,
+        "wants_reason": wants_reason,
+        "career_reason": career_reason,
+        "started_candidates": started_candidates,
+        "failure_counts": failure_counts,
+        "attempted": attempted,
+    }
 
 
 def _is_proto_message(obj):
@@ -1808,54 +1829,6 @@ def _push_affordance_with_details(sim, target_obj, affordance, reason=None, forc
     return False, failure_reason, sig_names, client_attached
 
 
-def _value_mentions_target_sim(value):
-    if value is None:
-        return False
-    text = _trim_repr(value).lower()
-    return "targetsim" in text or "target_sim" in text or "participanttype.targetsim" in text
-
-
-def _affordance_requires_target_sim(affordance):
-    for attr in (
-        "target_type",
-        "target_types",
-        "target_sim_type",
-        "participant_type",
-        "participant_types",
-        "participants",
-    ):
-        value = getattr(affordance, attr, None)
-        if value is None:
-            continue
-        if callable(value):
-            try:
-                value = value()
-            except Exception:
-                continue
-        if _value_mentions_target_sim(value):
-            return True
-        if isinstance(value, (list, tuple, set)):
-            if any(_value_mentions_target_sim(item) for item in value):
-                return True
-    return False
-
-
-def _skill_affordance_block_reason(affordance):
-    if affordance is None:
-        return "none"
-    if is_picker_affordance(affordance):
-        return "picker_affordance"
-    name = affordance_name(affordance)
-    class_name = _get_affordance_class_name(affordance).lower()
-    if any(token in name for token in _AFFORDANCE_BLOCK_TOKENS):
-        return "blocked_name_token"
-    if any(token in class_name for token in _AFFORDANCE_BLOCK_TOKENS):
-        return "blocked_class_token"
-    if _affordance_requires_target_sim(affordance):
-        return "requires_target_sim"
-    return None
-
-
 def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
     sim_name = getattr(sim, "full_name", None)
     if callable(sim_name):
@@ -1864,83 +1837,50 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
         except Exception:
             sim_name = None
     sim_name = sim_name or getattr(sim, "first_name", None) or "Sim"
-    rule = _SKILL_RULES.get(skill_key)
-    if rule is None:
+    resolution = skills.resolve_skill_action(sim, skill_key)
+    rule = skills.SKILL_RULES.get(skill_key)
+    reason = resolution.get("reason")
+    if reason == "no_rule":
         _append_debug(f"{sim_name}: FAIL no rule for skill={skill_key}")
-        return False
-    objects = list(iter_objects())
-    target_obj = _find_target_object(sim, rule, objects=objects)
-    if target_obj is None:
-        count = len(objects)
         if probe_details is not None:
             probe_details["resolution_type"] = "FAIL"
-            probe_details["object_scan_count"] = count
-            probe_details["object_keywords"] = list(rule.get("object_keywords", []))
-            probe_details["failure_reason"] = "no object match"
-        _append_debug(
-            f"{sim_name}: FAIL no object for skill={skill_key} "
-            f"(iter_objects={count}) keywords={rule.get('object_keywords')}"
-        )
+            probe_details["failure_reason"] = "no rule for skill key"
         return False
-    candidates = find_affordance_candidates(
-        target_obj, rule.get("affordance_keywords", []), sim=sim
-    )
-    filtered = []
-    candidate_debug = []
-    for affordance in candidates:
-        try:
-            reason = _skill_affordance_block_reason(affordance)
-            candidate_debug.append(
-                {
-                    "affordance_name": affordance_name(affordance),
-                    "affordance_class": _get_affordance_class_name(affordance),
-                    "blocked_reason": reason,
-                    "requires_target_sim": _affordance_requires_target_sim(affordance),
-                }
-            )
-            if reason is not None:
-                continue
-        except Exception:
-            continue
-        filtered.append(affordance)
-    if filtered:
-        object_def_name = ""
-        definition = getattr(target_obj, "definition", None)
-        if definition is not None:
-            object_def_name = getattr(definition, "name", "") or ""
-        object_def_name = object_def_name.lower()
-        tokens = [
-            token.lower()
-            for token in rule.get("object_keywords", []) + rule.get("affordance_keywords", [])
-            if token
-        ]
-
-        def _skill_affordance_score(aff):
-            name = affordance_name(aff)
-            score = 0
-            for token in tokens:
-                if token in name or (object_def_name and token in object_def_name):
-                    score += 1
-            return score
-
-        filtered.sort(key=_skill_affordance_score, reverse=True)
+    if reason == "no_object":
+        if probe_details is not None:
+            probe_details["resolution_type"] = "FAIL"
+            probe_details["object_keywords"] = list(rule.get("object_keywords", [])) if rule else []
+            probe_details["failure_reason"] = "no object match"
+        _append_debug(f"{sim_name}: FAIL no object for skill={skill_key}")
+        return False
+    if reason == "no_affordance":
+        if probe_details is not None:
+            probe_details["resolution_type"] = "FAIL"
+            probe_details["failure_reason"] = "no safe affordance candidates"
+        _append_debug(f"{sim_name}: FAIL no affordance for skill={skill_key}")
+        return False
+    target_obj = resolution.get("target_obj")
+    affordances = list(resolution.get("affordances") or [])
     if probe_details is not None:
         probe_details["resolution_type"] = "SKILL_OBJECT"
-        probe_details["object_scan_count"] = len(objects)
-        probe_details["object_keywords"] = list(rule.get("object_keywords", []))
         probe_details["target_label"] = _get_object_probe_label(target_obj)
         probe_details["target_type"] = "object"
         probe_details["push_attempts"] = []
-        probe_details["candidate_affordances"] = candidate_debug
-    if not filtered:
-        _append_debug(
-            f"{sim_name}: FAIL no affordance for skill={skill_key} "
-            f"object={_get_object_label(target_obj)} keywords={rule.get('affordance_keywords')}"
-        )
+        probe_details["candidate_affordances"] = [
+            {
+                "affordance_name": affordance_name(aff),
+                "affordance_class": _get_affordance_class_name(aff),
+                "blocked_reason": None,
+                "requires_target_sim": False,
+            }
+            for aff in affordances
+        ]
+    if not affordances:
+        _append_debug(f"{sim_name}: FAIL no affordance for skill={skill_key}")
         if probe_details is not None:
             probe_details["failure_reason"] = "no safe affordance candidates"
         return False
-    for affordance in filtered[:8]:
+    for affordance in affordances[:8]:
         ok, failure_reason, sig_names, _client_attached = _push_affordance_with_details(
             sim, target_obj, affordance, reason=skill_key, force=force
         )
@@ -2067,6 +2007,122 @@ def _append_action(action):
     last_director_actions.append(action)
     if len(last_director_actions) > 20:
         last_director_actions[:] = last_director_actions[-20:]
+
+
+def _log_started_skill_order(candidates):
+    total = len(candidates)
+    preview = ", ".join(
+        f"({skill_key},{level})" for skill_key, _reason, level in candidates[:20]
+    )
+    _append_debug(f"Director: started_skills_order=[{preview}] total={total}")
+
+
+def _log_try_skill(
+    source,
+    skill_key,
+    level,
+    result,
+    obj_label=None,
+    aff_label=None,
+    details=None,
+    push_signature=None,
+    push_ok=None,
+):
+    obj_label = obj_label or "none"
+    aff_label = aff_label or "none"
+    details = details or "none"
+    parts = [
+        f"TrySkill source={source}",
+        f"skill={skill_key}",
+        f"level={level}",
+        f"result={result}",
+        f"obj={obj_label}",
+        f"aff={aff_label}",
+        f"details={details}",
+    ]
+    if push_ok is not None:
+        parts.append(f"push_ok={push_ok}")
+    if push_signature is not None:
+        parts.append(f"push_signature={push_signature}")
+    _append_debug(" ".join(parts))
+
+
+def _attempt_skill_candidate(sim, skill_key, level, source, force=False):
+    resolution = skills.resolve_skill_action(sim, skill_key)
+    reason = resolution.get("reason")
+    if reason == "no_rule":
+        _log_try_skill(
+            source,
+            skill_key,
+            level,
+            "no_object",
+            details="no_rule_for_skill_key",
+        )
+        return {"success": False, "result": "no_object"}
+    if reason == "no_object":
+        _log_try_skill(
+            source,
+            skill_key,
+            level,
+            "no_object",
+            details="no_matching_object",
+        )
+        return {"success": False, "result": "no_object"}
+    if reason == "no_affordance":
+        _log_try_skill(
+            source,
+            skill_key,
+            level,
+            "no_affordance",
+            details="no_safe_affordance",
+        )
+        return {"success": False, "result": "no_affordance"}
+    target_obj = resolution.get("target_obj")
+    affordances = list(resolution.get("affordances") or [])
+    if not affordances:
+        _log_try_skill(
+            source,
+            skill_key,
+            level,
+            "no_affordance",
+            details="no_safe_affordance",
+        )
+        return {"success": False, "result": "no_affordance"}
+    last_failure = None
+    last_sig = None
+    last_aff_label = None
+    for affordance in affordances[:8]:
+        ok, failure_reason, sig_names, _client_attached = _push_affordance_with_details(
+            sim, target_obj, affordance, reason=skill_key, force=force
+        )
+        last_aff_label = affordance_name(affordance)
+        last_sig = list(sig_names or [])
+        if ok:
+            _log_try_skill(
+                source,
+                skill_key,
+                level,
+                "success",
+                obj_label=_get_object_probe_label(target_obj),
+                aff_label=last_aff_label,
+                details="push_ok",
+                push_signature=last_sig,
+                push_ok=True,
+            )
+            return {"success": True, "result": "success"}
+        last_failure = failure_reason or "push_failed"
+    _log_try_skill(
+        source,
+        skill_key,
+        level,
+        "push_failed",
+        obj_label=_get_object_probe_label(target_obj),
+        aff_label=last_aff_label,
+        details=last_failure,
+        push_signature=last_sig,
+        push_ok=False,
+    )
+    return {"success": False, "result": "push_failed"}
 
 
 def _record_action(sim_info, skill_key, reason, now):
@@ -2224,57 +2280,14 @@ def _evaluate(now: float, force: bool = False):
                 _dbg(f"{sim_name}: SKIP cooldown")
                 continue
 
-            if settings.director_enable_wants:
-                want_targets, want_reason = _select_want_targets(sim_info)
-                if want_targets:
-                    pushed_any = False
-                    for _want_key, want_name, want_obj in want_targets:
-                        debug_name = getattr(want_obj, "__name__", None) or str(want_obj)
-                        _dbg(f"{sim_name}: WHIM picked __name__={debug_name}")
-                        rule_key = _resolve_whim_rule(want_name)
-                        if rule_key == "social":
-                            if (
-                                hasattr(settings, "director_allow_social_wants")
-                                and not settings.director_allow_social_wants
-                            ):
-                                _dbg(f"{sim_name}: WANT social disabled")
-                                continue
-                        if rule_key == "hug":
-                            if (
-                                hasattr(settings, "director_allow_social_wants")
-                                and not settings.director_allow_social_wants
-                            ):
-                                _dbg(f"{sim_name}: WANT hug disabled")
-                                continue
-                        if rule_key is None:
-                            continue
-                        pushed, want_message = _push_want(
-                            sim, rule_key, want_name, want_obj=want_obj, force=force
-                        )
-                        if pushed:
-                            _record_push(sim_id, now)
-                            action = f"{sim_name} -> WANT {want_name}"
-                            _append_action(action)
-                            last_director_time = now
-                            pushed_any = True
-                            break
-                        _dbg(f"{sim_name}: {want_message}")
-                    if pushed_any:
-                        continue
-                elif want_reason:
-                    _dbg(f"{sim_name}: {want_reason}")
-
-            goal, _candidates = build_skill_plan(sim_info)
-            if goal is None:
-                _dbg(f"{sim_name}: NO GOAL")
-                continue
-            skill_key, reason = goal
-            pushed = try_push_skill_interaction(sim, skill_key, force=force)
-            if pushed:
+            result = run_skill_plan(sim_info, sim, now, force=force, source="director")
+            if result.get("success"):
+                skill_key = result.get("skill_key")
+                reason = result.get("skill_reason")
                 _record_push(sim_id, now)
                 _record_action(sim_info, skill_key, reason, now)
             else:
-                _dbg(f"{sim_name}: FAIL push returned False skill={skill_key}")
+                _dbg(f"{sim_name}: SKILL plan failed")
         except Exception:
             continue
     if not last_director_debug and len(last_director_actions) == actions_before:

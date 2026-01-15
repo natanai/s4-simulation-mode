@@ -1,3 +1,3 @@
-__version__ = "0.5.0+build47"
+__version__ = "0.5.0+build48"
 
 from simulation_mode.commands import *  # noqa: F401,F403

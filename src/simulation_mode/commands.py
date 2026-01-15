@@ -363,6 +363,290 @@ def _collect_started_skills(sim_info):
     return lines
 
 
+def _collect_affordance_probe_lines(sim_info):
+    """
+    Probe-only: enumerate super-affordances on lot objects and log:
+    - tuning flags (user-directed/autonomous/cheat/debug)
+    - picker-like detection
+    - whether affordance tests pass using resolver if available
+    CAPPED for safety (performance).
+    """
+    importlib_util = importlib.import_module("importlib.util")
+    push_utils = importlib.import_module("simulation_mode.push_utils")
+
+    # caps (hard-coded for now; probe-only)
+    MAX_OBJECTS = 80
+    MAX_AFFORDANCES_PER_OBJECT = 30
+    MAX_RESULTS = 120  # max lines for “good candidates”
+
+    lines = []
+    header = (
+        "AFFORDANCE PROBE: test-passing affordances + whether they look user-directed"
+    )
+    lines.append(header)
+
+    # resolve sim instance
+    try:
+        sim = sim_info.get_sim_instance()
+    except Exception as e:
+        return [header, f"  ERROR: sim_info.get_sim_instance() failed: {e!r}"]
+    if sim is None:
+        return [header, "  No live Sim instance (sim is not instantiated)."]
+
+    # Try to import resolvers for running tests
+    resolver_note = ""
+    SingleActorAndObjectResolver = None
+    SingleSimResolver = None
+    if importlib_util.find_spec("event_testing.resolver") is None:
+        resolver_note = (
+            "  NOTE: resolver module not found; tests will be logged as unknown."
+        )
+    else:
+        resolver_mod = importlib.import_module("event_testing.resolver")
+        SingleActorAndObjectResolver = getattr(
+            resolver_mod, "SingleActorAndObjectResolver", None
+        )
+        SingleSimResolver = getattr(resolver_mod, "SingleSimResolver", None)
+        if SingleActorAndObjectResolver is None and SingleSimResolver is None:
+            resolver_note = (
+                "  NOTE: Could not find SingleActorAndObjectResolver/SingleSimResolver; "
+                "tests will be logged as unknown."
+            )
+    if resolver_note:
+        lines.append(resolver_note)
+
+    scanned_objects = 0
+    scanned_affordances = 0
+
+    # exclusion counters
+    excl_picker = 0
+    excl_cheat = 0
+    excl_debug = 0
+    excl_no_tests = 0
+    excl_tests_unknown = 0
+    excl_tests_fail = 0
+    good_candidates = 0
+
+    # Helper to read tuning-ish fields safely
+    def _get_bool(obj, *names, default=False):
+        for name in names:
+            if hasattr(obj, name):
+                try:
+                    value = getattr(obj, name)
+                    # some tunables might be properties/callables
+                    if callable(value):
+                        value = value()
+                    return bool(value)
+                except Exception:
+                    continue
+        return default
+
+    def _get_int(obj, *names, default=None):
+        for name in names:
+            if hasattr(obj, name):
+                try:
+                    value = getattr(obj, name)
+                    if callable(value):
+                        value = value()
+                    return value
+                except Exception:
+                    continue
+        return default
+
+    def _aff_name(aff):
+        try:
+            return getattr(aff, "__name__", None) or str(aff)
+        except Exception:
+            return "<aff?>"
+
+    def _obj_name(obj):
+        try:
+            # prefer definition name if present
+            if (
+                hasattr(obj, "definition")
+                and obj.definition is not None
+                and hasattr(obj.definition, "name")
+            ):
+                return obj.definition.name
+        except Exception:
+            pass
+        try:
+            return str(obj)
+        except Exception:
+            return "<obj?>"
+
+    # Decide whether an affordance “looks user-directed”
+    # (i.e., allowed user-directed, not cheat/debug, not picker-like)
+    def _looks_user_directed(aff, allow_ud, cheat, debug, is_picker):
+        return bool(allow_ud) and (not cheat) and (not debug) and (not is_picker)
+
+    # Evaluate tests if possible
+    def _tests_pass(aff, target_obj):
+        """
+        Return tuple: (status_str, pass_bool_or_none)
+        pass_bool_or_none:
+          - True/False when we can evaluate
+          - None when unknown (no resolver/tests structure)
+        """
+        # tests / test_globals may exist (tunables); if absent, we log “no_tests”
+        tests = getattr(aff, "tests", None)
+        test_globals = getattr(aff, "test_globals", None)
+
+        if tests is None and test_globals is None:
+            return ("no_tests", None)
+
+        # Build resolver
+        resolver = None
+        if SingleActorAndObjectResolver is not None:
+            try:
+                resolver = SingleActorAndObjectResolver(sim_info, target_obj)
+            except Exception:
+                resolver = None
+        if resolver is None and SingleSimResolver is not None:
+            try:
+                resolver = SingleSimResolver(sim_info)
+            except Exception:
+                resolver = None
+
+        if resolver is None:
+            return ("unknown_no_resolver", None)
+
+        # Run tests if object exposes run_tests(resolver)
+        def _run_testset(testset):
+            if testset is None:
+                return True
+            # Most TS4 test sets expose run_tests; guard strictly.
+            fn = getattr(testset, "run_tests", None)
+            if fn is None or not callable(fn):
+                return None
+            try:
+                return bool(fn(resolver))
+            except Exception:
+                return False
+
+        # `tests`
+        res_tests = _run_testset(tests)
+        if res_tests is None:
+            return ("unknown_tests_structure", None)
+        if res_tests is False:
+            return ("fail_tests", False)
+
+        # `test_globals`
+        res_globals = _run_testset(test_globals)
+        if res_globals is None:
+            return ("unknown_test_globals_structure", None)
+        if res_globals is False:
+            return ("fail_test_globals", False)
+
+        return ("pass", True)
+
+    # Enumerate objects and affordances
+    try:
+        for obj in push_utils.iter_objects():
+            scanned_objects += 1
+            if scanned_objects > MAX_OBJECTS:
+                break
+
+            # Gather super affordances (existing helper already sorts)
+            try:
+                sa_list = list(push_utils.iter_super_affordances(obj))
+            except Exception:
+                continue
+
+            if not sa_list:
+                continue
+
+            # Cap per object
+            for aff in sa_list[:MAX_AFFORDANCES_PER_OBJECT]:
+                scanned_affordances += 1
+
+                # Fields (safe)
+                allow_ud = _get_bool(
+                    aff, "allow_user_directed", "_allow_user_directed", default=False
+                )
+                allow_auto = _get_bool(
+                    aff, "allow_autonomous", "_allow_autonomous", default=False
+                )
+                cheat = _get_bool(aff, "cheat", "_cheat", default=False)
+                debug = _get_bool(aff, "debug", "_debug", default=False)
+                guid64 = _get_int(aff, "guid64", default=None)
+
+                # Picker-like (existing helper)
+                try:
+                    is_picker = bool(push_utils.is_picker_affordance(aff))
+                except Exception:
+                    is_picker = False
+
+                # Exclusion markers
+                if cheat:
+                    excl_cheat += 1
+                if debug:
+                    excl_debug += 1
+                if is_picker:
+                    excl_picker += 1
+
+                # Tests
+                status, passed = _tests_pass(aff, obj)
+                if status == "no_tests":
+                    excl_no_tests += 1
+                elif status.startswith("unknown"):
+                    excl_tests_unknown += 1
+                elif status.startswith("fail"):
+                    excl_tests_fail += 1
+
+                looks_ud = _looks_user_directed(aff, allow_ud, cheat, debug, is_picker)
+
+                # We only list “good candidates” in detail to keep logs readable:
+                # requirement: tests PASS (True) AND looks user-directed.
+                if passed is True and looks_ud:
+                    good_candidates += 1
+                    lines.append(
+                        f"  CANDIDATE obj={_obj_name(obj)}(id={getattr(obj,'id',None)}) "
+                        f"aff={_aff_name(aff)}(guid64={guid64}) "
+                        f"allow_ud={allow_ud} allow_auto={allow_auto} "
+                        f"cheat={cheat} debug={debug} picker={is_picker} tests={status}"
+                    )
+                    if good_candidates >= MAX_RESULTS:
+                        break
+
+            if good_candidates >= MAX_RESULTS:
+                break
+
+    except Exception as e:
+        lines.append(f"  ERROR during enumeration: {e!r}")
+
+    # Summary
+    lines.append(
+        "  SUMMARY scanned_objects={} scanned_affordances={} good_candidates={}".format(
+            scanned_objects, scanned_affordances, good_candidates
+        )
+    )
+    lines.append(
+        "  EXCLUSIONS "
+        "picker={} cheat={} debug={} "
+        "no_tests={} tests_unknown={} tests_fail={}".format(
+            excl_picker,
+            excl_cheat,
+            excl_debug,
+            excl_no_tests,
+            excl_tests_unknown,
+            excl_tests_fail,
+        )
+    )
+
+    if good_candidates == 0:
+        lines.append(
+            "  NOTE: No test-passing user-directed candidates found in sample. "
+            "This is a SIGNAL for later (not a behavior change)."
+        )
+        lines.append(
+            "  NOTE: If this repeats, increase caps or improve resolver choice; "
+            "do NOT change director behavior in this build."
+        )
+
+    return lines
+
+
 def _collect_aspiration_summary(sim_info):
     lines = []
     tracker = _safe_get(sim_info, "aspiration_tracker")
@@ -410,6 +694,44 @@ def _collect_aspiration_summary(sim_info):
             tracker, ("aspir", "milestone", "goal", "track", "current", "active")
         )
         lines.append(f"aspiration_tracker_attrs_hint={attr_names[:12]}")
+    try:
+        obj_tracker = getattr(active, "objective_tracker", None)
+        if obj_tracker is None:
+            obj_tracker = getattr(sim_info, "aspiration_tracker", None)
+        objectives = None
+        if obj_tracker is not None:
+            getter = getattr(obj_tracker, "get_objectives", None)
+            if callable(getter):
+                objectives = getter()
+            elif hasattr(obj_tracker, "objectives"):
+                objectives = getattr(obj_tracker, "objectives")
+            elif hasattr(obj_tracker, "_objectives"):
+                objectives = getattr(obj_tracker, "_objectives")
+        if objectives:
+            lines.append("aspiration_objectives:")
+            for objective in list(objectives)[:20]:
+                objective_name = objective.__class__.__name__
+                guid64 = getattr(objective, "guid64", None)
+                completed = getattr(objective, "completed", None)
+                if completed is None:
+                    completed = getattr(objective, "is_completed", None)
+                if callable(completed):
+                    completed = completed()
+                current = getattr(objective, "current_value", None)
+                if callable(current):
+                    current = current()
+                target = getattr(objective, "target_value", None)
+                if callable(target):
+                    target = target()
+                lines.append(
+                    "  objective type={} guid64={} completed={} current={} target={}".format(
+                        objective_name, guid64, completed, current, target
+                    )
+                )
+        else:
+            lines.append("aspiration_objectives= (none)")
+    except Exception as exc:
+        lines.append(f"objective probe unavailable: {exc!r}")
     return lines
 
 
@@ -594,6 +916,7 @@ def _collect_internal_probes(sim_info):
     lines.extend(_collect_career_summary(sim_info))
     lines.append("ASPIRATION SUMMARY (PROBE)")
     lines.extend(_collect_aspiration_summary(sim_info))
+    lines += [""] + _collect_affordance_probe_lines(sim_info)
     tracker = _safe_get(sim_info, "career_tracker")
     if tracker is not None:
         attrs = _filter_names(tracker, ("career", "level", "track", "promotion"))

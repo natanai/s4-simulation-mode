@@ -12,7 +12,7 @@ logger = sims4.log.Logger("SimulationMode")
 
 
 KNOWN_DEFAULTS = [
-    ("enabled", "false"),
+    ("enabled", "true"),
     ("auto_unpause", "true"),
     ("allow_death", "false"),
     ("allow_pregnancy", "false"),
@@ -41,6 +41,14 @@ KNOWN_DEFAULTS = [
     ("collect_log_filename", "simulation-mode-collect.log"),
     ("story_log_enabled", "true"),
     ("story_log_filename", "simulation-mode-story.log"),
+    ("catalog_include_sims", "false"),
+    ("catalog_include_non_autonomous", "false"),
+    ("catalog_max_objects", "2000"),
+    ("catalog_max_affordances_per_object", "80"),
+    ("catalog_collect_sample_objects", "150"),
+    ("catalog_collect_sample_affordances_per_object", "60"),
+    ("catalog_collect_top_auto_n", "40"),
+    ("aff_meta_substrings", "acting|cook|sleep|toilet|shower|program"),
     ("integrate_better_autonomy_trait", "false"),
     ("better_autonomy_trait_id", "3985292068"),
 ]
@@ -122,6 +130,38 @@ def _build_default_template_text():
     lines.append("story_log_enabled={}".format(defaults["story_log_enabled"]))
     lines.append("story_log_filename={}".format(defaults["story_log_filename"]))
     lines.append("")
+    lines.append("# catalog defaults (Build 56)")
+    lines.append("catalog_include_sims={}".format(defaults["catalog_include_sims"]))
+    lines.append(
+        "catalog_include_non_autonomous={}".format(
+            defaults["catalog_include_non_autonomous"]
+        )
+    )
+    lines.append("catalog_max_objects={}".format(defaults["catalog_max_objects"]))
+    lines.append(
+        "catalog_max_affordances_per_object={}".format(
+            defaults["catalog_max_affordances_per_object"]
+        )
+    )
+    lines.append("")
+    lines.append("# collect-integrated sampling caps (Build 56)")
+    lines.append(
+        "catalog_collect_sample_objects={}".format(
+            defaults["catalog_collect_sample_objects"]
+        )
+    )
+    lines.append(
+        "catalog_collect_sample_affordances_per_object={}".format(
+            defaults["catalog_collect_sample_affordances_per_object"]
+        )
+    )
+    lines.append(
+        "catalog_collect_top_auto_n={}".format(defaults["catalog_collect_top_auto_n"])
+    )
+    lines.append("")
+    lines.append("# affordance meta probe list (pipe-delimited)")
+    lines.append("aff_meta_substrings={}".format(defaults["aff_meta_substrings"]))
+    lines.append("")
     lines.append(
         "# Optional integration if you ALSO installed a mod that defines this trait ID"
     )
@@ -186,6 +226,21 @@ def _append_missing_keys(path):
                 key.startswith("integrate_") or key.startswith("better_autonomy_")
                 for key, _ in missing
             )
+            catalog_defaults = {
+                "catalog_include_sims",
+                "catalog_include_non_autonomous",
+                "catalog_max_objects",
+                "catalog_max_affordances_per_object",
+            }
+            collect_caps = {
+                "catalog_collect_sample_objects",
+                "catalog_collect_sample_affordances_per_object",
+                "catalog_collect_top_auto_n",
+            }
+            aff_meta = {"aff_meta_substrings"}
+            any_catalog_defaults = any(key in catalog_defaults for key, _ in missing)
+            any_collect_caps = any(key in collect_caps for key, _ in missing)
+            any_aff_meta = any(key in aff_meta for key, _ in missing)
 
             if any_core:
                 handle.write("# Core\n")
@@ -224,6 +279,27 @@ def _append_missing_keys(path):
                     if key.startswith("integrate_") or key.startswith("better_autonomy_"):
                         handle.write("{}={}\n".format(key, value))
                 handle.write("\n")
+
+            if any_catalog_defaults:
+                handle.write("# catalog defaults (Build 56)\n")
+                for key, value in missing:
+                    if key in catalog_defaults:
+                        handle.write("{}={}\n".format(key, value))
+                handle.write("\n")
+
+            if any_collect_caps:
+                handle.write("# collect-integrated sampling caps (Build 56)\n")
+                for key, value in missing:
+                    if key in collect_caps:
+                        handle.write("{}={}\n".format(key, value))
+                handle.write("\n")
+
+            if any_aff_meta:
+                handle.write("# affordance meta probe list (pipe-delimited)\n")
+                for key, value in missing:
+                    if key in aff_meta:
+                        handle.write("{}={}\n".format(key, value))
+                handle.write("\n")
     except Exception:
         return
 
@@ -260,6 +336,14 @@ class SimulationModeSettings:
         collect_log_filename="simulation-mode-collect.log",
         story_log_enabled=True,
         story_log_filename="simulation-mode-story.log",
+        catalog_include_sims=False,
+        catalog_include_non_autonomous=False,
+        catalog_max_objects=2000,
+        catalog_max_affordances_per_object=80,
+        catalog_collect_sample_objects=150,
+        catalog_collect_sample_affordances_per_object=60,
+        catalog_collect_top_auto_n=40,
+        aff_meta_substrings="acting|cook|sleep|toilet|shower|program",
         integrate_better_autonomy_trait=False,
         better_autonomy_trait_id=3985292068,
     ):
@@ -292,6 +376,16 @@ class SimulationModeSettings:
         self.collect_log_filename = collect_log_filename
         self.story_log_enabled = story_log_enabled
         self.story_log_filename = story_log_filename
+        self.catalog_include_sims = catalog_include_sims
+        self.catalog_include_non_autonomous = catalog_include_non_autonomous
+        self.catalog_max_objects = catalog_max_objects
+        self.catalog_max_affordances_per_object = catalog_max_affordances_per_object
+        self.catalog_collect_sample_objects = catalog_collect_sample_objects
+        self.catalog_collect_sample_affordances_per_object = (
+            catalog_collect_sample_affordances_per_object
+        )
+        self.catalog_collect_top_auto_n = catalog_collect_top_auto_n
+        self.aff_meta_substrings = aff_meta_substrings
         self.integrate_better_autonomy_trait = integrate_better_autonomy_trait
         self.better_autonomy_trait_id = better_autonomy_trait_id
 
@@ -576,6 +670,43 @@ def load_settings(target):
             elif key == "story_log_filename":
                 value = str(raw_value).strip()
                 target.story_log_filename = value if value else "simulation-mode-story.log"
+            elif key == "catalog_include_sims":
+                if isinstance(value, bool):
+                    target.catalog_include_sims = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "catalog_include_non_autonomous":
+                if isinstance(value, bool):
+                    target.catalog_include_non_autonomous = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "catalog_max_objects":
+                try:
+                    target.catalog_max_objects = max(1, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "catalog_max_affordances_per_object":
+                try:
+                    target.catalog_max_affordances_per_object = max(1, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "catalog_collect_sample_objects":
+                try:
+                    target.catalog_collect_sample_objects = max(1, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "catalog_collect_sample_affordances_per_object":
+                try:
+                    target.catalog_collect_sample_affordances_per_object = max(1, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "catalog_collect_top_auto_n":
+                try:
+                    target.catalog_collect_top_auto_n = max(1, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "aff_meta_substrings":
+                target.aff_meta_substrings = str(raw_value)
             elif key == "integrate_better_autonomy_trait":
                 if isinstance(value, bool):
                     target.integrate_better_autonomy_trait = value
@@ -595,6 +726,42 @@ def load_settings(target):
 def save_settings(_target):
     path = Path(get_config_path())
     _ensure_template(path)
+
+
+def get_bool(key, default):
+    try:
+        value = getattr(settings, key)
+    except Exception:
+        return default
+    if isinstance(value, bool):
+        return value
+    coerced = _coerce_bool(value)
+    if coerced is not None:
+        return coerced
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def get_int(key, default):
+    try:
+        value = getattr(settings, key)
+    except Exception:
+        return default
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def get_str(key, default):
+    try:
+        value = getattr(settings, key)
+    except Exception:
+        return default
+    if value is None:
+        return default
+    return str(value)
 
 
 settings = SimulationModeSettings()

@@ -2,6 +2,7 @@ import json
 import os
 import time
 
+import simulation_mode.push_utils as push_utils
 from simulation_mode.settings import get_config_path
 
 
@@ -162,7 +163,15 @@ def _zone_id():
 def _resolve_object(obj):
     if obj is None:
         return None
-    if hasattr(obj, "get_super_affordances"):
+    if any(
+        hasattr(obj, attr)
+        for attr in (
+            "super_affordances",
+            "_super_affordances",
+            "get_super_affordances",
+            "get_target_super_affordances",
+        )
+    ):
         return obj
     services = __import__("services")
     try:
@@ -188,25 +197,6 @@ def _resolve_object(obj):
     return None
 
 
-def _call_get_super_affordances(obj):
-    getter = getattr(obj, "get_super_affordances", None)
-    if not callable(getter):
-        return None, "no_get_super_affordances"
-    try:
-        return getter(), None
-    except TypeError:
-        pass
-    try:
-        return getter(None), None
-    except TypeError:
-        pass
-    try:
-        return getter(None, None), None
-    except Exception as exc:
-        return None, "get_super_affordances_error:{}".format(repr(exc))
-    return None, "get_super_affordances_typeerror"
-
-
 def scan_zone_catalog(
     sim_info,
     *,
@@ -214,7 +204,6 @@ def scan_zone_catalog(
     max_affordances_per_object=80,
     include_non_autonomous=False,
 ):
-    push_utils = __import__("simulation_mode.push_utils", fromlist=["iter_objects"])
     notes = []
     records = []
     sample = []
@@ -227,16 +216,32 @@ def scan_zone_catalog(
     ok = True
 
     try:
+        sim = None
+        try:
+            sim = sim_info.get_sim_instance()
+        except Exception:
+            sim = None
+
         for raw in push_utils.iter_objects():
             obj = _resolve_object(raw)
             if len(sample) < 10:
+                sample_target = obj or raw
                 sample.append(
                     {
                         "raw_type": type(raw).__name__,
                         "resolved_type": type(obj).__name__ if obj is not None else None,
                         "resolved": obj is not None,
                         "has_get_super_affordances": bool(
-                            hasattr((obj or raw), "get_super_affordances")
+                            hasattr(sample_target, "get_super_affordances")
+                        ),
+                        "has_get_target_super_affordances": bool(
+                            hasattr(sample_target, "get_target_super_affordances")
+                        ),
+                        "has_super_affordances_attr": bool(
+                            hasattr(sample_target, "super_affordances")
+                        ),
+                        "has__super_affordances_attr": bool(
+                            hasattr(sample_target, "_super_affordances")
                         ),
                     }
                 )
@@ -250,27 +255,12 @@ def scan_zone_catalog(
             scanned_objects += 1
 
             try:
-                affordances, error = _call_get_super_affordances(obj)
-                if error:
-                    notes.append(
-                        "get_super_affordances obj_id={} error={}".format(
-                            _safe_get(obj, "id"), error
-                        )
-                    )
+                affordance_list = list(push_utils.iter_super_affordances(obj, sim=sim))
             except Exception as exc:
+                obj_id = _safe_get(obj, "id")
                 notes.append(
-                    f"get_super_affordances error obj_id={_safe_get(obj, 'id')} err={exc}"
+                    f"iter_super_affordances_error obj_id={obj_id} err={exc!r}"
                 )
-                continue
-
-            if affordances is None:
-                continue
-
-            try:
-                affordance_list = list(affordances)
-            except Exception as exc:
-                obj_type = _safe_get(_safe_get(obj, "__class__"), "__name__")
-                notes.append(f"affordances not iterable obj_type={obj_type} err={exc}")
                 continue
 
             scanned_affordances += len(affordance_list)
@@ -327,7 +317,8 @@ def scan_zone_catalog(
     path = get_catalog_log_path()
     if scanned_affordances == 0 and scanned_objects > 0:
         notes.append(
-            "ZERO_AFFORDANCES: resolved objects exist but none returned affordances; likely resolution/call failure"
+            "ZERO_AFFORDANCES: iter_super_affordances returned empty for all scanned objects; "
+            "check iter_objects source or sim resolution"
         )
     if scanned_affordances > 0 and written_records == 0:
         notes.append(

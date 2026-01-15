@@ -3,6 +3,7 @@ import inspect
 import json
 import os
 import time
+import traceback
 
 import sims4.commands
 from sims4.commands import BOOL_TRUE, CommandType
@@ -695,9 +696,12 @@ def _collect_catalog_sample(sim_info):
         max_affordances_per_object=max_aff,
         include_sims=None,
         include_non_autonomous=None,
+        filename="simulation-mode-object-catalog-sample.jsonl",
     )
     lines = ["CATALOG SAMPLE (PROBE)"]
-    lines.append(f"catalog_path={result.get('path')}")
+    lines.append(f"catalog_path={result.get('catalog_path') or result.get('path')}")
+    lines.append(f"file_exists={result.get('file_exists')}")
+    lines.append(f"file_bytes={result.get('file_bytes')}")
     lines.append(
         "scanned_objects={} unresolved_objects={} scanned_affordances={} "
         "written_records={} truncated={}".format(
@@ -721,9 +725,20 @@ def _collect_catalog_sample(sim_info):
 def _collect_catalog_top_auto(_sim_info):
     object_catalog = importlib.import_module("simulation_mode.object_catalog")
     n_limit = sm_settings.get_int("catalog_collect_top_auto_n", 40)
-    path = object_catalog.get_catalog_log_path()
-    if not path or not os.path.exists(path):
-        return ["CATALOG TOP AUTO (PROBE)", "no_catalog_data=true"]
+    main_path = object_catalog.get_catalog_log_path()
+    sample_path = object_catalog.get_catalog_log_path(
+        "simulation-mode-object-catalog-sample.jsonl"
+    )
+    path = None
+    source = "none"
+    if main_path and os.path.exists(main_path) and os.path.getsize(main_path) > 0:
+        path = main_path
+        source = "main"
+    elif sample_path and os.path.exists(sample_path) and os.path.getsize(sample_path) > 0:
+        path = sample_path
+        source = "sample"
+    if not path:
+        return ["CATALOG TOP AUTO (PROBE)", "no_catalog_data=true", "catalog_source=none"]
     records = []
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -740,9 +755,9 @@ def _collect_catalog_top_auto(_sim_info):
                 if record.get("allow_autonomous") is True:
                     records.append(record)
     except Exception:
-        return ["CATALOG TOP AUTO (PROBE)", "no_catalog_data=true"]
+        return ["CATALOG TOP AUTO (PROBE)", "no_catalog_data=true", f"catalog_source={source}"]
     if not records:
-        return ["CATALOG TOP AUTO (PROBE)", "no_catalog_data=true"]
+        return ["CATALOG TOP AUTO (PROBE)", "no_catalog_data=true", f"catalog_source={source}"]
 
     grouped = {}
     total = 0
@@ -759,7 +774,7 @@ def _collect_catalog_top_auto(_sim_info):
         group["affs"].append((aff_name, aff_guid))
         total += 1
 
-    lines = [f"CATALOG TOP AUTO (PROBE) n={n_limit}"]
+    lines = [f"CATALOG TOP AUTO (PROBE) n={n_limit}", f"catalog_source={source}"]
     for obj_name, details in grouped.items():
         lines.append(f"obj={obj_name} (id={details.get('obj_id')})")
         for aff_name, aff_guid in details["affs"]:
@@ -2154,6 +2169,10 @@ def _apply_death_toggle(_connection, output):
 
 def _set_enabled(enabled: bool, _connection, output):
     settings.enabled = enabled
+    try:
+        sm_settings.persist_setting("enabled", enabled)
+    except Exception:
+        pass
     if enabled:
         daemon = importlib.import_module("simulation_mode.daemon")
         daemon.set_connection(_connection)
@@ -2360,9 +2379,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             if success:
                 story_log = importlib.import_module("simulation_mode.story_log")
                 story_log.append_event(
-                    "daemon_started", sim_info=_active_sim_info(), build="56"
+                    "daemon_started", sim_info=_active_sim_info(), build="57"
                 )
-                output("Simulation daemon started successfully (build 56).")
+                output("Simulation daemon started successfully (build 57).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -2582,7 +2601,12 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         story_log = importlib.import_module("simulation_mode.story_log")
         _reload_settings(_connection, output)
         story_log.append_event("collect_ran", sim_info=_active_sim_info())
-        payload = _build_collect_payload()
+        try:
+            payload = _build_collect_payload()
+        except Exception as exc:
+            payload = ["COLLECT FAILED", str(exc)]
+            trace_lines = traceback.format_exc().strip().splitlines()
+            payload.extend(trace_lines[-20:])
         path = logging_utils.append_log_block(
             settings.collect_log_filename, "SimulationMode COLLECT", payload
         )
@@ -2592,20 +2616,35 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
     if action_key == "force_scan":
         object_catalog = importlib.import_module("simulation_mode.object_catalog")
         logging_utils = importlib.import_module("simulation_mode.logging_utils")
+        story_log = importlib.import_module("simulation_mode.story_log")
         sim_info = _active_sim_info()
         if sim_info is None:
             output("No active sim found.")
             return True
+        _reload_settings(_connection, output)
         result = object_catalog.scan_zone_catalog(
             sim_info,
             include_sims=None,
             include_non_autonomous=None,
             max_objects=None,
             max_affordances_per_object=None,
+            filename=None,
+        )
+        story_log.append_event(
+            "force_scan",
+            {
+                "ok": result.get("write_ok"),
+                "path": result.get("catalog_path") or result.get("path"),
+                "bytes": result.get("file_bytes"),
+            },
         )
         summary_lines = [
             f"force_scan ok={result.get('ok')}",
-            f"catalog_path={result.get('path')}",
+            f"config_path={get_config_path()}",
+            f"catalog_path={result.get('catalog_path') or result.get('path')}",
+            f"write_ok={result.get('write_ok')}",
+            f"file_exists={result.get('file_exists')}",
+            f"file_bytes={result.get('file_bytes')}",
             f"catalog_meta_written={'yes' if result.get('written_records') else 'no'}",
             f"scanned_objects={result.get('scanned_objects')}",
             f"unresolved_objects={result.get('unresolved_objects')}",
@@ -2613,6 +2652,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             f"written_records={result.get('written_records')}",
             f"truncated={result.get('truncated')}",
         ]
+        write_error = result.get("write_error")
+        if write_error:
+            summary_lines.append(f"write_error={write_error}")
         for line in summary_lines:
             output(line)
         notes = result.get("notes") or []

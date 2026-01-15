@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 import traceback
 
@@ -206,100 +207,86 @@ def _append_missing_keys(path):
         return
 
     try:
+        lines_to_append = []
+        core_keys = {
+            "enabled",
+            "auto_unpause",
+            "allow_death",
+            "allow_pregnancy",
+            "tick_seconds",
+        }
+        story_keys = {
+            "story_log_enabled",
+            "story_log_filename",
+            "collect_log_filename",
+        }
+        catalog_defaults = {
+            "catalog_include_sims",
+            "catalog_include_non_autonomous",
+            "catalog_max_objects",
+            "catalog_max_affordances_per_object",
+        }
+        collect_caps = {
+            "catalog_collect_sample_objects",
+            "catalog_collect_sample_affordances_per_object",
+            "catalog_collect_top_auto_n",
+        }
+        aff_meta = {"aff_meta_substrings"}
+
+        handled = set()
+
+        def _append_group(header, predicate):
+            added = False
+            for key, value in missing:
+                if key in handled:
+                    continue
+                if predicate(key):
+                    if not added:
+                        lines_to_append.append(header)
+                        added = True
+                    lines_to_append.append(f"{key}={value}")
+                    handled.add(key)
+            if added:
+                lines_to_append.append("")
+
+        _append_group("# Core", lambda key: key in core_keys)
+        _append_group(
+            "# Self-Care Guardian (no cheating; pushes real interactions)",
+            lambda key: key.startswith("guardian_"),
+        )
+        _append_group(
+            "# Life Director (skill progression; no cheating; pushes real interactions)",
+            lambda key: key.startswith("director_"),
+        )
+        _append_group("# Logging", lambda key: key in story_keys)
+        _append_group(
+            "# Optional integration if you ALSO installed a mod that defines this trait ID",
+            lambda key: key.startswith("integrate_") or key.startswith("better_autonomy_"),
+        )
+        _append_group("# catalog defaults (Build 56)", lambda key: key in catalog_defaults)
+        _append_group(
+            "# collect-integrated sampling caps (Build 56)", lambda key: key in collect_caps
+        )
+        _append_group(
+            "# affordance meta probe list (pipe-delimited)", lambda key: key in aff_meta
+        )
+
+        misc = [(key, value) for key, value in missing if key not in handled]
+        if misc:
+            lines_to_append.append("# Misc")
+            for key, value in misc:
+                lines_to_append.append(f"{key}={value}")
+                handled.add(key)
+            lines_to_append.append("")
+
+        if not lines_to_append:
+            return
+
         with open(path, "a", encoding="utf-8") as handle:
             handle.write("\n")
             handle.write("# --- Added by SimulationMode upgrade (missing keys) ---\n")
-            any_director = any(key.startswith("director_") for key, _ in missing)
-            any_guardian = any(key.startswith("guardian_") for key, _ in missing)
-            any_core = any(
-                key
-                in (
-                    "enabled",
-                    "auto_unpause",
-                    "allow_death",
-                    "allow_pregnancy",
-                    "tick_seconds",
-                )
-                for key, _ in missing
-            )
-            any_trait = any(
-                key.startswith("integrate_") or key.startswith("better_autonomy_")
-                for key, _ in missing
-            )
-            catalog_defaults = {
-                "catalog_include_sims",
-                "catalog_include_non_autonomous",
-                "catalog_max_objects",
-                "catalog_max_affordances_per_object",
-            }
-            collect_caps = {
-                "catalog_collect_sample_objects",
-                "catalog_collect_sample_affordances_per_object",
-                "catalog_collect_top_auto_n",
-            }
-            aff_meta = {"aff_meta_substrings"}
-            any_catalog_defaults = any(key in catalog_defaults for key, _ in missing)
-            any_collect_caps = any(key in collect_caps for key, _ in missing)
-            any_aff_meta = any(key in aff_meta for key, _ in missing)
-
-            if any_core:
-                handle.write("# Core\n")
-                for key, value in missing:
-                    if key in (
-                        "enabled",
-                        "auto_unpause",
-                        "allow_death",
-                        "allow_pregnancy",
-                        "tick_seconds",
-                    ):
-                        handle.write("{}={}\n".format(key, value))
-                handle.write("\n")
-
-            if any_guardian:
-                handle.write("# Self-Care Guardian (no cheating; pushes real interactions)\n")
-                for key, value in missing:
-                    if key.startswith("guardian_"):
-                        handle.write("{}={}\n".format(key, value))
-                handle.write("\n")
-
-            if any_director:
-                handle.write(
-                    "# Life Director (skill progression; no cheating; pushes real interactions)\n"
-                )
-                for key, value in missing:
-                    if key.startswith("director_"):
-                        handle.write("{}={}\n".format(key, value))
-                handle.write("\n")
-
-            if any_trait:
-                handle.write(
-                    "# Optional integration if you ALSO installed a mod that defines this trait ID\n"
-                )
-                for key, value in missing:
-                    if key.startswith("integrate_") or key.startswith("better_autonomy_"):
-                        handle.write("{}={}\n".format(key, value))
-                handle.write("\n")
-
-            if any_catalog_defaults:
-                handle.write("# catalog defaults (Build 56)\n")
-                for key, value in missing:
-                    if key in catalog_defaults:
-                        handle.write("{}={}\n".format(key, value))
-                handle.write("\n")
-
-            if any_collect_caps:
-                handle.write("# collect-integrated sampling caps (Build 56)\n")
-                for key, value in missing:
-                    if key in collect_caps:
-                        handle.write("{}={}\n".format(key, value))
-                handle.write("\n")
-
-            if any_aff_meta:
-                handle.write("# affordance meta probe list (pipe-delimited)\n")
-                for key, value in missing:
-                    if key in aff_meta:
-                        handle.write("{}={}\n".format(key, value))
-                handle.write("\n")
+            handle.write("\n".join(lines_to_append).rstrip())
+            handle.write("\n")
     except Exception:
         return
 
@@ -530,7 +517,14 @@ def load_settings(target):
         return
 
     data = _parse_lines(contents.splitlines())
+    aliases = {
+        "enable": "enabled",
+        "include_sim": "catalog_include_sims",
+        "include_sims": "catalog_include_sims",
+        "include_non_autonomous": "catalog_include_non_autonomous",
+    }
     for key, raw_value in data.items():
+        key = aliases.get(key, key)
         value = _parse_value(raw_value)
         try:
             if key == "enabled":
@@ -726,6 +720,40 @@ def load_settings(target):
 def save_settings(_target):
     path = Path(get_config_path())
     _ensure_template(path)
+
+
+def persist_setting(key: str, value) -> bool:
+    path = Path(get_config_path())
+    try:
+        if not path.exists():
+            _ensure_template(path)
+        if path.exists():
+            contents = path.read_text(encoding="utf-8")
+            lines = contents.splitlines()
+        else:
+            lines = []
+        if isinstance(value, bool):
+            serialized = "true" if value else "false"
+        elif isinstance(value, int) and not isinstance(value, bool):
+            serialized = str(value)
+        else:
+            serialized = str(value)
+        pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+        replaced = False
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith(";"):
+                continue
+            if pattern.match(line):
+                lines[index] = f"{key}={serialized}"
+                replaced = True
+                break
+        if not replaced:
+            lines.append(f"{key}={serialized}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 
 def get_bool(key, default):

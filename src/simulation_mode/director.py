@@ -153,7 +153,91 @@ def _interaction_is_idle(interaction):
                 continue
         if value is not None:
             return bool(value)
+    type_name = ""
+    try:
+        type_name = type(interaction).__name__.lower()
+    except Exception:
+        type_name = ""
+    if type_name == "emotion_idle":
+        return True
+    if type_name.startswith("idle_"):
+        return True
+    if type_name.endswith("_idle") or type_name.endswith("idle"):
+        return True
+
+    affordance = None
+    for attr in ("affordance", "_affordance"):
+        affordance = getattr(interaction, attr, None)
+        if affordance is not None:
+            break
+    if affordance is None:
+        getter = getattr(interaction, "get_affordance", None)
+        if callable(getter):
+            try:
+                affordance = getter()
+            except Exception:
+                affordance = None
+    if affordance is not None:
+        aff_name = None
+        try:
+            aff_name = getattr(affordance, "__name__", None)
+        except Exception:
+            aff_name = None
+        if not aff_name:
+            try:
+                aff_name = getattr(affordance, "name", None)
+            except Exception:
+                aff_name = None
+        if not aff_name:
+            try:
+                aff_name = str(affordance)
+            except Exception:
+                aff_name = None
+        if aff_name:
+            aff_name = str(aff_name).lower()
+            if aff_name == "sim-stand":
+                return True
+            if aff_name == "idle" or aff_name.endswith("idle") or "_idle" in aff_name:
+                return True
     return False
+
+
+def _interaction_affordance_name(interaction, limit=80):
+    affordance = None
+    for attr in ("affordance", "_affordance"):
+        affordance = getattr(interaction, attr, None)
+        if affordance is not None:
+            break
+    if affordance is None:
+        getter = getattr(interaction, "get_affordance", None)
+        if callable(getter):
+            try:
+                affordance = getter()
+            except Exception:
+                affordance = None
+    if affordance is None:
+        return None
+    name = None
+    try:
+        name = getattr(affordance, "__name__", None)
+    except Exception:
+        name = None
+    if not name:
+        try:
+            name = getattr(affordance, "name", None)
+        except Exception:
+            name = None
+    if not name:
+        try:
+            name = str(affordance)
+        except Exception:
+            name = None
+    if not name:
+        return None
+    name = str(name).strip()
+    if len(name) > limit:
+        return f"{name[:limit]}..."
+    return name
 
 
 def _interaction_is_cancelable(interaction):
@@ -208,22 +292,31 @@ def _is_sim_busy(sim):
     idle = _interaction_is_idle(interaction)
     queue_len = _queue_size(sim)
     if queue_len is not None and queue_len > 0:
+        aff_name = _interaction_affordance_name(interaction)
         detail = (
             "queued interactions present "
             f"source={source} type={type(interaction).__name__} "
             f"current_idle={idle} queue_len={queue_len}"
         )
+        if aff_name:
+            detail = f"{detail} aff_name={aff_name}"
         return True, detail
     if idle:
+        aff_name = _interaction_affordance_name(interaction)
         detail = (
             "idle interaction "
             f"source={source} type={type(interaction).__name__} idle=True queue_len={queue_len}"
         )
+        if aff_name:
+            detail = f"{detail} aff_name={aff_name}"
         return False, detail
+    aff_name = _interaction_affordance_name(interaction)
     detail = (
         "active interaction "
         f"source={source} type={type(interaction).__name__} idle=False queue_len={queue_len}"
     )
+    if aff_name:
+        detail = f"{detail} aff_name={aff_name}"
     return True, detail
 
 

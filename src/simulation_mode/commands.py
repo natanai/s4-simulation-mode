@@ -2155,7 +2155,11 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         if parsed:
             if success:
-                output("Simulation daemon started successfully (build 52).")
+                story_log = importlib.import_module("simulation_mode.story_log")
+                story_log.append_event(
+                    "daemon_started", sim_info=_active_sim_info(), build="53"
+                )
+                output("Simulation daemon started successfully (build 53).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -2372,7 +2376,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "collect":
         logging_utils = importlib.import_module("simulation_mode.logging_utils")
+        story_log = importlib.import_module("simulation_mode.story_log")
         _reload_settings(_connection, output)
+        story_log.append_event("collect_ran", sim_info=_active_sim_info())
         payload = _build_collect_payload()
         path = logging_utils.append_log_block(
             settings.collect_log_filename, "SimulationMode COLLECT", payload

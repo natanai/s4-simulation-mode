@@ -468,6 +468,14 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
             pushed, message = _attempt_care_push(sim, key, force=force)
             if pushed:
                 _record_push(sim_id, now)
+                from simulation_mode import story_log
+                story_log.append_event(
+                    "guardian_push",
+                    sim_info=sim_info,
+                    message=message,
+                    motive_key=key,
+                    force=force,
+                )
                 return True, message
             last_failure_message = message
     else:
@@ -477,6 +485,14 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
         pushed, message = _attempt_care_push(sim, lowest_key, force=force)
         if pushed:
             _record_push(sim_id, now)
+            from simulation_mode import story_log
+            story_log.append_event(
+                "guardian_push",
+                sim_info=sim_info,
+                message=message,
+                motive_key=lowest_key,
+                force=force,
+            )
             return True, message
         last_failure_message = message
 
@@ -493,6 +509,14 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
             pushed, message = _attempt_care_push(sim, "motive_social", force=force)
             if pushed:
                 _record_push(sim_id, now)
+                from simulation_mode import story_log
+                story_log.append_event(
+                    "guardian_push",
+                    sim_info=sim_info,
+                    message=message,
+                    motive_key="motive_social",
+                    force=force,
+                )
                 return True, message
             last_failure_message = message
 

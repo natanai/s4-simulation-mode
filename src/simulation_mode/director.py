@@ -187,19 +187,43 @@ def _queue_size(sim):
 def _is_sim_busy(sim):
     queue = getattr(sim, "queue", None)
     running = getattr(queue, "running", None) if queue is not None else None
-    if running is not None:
-        detail = f"running interaction queue.running type={type(running).__name__}"
-        return True, detail
-    interaction, source = _get_current_interaction(sim)
+    interaction = None
+    source = None
+    if isinstance(running, (list, tuple)):
+        if running:
+            interaction = running[0]
+            source = "queue.running"
+    elif running is not None:
+        interaction = running
+        source = "queue.running"
+
     if interaction is None:
-        queue_len = _queue_size(sim)
-        detail = f"no active interaction (queue_len={queue_len})"
+        interaction, source = _get_current_interaction(sim)
+        if interaction is None:
+            queue_len = _queue_size(sim)
+            detail = f"no active interaction source=get_current_interaction:{source} queue_len={queue_len}"
+            return False, detail
+        source = f"get_current_interaction:{source}"
+
+    idle = _interaction_is_idle(interaction)
+    queue_len = _queue_size(sim)
+    if queue_len is not None and queue_len > 0:
+        detail = (
+            "queued interactions present "
+            f"source={source} type={type(interaction).__name__} "
+            f"current_idle={idle} queue_len={queue_len}"
+        )
+        return True, detail
+    if idle:
+        detail = (
+            "idle interaction "
+            f"source={source} type={type(interaction).__name__} idle=True queue_len={queue_len}"
+        )
         return False, detail
-    if _interaction_is_idle(interaction):
-        queue_len = _queue_size(sim)
-        detail = f"current interaction idle source={source} queue_len={queue_len}"
-        return False, detail
-    detail = f"active interaction source={source} type={type(interaction).__name__}"
+    detail = (
+        "active interaction "
+        f"source={source} type={type(interaction).__name__} idle=False queue_len={queue_len}"
+    )
     return True, detail
 
 
@@ -2134,6 +2158,16 @@ def _record_action(sim_info, skill_key, reason, now):
         object_label, affordance_label = _LAST_ACTION_DETAILS
     action = f"{sim_name} -> {skill_key} ({reason}) via {object_label}:{affordance_label}"
     _append_action(action)
+    from simulation_mode import story_log
+    story_log.append_event(
+        "director_push",
+        sim_info=sim_info,
+        skill_key=skill_key,
+        reason=reason,
+        object_label=object_label,
+        affordance_label=affordance_label,
+        action=action,
+    )
     last_director_time = now
 
 

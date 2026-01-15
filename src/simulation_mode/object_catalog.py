@@ -18,7 +18,7 @@ def get_catalog_log_path(filename: str = None) -> str:
         return ""
 
 
-def write_catalog_records(records, path: str) -> None:
+def write_catalog_records(records, path: str, mode: str = "a") -> None:
     if not path:
         return
     try:
@@ -26,7 +26,7 @@ def write_catalog_records(records, path: str) -> None:
     except Exception:
         return
     try:
-        with open(path, "a", encoding="utf-8") as handle:
+        with open(path, mode, encoding="utf-8") as handle:
             for record in records:
                 handle.write(json.dumps(record, ensure_ascii=False))
                 handle.write("\n")
@@ -159,6 +159,54 @@ def _zone_id():
         return None
 
 
+def _resolve_object(obj):
+    if obj is None:
+        return None
+    if hasattr(obj, "get_super_affordances"):
+        return obj
+    services = __import__("services")
+    try:
+        oid = int(obj)
+    except Exception:
+        oid = None
+    if oid:
+        try:
+            om = services.object_manager()
+            if om is not None:
+                return om.get(oid)
+        except Exception:
+            return None
+    for key in ("id", "object_id"):
+        if hasattr(obj, key):
+            try:
+                oid2 = int(getattr(obj, key))
+                om = services.object_manager()
+                if om is not None:
+                    return om.get(oid2)
+            except Exception:
+                pass
+    return None
+
+
+def _call_get_super_affordances(obj):
+    getter = getattr(obj, "get_super_affordances", None)
+    if not callable(getter):
+        return None, "no_get_super_affordances"
+    try:
+        return getter(), None
+    except TypeError:
+        pass
+    try:
+        return getter(None), None
+    except TypeError:
+        pass
+    try:
+        return getter(None, None), None
+    except Exception as exc:
+        return None, "get_super_affordances_error:{}".format(repr(exc))
+    return None, "get_super_affordances_typeerror"
+
+
 def scan_zone_catalog(
     sim_info,
     *,
@@ -169,28 +217,50 @@ def scan_zone_catalog(
     push_utils = __import__("simulation_mode.push_utils", fromlist=["iter_objects"])
     notes = []
     records = []
+    sample = []
     scanned_objects = 0
+    unresolved_objects = 0
     scanned_affordances = 0
     written_records = 0
     truncated = False
     zone_id = _zone_id()
+    ok = True
 
     try:
-        for obj in push_utils.iter_objects():
-            scanned_objects += 1
-            if scanned_objects > max_objects:
+        for raw in push_utils.iter_objects():
+            obj = _resolve_object(raw)
+            if len(sample) < 10:
+                sample.append(
+                    {
+                        "raw_type": type(raw).__name__,
+                        "resolved_type": type(obj).__name__ if obj is not None else None,
+                        "resolved": obj is not None,
+                        "has_get_super_affordances": bool(
+                            hasattr((obj or raw), "get_super_affordances")
+                        ),
+                    }
+                )
+            if obj is None:
+                unresolved_objects += 1
+                continue
+            if scanned_objects >= max_objects:
                 truncated = True
                 notes.append("max_objects cap reached")
                 break
+            scanned_objects += 1
 
             try:
-                getter = _safe_get(obj, "get_super_affordances")
-                if callable(getter):
-                    affordances = getter()
-                else:
-                    affordances = None
+                affordances, error = _call_get_super_affordances(obj)
+                if error:
+                    notes.append(
+                        "get_super_affordances obj_id={} error={}".format(
+                            _safe_get(obj, "id"), error
+                        )
+                    )
             except Exception as exc:
-                notes.append(f"get_super_affordances error obj_id={_safe_get(obj, 'id')} err={exc}")
+                notes.append(
+                    f"get_super_affordances error obj_id={_safe_get(obj, 'id')} err={exc}"
+                )
                 continue
 
             if affordances is None:
@@ -251,37 +321,37 @@ def scan_zone_catalog(
                 records.append(record)
                 written_records += 1
     except Exception as exc:
+        ok = False
         notes.append(f"scan error: {exc}")
-        return {
-            "ok": False,
-            "path": "",
-            "scanned_objects": scanned_objects,
-            "scanned_affordances": scanned_affordances,
-            "written_records": 0,
-            "truncated": truncated,
-            "notes": notes,
-        }
 
     path = get_catalog_log_path()
-    if records:
-        write_catalog_records(records, path)
-    elif path:
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8"):
-                pass
-        except Exception:
-            pass
-
+    if scanned_affordances == 0 and scanned_objects > 0:
+        notes.append(
+            "ZERO_AFFORDANCES: resolved objects exist but none returned affordances; likely resolution/call failure"
+        )
     if scanned_affordances > 0 and written_records == 0:
         notes.append(
             "all_affordances_filtered_out; check allow_ud/allow_auto extraction and picker/debug flags"
         )
+    meta_record = {
+        "type": "meta",
+        "ts": time.time(),
+        "scanned_objects": scanned_objects,
+        "unresolved_objects": unresolved_objects,
+        "scanned_affordances": scanned_affordances,
+        "written_records": written_records + 1,
+        "notes": notes,
+        "sample": sample,
+    }
+    if path:
+        write_catalog_records([meta_record] + records, path, mode="w")
+        written_records += 1
 
     return {
-        "ok": True,
+        "ok": ok,
         "path": path,
         "scanned_objects": scanned_objects,
+        "unresolved_objects": unresolved_objects,
         "scanned_affordances": scanned_affordances,
         "written_records": written_records,
         "truncated": truncated,

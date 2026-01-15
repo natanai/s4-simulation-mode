@@ -39,6 +39,8 @@ KNOWN_DEFAULTS = [
     ("director_skill_allow_list", ""),
     ("director_skill_block_list", ""),
     ("collect_log_filename", "simulation-mode-collect.log"),
+    ("story_log_enabled", "true"),
+    ("story_log_filename", "simulation-mode-story.log"),
     ("integrate_better_autonomy_trait", "false"),
     ("better_autonomy_trait_id", "3985292068"),
 ]
@@ -117,6 +119,8 @@ def _build_default_template_text():
     lines.append("director_skill_allow_list={}".format(defaults["director_skill_allow_list"]))
     lines.append("director_skill_block_list={}".format(defaults["director_skill_block_list"]))
     lines.append("collect_log_filename={}".format(defaults["collect_log_filename"]))
+    lines.append("story_log_enabled={}".format(defaults["story_log_enabled"]))
+    lines.append("story_log_filename={}".format(defaults["story_log_filename"]))
     lines.append("")
     lines.append(
         "# Optional integration if you ALSO installed a mod that defines this trait ID"
@@ -254,6 +258,8 @@ class SimulationModeSettings:
         director_skill_allow_list=None,
         director_skill_block_list=None,
         collect_log_filename="simulation-mode-collect.log",
+        story_log_enabled=True,
+        story_log_filename="simulation-mode-story.log",
         integrate_better_autonomy_trait=False,
         better_autonomy_trait_id=3985292068,
     ):
@@ -284,6 +290,8 @@ class SimulationModeSettings:
         self.director_skill_allow_list = director_skill_allow_list or []
         self.director_skill_block_list = director_skill_block_list or []
         self.collect_log_filename = collect_log_filename
+        self.story_log_enabled = story_log_enabled
+        self.story_log_filename = story_log_filename
         self.integrate_better_autonomy_trait = integrate_better_autonomy_trait
         self.better_autonomy_trait_id = better_autonomy_trait_id
 
@@ -560,6 +568,14 @@ def load_settings(target):
                 target.collect_log_filename = (
                     value if value else "simulation-mode-collect.log"
                 )
+            elif key == "story_log_enabled":
+                if isinstance(value, bool):
+                    target.story_log_enabled = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "story_log_filename":
+                value = str(raw_value).strip()
+                target.story_log_filename = value if value else "simulation-mode-story.log"
             elif key == "integrate_better_autonomy_trait":
                 if isinstance(value, bool):
                     target.integrate_better_autonomy_trait = value

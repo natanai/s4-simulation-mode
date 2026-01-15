@@ -100,6 +100,8 @@ def _status_lines():
         f"director_skill_allow_list={settings.director_skill_allow_list}",
         f"director_skill_block_list={settings.director_skill_block_list}",
         f"collect_log_filename={settings.collect_log_filename}",
+        f"story_log_enabled={settings.story_log_enabled}",
+        f"story_log_filename={settings.story_log_filename}",
         f"integrate_better_autonomy_trait={settings.integrate_better_autonomy_trait}",
         f"better_autonomy_trait_id={settings.better_autonomy_trait_id}",
         f"daemon_running={running}",
@@ -2091,7 +2093,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _emit_status(output)
         if parsed:
             if success:
-                output("Simulation daemon started successfully (build 50).")
+                output("Simulation daemon started successfully (build 51).")
             else:
                 output(f"Simulation daemon failed to start: {error}")
         return True
@@ -2260,6 +2262,30 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _append_simulation_log(lines)
         output(f"guardian_now force={force} pushed={ok}")
         output(message)
+        return True
+
+    if action_key == "story":
+        story_log = importlib.import_module("simulation_mode.story_log")
+        subcommand = key.strip().lower() if key else None
+        if subcommand is None or subcommand == "tail":
+            count = 20
+            if value:
+                try:
+                    count = int(value)
+                except Exception:
+                    count = 20
+            count = max(1, min(200, count))
+            for line in story_log.tail(count):
+                output(f"- {line}")
+            return True
+        if subcommand == "path":
+            output(story_log.get_story_log_path())
+            return True
+        if subcommand == "clear":
+            story_log.clear()
+            output("story log cleared")
+            return True
+        output("usage: simulation story path|tail [n]|clear")
         return True
 
     if action_key == "want_now":

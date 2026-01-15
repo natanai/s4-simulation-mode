@@ -796,7 +796,6 @@ def _execute_skill_plan_push(sim_id):
 
 def _build_collect_payload():
     director = importlib.import_module("simulation_mode.director")
-    probes = importlib.import_module("simulation_mode.probes")
     services = importlib.import_module("services")
     lines = []
     lines.extend(_collect_config_snapshot())
@@ -839,10 +838,6 @@ def _build_collect_payload():
         lines.extend(_collect_aspiration_probe_lines(sim_info))
         lines.append("")
         lines.extend(_collect_internal_probes(sim_info))
-    lines.append("")
-    probes.probe_affordances(active_sim, lines)
-    lines.append("")
-    probes.probe_aspirations(sim_info, lines)
     return "\n".join(lines)
 
 
@@ -1839,10 +1834,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         _reload_settings(_connection, output)
         payload = _build_collect_payload()
         path = logging_utils.append_log_block(
-            settings.collect_log_filename,
-            "SimulationMode COLLECT",
-            payload,
-            mode="w",
+            settings.collect_log_filename, "SimulationMode COLLECT", payload
         )
         output(f"collect_written={path}")
         return True

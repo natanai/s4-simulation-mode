@@ -21,9 +21,10 @@ def get_lines():
     return list(_LOG_BUFFER)
 
 
-def append_log_block(filename: str, header: str, body: str) -> str:
+def append_log_block(filename: str, header: str, body: str, *, mode: str = "a") -> str:
     cfg = os.path.abspath(get_config_path())
     folder = os.path.dirname(cfg)
+    os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, filename)
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     lines = [
@@ -32,7 +33,7 @@ def append_log_block(filename: str, header: str, body: str) -> str:
     ]
     if body:
         lines.append(body.rstrip("\n"))
-    with open(path, "a", encoding="utf-8") as handle:
+    with open(path, mode, encoding="utf-8") as handle:
         handle.write("\n".join(lines))
         handle.write("\n")
     return path

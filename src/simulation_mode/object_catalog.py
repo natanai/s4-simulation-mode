@@ -278,6 +278,111 @@ def _walk_for_guid64s(value, max_nodes=200, max_depth=4):
     return found
 
 
+def _extract_skill_gain_guid_candidates(affordance):
+    """
+    Returns (gain_guid_candidates_set, evidence_tokens_list)
+    Only examines tuning areas that plausibly APPLY skill gain:
+      - skill_loot_data / _skill_loot_data / get_skill_loot_data()
+      - loot / loots / loot_actions / outcome_actions / basic_extras
+      - commodity/statistic changes if present on the affordance
+    Must be fully safe: never throw.
+    """
+    gain = set()
+    evidence = []
+
+    def _record_token(token):
+        if token and token not in evidence:
+            evidence.append(token)
+
+    def _add_guid(guid, token=None):
+        if guid is None:
+            return
+        try:
+            gain.add(int(guid))
+        except Exception:
+            return
+        if token:
+            _record_token(token)
+
+    def _delta_items(value):
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            try:
+                return list(value.items())
+            except Exception:
+                return []
+        try:
+            return list(value)
+        except Exception:
+            return []
+
+    for attr in (
+        "commodity_changes",
+        "_commodity_changes",
+        "statistic_changes",
+        "_statistic_changes",
+    ):
+        value = _safe_get(affordance, attr)
+        items = _delta_items(value)
+        if not items:
+            continue
+        any_added = False
+        for item in items:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            stat, delta = item[0], item[1]
+            try:
+                delta_value = float(delta)
+            except Exception:
+                continue
+            if delta_value <= 0:
+                continue
+            guid = _tuning_guid64(stat)
+            if guid is None:
+                continue
+            _add_guid(guid)
+            any_added = True
+        if any_added:
+            _record_token("delta_change")
+
+    for attr in ("skill_loot_data", "_skill_loot_data"):
+        value = _safe_get(affordance, attr)
+        if value is None:
+            continue
+        before = len(gain)
+        gain.update(_walk_for_guid64s(value))
+        if len(gain) > before:
+            _record_token("skill_loot_data")
+
+    getter = _safe_get(affordance, "get_skill_loot_data")
+    if callable(getter):
+        ok_call, loot_result, _err = _safe_call_with_sim_guess(getter, None)
+        if ok_call and loot_result is not None:
+            before = len(gain)
+            gain.update(_walk_for_guid64s(loot_result))
+            if len(gain) > before:
+                _record_token("skill_loot_data")
+
+    for attr in (
+        "loot",
+        "loots",
+        "loot_actions",
+        "outcome_actions",
+        "basic_extras",
+        "_basic_extras",
+    ):
+        value = _safe_get(affordance, attr)
+        if value is None:
+            continue
+        before = len(gain)
+        gain.update(_walk_for_guid64s(value))
+        if len(gain) > before:
+            _record_token("loot_list")
+
+    return gain, evidence
+
+
 def _obj_name(obj):
     try:
         definition = _safe_get(obj, "definition")
@@ -640,6 +745,8 @@ def scan_zone_catalog(
 
                 loot_ref_guid_candidates = set()
                 skill_guid_candidates = set()
+                skill_gain_guid_candidates = set()
+                skill_gain_evidence = []
                 skill_loot_sig = None
                 skill_loot_call_ok = False
                 skill_loot_err = None
@@ -679,6 +786,11 @@ def scan_zone_catalog(
                         value = _safe_get(aff, attr_name)
                         _add_skill_guids(value)
                         loot_ref_guid_candidates.update(_walk_for_guid64s(value))
+                gain_candidates, gain_evidence = _extract_skill_gain_guid_candidates(aff)
+                if gain_candidates:
+                    skill_gain_guid_candidates.update(gain_candidates)
+                if gain_evidence:
+                    skill_gain_evidence.extend(gain_evidence)
                 loot_ref_guids = sorted(loot_ref_guid_candidates)
                 try:
                     Types = sims4.resources.Types
@@ -710,6 +822,7 @@ def scan_zone_catalog(
                     break
 
                 skill_guids = _filter_skill_guids(skill_guid_candidates)
+                skill_gain_guids = _filter_skill_guids(skill_gain_guid_candidates)
                 record = {
                     "ts": time.time(),
                     "zone_id": zone_id,
@@ -734,6 +847,8 @@ def scan_zone_catalog(
                     "commodity_flag_guids": commodity_flag_guids,
                     "loot_ref_guids": loot_ref_guids,
                     "skill_guids": skill_guids,
+                    "skill_gain_guids": skill_gain_guids,
+                    "skill_gain_evidence": skill_gain_evidence,
                     "skill_loot_sig": skill_loot_sig,
                     "skill_loot_call_ok": skill_loot_call_ok,
                     "skill_loot_err": skill_loot_err,

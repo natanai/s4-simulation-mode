@@ -85,6 +85,7 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
         "by_ad_guid": {},
         "by_loot_guid": {},
         "by_skill_guid": {},
+        "by_skill_gain_guid": {},
         "generated_ts": time.time(),
     }
     if not catalog_path or not os.path.exists(catalog_path):
@@ -136,10 +137,13 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
                     _add_to_index(data["by_loot_guid"], guid, entry)
                 for guid in record.get("skill_guids") or []:
                     _add_to_index(data["by_skill_guid"], guid, entry)
+                for guid in record.get("skill_gain_guids") or []:
+                    _add_to_index(data["by_skill_gain_guid"], guid, entry)
     except Exception:
         return data
     meta = data.get("meta") or {}
     by_skill = data.get("by_skill_guid") or {}
+    by_skill_gain = data.get("by_skill_gain_guid") or {}
     if isinstance(by_skill, dict):
         keys = list(by_skill.keys())
         meta["by_skill_guid_keys"] = len(keys)
@@ -149,6 +153,15 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
     else:
         meta["by_skill_guid_keys"] = 0
         meta["by_skill_guid_entries_total"] = 0
+    if isinstance(by_skill_gain, dict):
+        keys = list(by_skill_gain.keys())
+        meta["by_skill_gain_guid_keys"] = len(keys)
+        meta["by_skill_gain_guid_entries_total"] = sum(
+            len(by_skill_gain.get(key, [])) for key in keys
+        )
+    else:
+        meta["by_skill_gain_guid_keys"] = 0
+        meta["by_skill_gain_guid_entries_total"] = 0
     meta["skill_guid_observed_counts"] = observed_counts
     data["meta"] = meta
     return data
@@ -175,15 +188,22 @@ def get_candidates_for_skill_guid(guid64: int, caps: dict):
     return list(index.get(str(guid64)) or [])
 
 
+def get_candidates_for_skill_gain_guid(guid64: int, caps: dict):
+    if not guid64 or not caps:
+        return []
+    index = caps.get("by_skill_gain_guid") or {}
+    return list(index.get(str(guid64)) or [])
+
+
 def is_skill_kernel_valid(caps: dict):
     if caps is None:
         return False, "caps_missing"
     meta = caps.get("meta", {})
     if meta.get("truncated") is True:
         return False, "caps_truncated"
-    by_skill = caps.get("by_skill_guid") or {}
-    if not by_skill or len(by_skill) == 0:
-        return False, "by_skill_guid_empty"
+    by_skill_gain = caps.get("by_skill_gain_guid") or {}
+    if not by_skill_gain or len(by_skill_gain) == 0:
+        return False, "by_skill_gain_guid_empty"
     return True, "ok"
 
 

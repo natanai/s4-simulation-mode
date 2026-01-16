@@ -90,9 +90,14 @@ _last_motive_snapshot_by_sim = {}
 _LAST_CAREER_PROBE = []
 _LAST_STARTED_SKILL_VALUES = {}
 _LAST_STARTED_SKILL_GUID_MISSING = 0
+_recent_skill_plans = {}
+_PENDING_SKILL_PLAN_VERIFY_ALARMS = {}
 
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
+_SKILL_PLAN_COOLDOWN_SECONDS = 1800
+_SKILL_PLAN_VERIFY_SIM_MINUTES = 30
+_SKILL_PLAN_VERIFY_REAL_SECONDS = 30
 
 _CACHED_WHIM_MANAGER = None
 _CACHED_WHIM_TYPE_NAME = None
@@ -746,6 +751,21 @@ def _skill_level_and_max_for_guid(sim_info, guid64):
     return None, None
 
 
+def _skill_progress_snapshot(sim_info, guid64):
+    if sim_info is None or not guid64:
+        return None, None
+    tracker, _source = _resolve_skill_tracker(sim_info)
+    for skill in _iter_all_skill_objects(sim_info):
+        skill_guid = _skill_guid64(skill)
+        if skill_guid != guid64:
+            continue
+        level = _skill_level_from_skill(skill)
+        value = _skill_value_from_skill(skill, skill_tracker=tracker)
+        return level, value
+    level, _max_level = _skill_level_and_max_for_guid(sim_info, guid64)
+    return level, None
+
+
 def _iter_careers(sim_info):
     if sim_info is None:
         return []
@@ -1256,6 +1276,76 @@ def get_last_skill_plan_strict():
     return _LAST_SKILL_PLAN_STRICT
 
 
+def _schedule_skill_plan_verification(
+    sim_info,
+    chosen_skill_guid,
+    baseline_level,
+    baseline_value,
+    interaction_aff_guid64,
+    interaction_aff_name,
+):
+    if sim_info is None:
+        return False, "sim_info_missing"
+    sim_id = getattr(sim_info, "sim_id", None)
+    if sim_id is None:
+        return False, "sim_id_missing"
+    alarms = __import__("alarms")
+    clock = __import__("clock")
+    story_log = __import__("simulation_mode.story_log", fromlist=["append_event"])
+
+    old_handle = _PENDING_SKILL_PLAN_VERIFY_ALARMS.pop(sim_id, None)
+    if old_handle is not None:
+        try:
+            old_handle.cancel()
+        except Exception:
+            pass
+
+    def _verify_cb(handle, _sim_id=sim_id):
+        _PENDING_SKILL_PLAN_VERIFY_ALARMS.pop(_sim_id, None)
+        sim_info_inner = _resolve_sim_info_by_id(_sim_id)
+        after_level = None
+        after_value = None
+        if sim_info_inner is not None:
+            after_level, after_value = _skill_progress_snapshot(
+                sim_info_inner, chosen_skill_guid
+            )
+        increased = "unknown"
+        if baseline_level is not None and after_level is not None:
+            try:
+                increased = bool(after_level > baseline_level)
+            except Exception:
+                increased = "unknown"
+        elif baseline_value is not None and after_value is not None:
+            try:
+                increased = bool(after_value > baseline_value)
+            except Exception:
+                increased = "unknown"
+        story_log.append_event(
+            "skill_plan_verify",
+            sim_info=sim_info_inner,
+            sim_id=_sim_id,
+            chosen_skill_guid=chosen_skill_guid,
+            baseline_level=baseline_level,
+            baseline_value=baseline_value,
+            after_level=after_level,
+            after_value=after_value,
+            increased=increased,
+            interaction_aff_guid64=interaction_aff_guid64,
+            interaction_aff_name=interaction_aff_name,
+        )
+
+    try:
+        timespan = clock.interval_in_sim_minutes(_SKILL_PLAN_VERIFY_SIM_MINUTES)
+    except Exception:
+        timespan = clock.interval_in_real_seconds(_SKILL_PLAN_VERIFY_REAL_SECONDS)
+    try:
+        handle = alarms.add_alarm_real_time(sim_info, timespan, _verify_cb)
+    except Exception as exc:
+        return False, f"alarm_failed:{exc}"
+    _PENDING_SKILL_PLAN_VERIFY_ALARMS[sim_id] = handle
+    return True, "ok"
+
+
 def try_push_skill_plan_strict(sim_info, caps: dict):
     global _LAST_SKILL_PLAN_STRICT
     details = {
@@ -1277,7 +1367,28 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         _LAST_SKILL_PLAN_STRICT = details
         return False, details
 
-    by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
+    by_skill = caps.get("by_skill_gain_guid") if isinstance(caps, dict) else {}
+    sim_id = _sim_identifier(sim_info)
+    now = time.time()
+    if _recent_skill_plans:
+        for key, ts in list(_recent_skill_plans.items()):
+            if now - ts > (_SKILL_PLAN_COOLDOWN_SECONDS * 4):
+                _recent_skill_plans.pop(key, None)
+
+    def _cooldown_key(guid, entry):
+        return (
+            sim_id,
+            guid,
+            entry.get("obj_def_id"),
+            entry.get("aff_guid64"),
+        )
+
+    def _on_cooldown(guid, entry):
+        key = _cooldown_key(guid, entry)
+        ts = _recent_skill_plans.get(key)
+        if ts is None:
+            return False
+        return (now - ts) < _SKILL_PLAN_COOLDOWN_SECONDS
 
     def _cand_count_for_skill(guid):
         candidates = []
@@ -1288,6 +1399,8 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
             if entry.get("safe_push", True) is False:
                 continue
             if entry.get("allow_autonomous", True) is False:
+                continue
+            if _on_cooldown(guid, entry):
                 continue
             count += 1
         return count
@@ -1322,6 +1435,8 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                 continue
             if entry.get("is_picker_like") is True:
                 breakdown["picker_like"] += 1
+            if _on_cooldown(guid, entry):
+                continue
             after_filters += 1
         return {
             "skill_guid_present_in_caps": present,
@@ -1403,7 +1518,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         details["reason"] = "no_skill_candidates_with_affordances"
         details["candidate_skill_count"] = candidate_skill_count
         details["top_zero_skills"] = top_zero
-        details["by_skill_guid_keys_count"] = by_skill_keys_count
+        details["by_skill_gain_guid_keys_count"] = by_skill_keys_count
         details.update(primary_diag)
         details["observed_in_catalog"] = (
             _observed_in_catalog(primary_guid) if primary_guid is not None else 0
@@ -1424,11 +1539,18 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
     details["chosen_skill_label"] = chosen_skill_label
     details["candidate_skill_count"] = candidate_skill_count
 
-    candidates = capabilities.get_candidates_for_skill_guid(chosen_skill_guid, caps)
+    baseline_level, baseline_value = _skill_progress_snapshot(
+        sim_info, chosen_skill_guid
+    )
+
+    candidates = capabilities.get_candidates_for_skill_gain_guid(
+        chosen_skill_guid, caps
+    )
     candidates = [
         entry
         for entry in candidates
         if entry.get("allow_autonomous") is True and entry.get("safe_push") is True
+        and not _on_cooldown(chosen_skill_guid, entry)
     ]
     details["candidate_affordance_count"] = len(candidates)
     if not candidates:
@@ -1442,6 +1564,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
     for entry in candidates:
         def_id = entry.get("obj_def_id")
         aff_guid = entry.get("aff_guid64")
+        aff_name = entry.get("aff_name")
         ok = push_by_def_and_aff_guid(
             sim,
             def_id,
@@ -1449,10 +1572,24 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
             reason=f"director_skill_plan_strict_guid64={chosen_skill_guid}",
         )
         details["attempted_pushes"].append(
-            {"def_id": def_id, "aff_guid64": aff_guid, "ok": ok}
+            {
+                "def_id": def_id,
+                "aff_guid64": aff_guid,
+                "aff_name": aff_name,
+                "ok": ok,
+            }
         )
         if ok:
             details["reason"] = "ok"
+            _recent_skill_plans[_cooldown_key(chosen_skill_guid, entry)] = time.time()
+            _schedule_skill_plan_verification(
+                sim_info,
+                chosen_skill_guid,
+                baseline_level,
+                baseline_value,
+                aff_guid,
+                aff_name,
+            )
             _LAST_SKILL_PLAN_STRICT = details
             return True, details
 
@@ -1551,6 +1688,27 @@ def _resolve_sim_instance_by_id(sim_id):
     except Exception:
         sim = None
     return sim
+
+
+def _resolve_sim_info_by_id(sim_id):
+    if not sim_id:
+        return None
+    try:
+        mgr = services.sim_info_manager()
+    except Exception:
+        mgr = None
+    if mgr is None:
+        return None
+    for fn_name in ("get", "get_sim_info_by_id", "get_by_id"):
+        fn = getattr(mgr, fn_name, None)
+        if callable(fn):
+            try:
+                sim_info = fn(sim_id)
+            except Exception:
+                sim_info = None
+            if sim_info is not None:
+                return sim_info
+    return None
 
 
 def try_push_social_interaction(sim, target_sim):
@@ -2549,7 +2707,7 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
         _append_debug(f"{sim_name}: FAIL capabilities missing for skill_guid64={skill_guid64}")
         return False
 
-    candidates = capabilities.get_candidates_for_skill_guid(skill_guid64, caps)
+    candidates = capabilities.get_candidates_for_skill_gain_guid(skill_guid64, caps)
     candidates = [entry for entry in candidates if entry.get("allow_autonomous") is True]
     if probe_details is not None:
         probe_details["resolution_type"] = "CAPABILITY_INDEX"

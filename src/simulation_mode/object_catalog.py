@@ -638,11 +638,21 @@ def scan_zone_catalog(
                         {guid for guid in (_tuning_guid64(item) for item in flags_list) if guid is not None}
                     )
 
-                loot_ref_guids = []
+                loot_ref_guid_candidates = set()
                 skill_guid_candidates = set()
                 skill_loot_sig = None
                 skill_loot_call_ok = False
                 skill_loot_err = None
+
+                def _add_skill_guids(value):
+                    if value is None:
+                        return
+                    skill_guid_candidates.update(_walk_for_guid64s(value))
+
+                if hasattr(aff, "skill_loot_data"):
+                    _add_skill_guids(_safe_get(aff, "skill_loot_data"))
+                if hasattr(aff, "_skill_loot_data"):
+                    _add_skill_guids(_safe_get(aff, "_skill_loot_data"))
                 if hasattr(aff, "_get_skill_loot_data"):
                     getter = _safe_get(aff, "_get_skill_loot_data")
                     skill_loot_sig = _safe_signature_str(getter)
@@ -651,18 +661,38 @@ def scan_zone_catalog(
                     if not ok_call and err:
                         skill_loot_err = err[:180]
                     if ok_call:
-                        loot_ref_guids = sorted(_walk_for_guid64s(loot_result))
-                        skill_guid_candidates.update(loot_ref_guids)
+                        loot_ref_guid_candidates.update(_walk_for_guid64s(loot_result))
+                        skill_guid_candidates.update(loot_ref_guid_candidates)
                 getter = _safe_get(aff, "get_skill_loot_data")
                 if callable(getter):
                     ok_call, loot_result, err = _safe_call_with_sim_guess(getter, sim)
                     if ok_call:
                         skill_guid_candidates.update(_walk_for_guid64s(loot_result))
+                        loot_ref_guid_candidates.update(_walk_for_guid64s(loot_result))
                     elif err:
                         if skill_loot_err:
                             skill_loot_err = f"{skill_loot_err}; get_skill_loot_data={err[:180]}"
                         else:
                             skill_loot_err = f"get_skill_loot_data={err[:180]}"
+                for attr_name in ("loot", "loots", "loot_actions"):
+                    if hasattr(aff, attr_name):
+                        value = _safe_get(aff, attr_name)
+                        _add_skill_guids(value)
+                        loot_ref_guid_candidates.update(_walk_for_guid64s(value))
+                loot_ref_guids = sorted(loot_ref_guid_candidates)
+                try:
+                    Types = sims4.resources.Types
+                    action_mgr = services.get_instance_manager(getattr(Types, "ACTION"))
+                except Exception:
+                    action_mgr = None
+                if action_mgr is not None:
+                    for loot_guid in loot_ref_guids:
+                        try:
+                            tuning = action_mgr.get(loot_guid)
+                        except Exception:
+                            tuning = None
+                        if tuning is not None:
+                            skill_guid_candidates.update(_walk_for_guid64s(tuning))
 
                 if is_cheat or is_debug or is_picker_like or is_staging_like:
                     filtered_flags += 1

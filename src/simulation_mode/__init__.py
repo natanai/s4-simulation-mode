@@ -1,3 +1,3 @@
-__version__ = "0.5.0+build63"
+__version__ = "0.5.0+build65"
 # Import commands module for side-effects (console command registration).
 from . import commands  # noqa: F401

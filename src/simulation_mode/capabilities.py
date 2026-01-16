@@ -89,6 +89,7 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
     }
     if not catalog_path or not os.path.exists(catalog_path):
         return data
+    observed_counts = {}
 
     def _add_to_index(index, guid, entry):
         key = str(guid)
@@ -108,6 +109,9 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
                 if record.get("type") == "meta":
                     data["meta"] = record
                     continue
+                for guid in record.get("skill_guids") or []:
+                    key = str(guid)
+                    observed_counts[key] = observed_counts.get(key, 0) + 1
                 safe_push = bool(record.get("safe_push"))
                 if not safe_push:
                     continue
@@ -142,6 +146,10 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
         meta["by_skill_guid_entries_total"] = sum(
             len(by_skill.get(key, [])) for key in keys
         )
+    else:
+        meta["by_skill_guid_keys"] = 0
+        meta["by_skill_guid_entries_total"] = 0
+    meta["skill_guid_observed_counts"] = observed_counts
     data["meta"] = meta
     return data
 

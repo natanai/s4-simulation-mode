@@ -1277,27 +1277,148 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         _LAST_SKILL_PLAN_STRICT = details
         return False, details
 
-    chosen_skill_guid = None
-    chosen_skill_label = None
-    candidate_skill_count = 0
+    by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
+
+    def _cand_count_for_skill(guid):
+        candidates = []
+        if isinstance(by_skill, dict):
+            candidates = list(by_skill.get(str(guid)) or by_skill.get(guid) or [])
+        count = 0
+        for entry in candidates:
+            if entry.get("safe_push", True) is False:
+                continue
+            if entry.get("allow_autonomous", True) is False:
+                continue
+            count += 1
+        return count
+
+    def _candidate_diagnostics(guid):
+        if not isinstance(by_skill, dict):
+            return {
+                "skill_guid_present_in_caps": False,
+                "caps_candidate_total": 0,
+                "caps_candidate_after_filters": 0,
+                "caps_filtered_breakdown": {
+                    "safe_push_false": 0,
+                    "allow_autonomous_false": 0,
+                    "picker_like": 0,
+                },
+            }
+        key = str(guid)
+        present = key in by_skill or guid in by_skill
+        raw_candidates = list(by_skill.get(key) or by_skill.get(guid) or [])
+        breakdown = {
+            "safe_push_false": 0,
+            "allow_autonomous_false": 0,
+            "picker_like": 0,
+        }
+        after_filters = 0
+        for entry in raw_candidates:
+            if entry.get("safe_push", True) is False:
+                breakdown["safe_push_false"] += 1
+                continue
+            if entry.get("allow_autonomous", True) is False:
+                breakdown["allow_autonomous_false"] += 1
+                continue
+            if entry.get("is_picker_like") is True:
+                breakdown["picker_like"] += 1
+            after_filters += 1
+        return {
+            "skill_guid_present_in_caps": present,
+            "caps_candidate_total": len(raw_candidates),
+            "caps_candidate_after_filters": after_filters,
+            "caps_filtered_breakdown": breakdown,
+        }
+
+    def _observed_in_catalog(guid):
+        meta = caps.get("meta") if isinstance(caps, dict) else None
+        observed = meta.get("skill_guid_observed_counts") if isinstance(meta, dict) else None
+        if not isinstance(observed, dict):
+            return 0
+        return observed.get(str(guid), 0)
+
+    candidate_skills = []
+    had_career_candidates = False
     if settings.director_prefer_career_skills:
         career_candidates, _satisfied = _filter_unmet_career_skills(
             sim_info, _get_career_skill_candidates(sim_info)
         )
         if career_candidates:
-            chosen_skill_guid = career_candidates[0]
-            candidate_skill_count = len(career_candidates)
-    if chosen_skill_guid is None and settings.director_fallback_to_started_skills:
+            had_career_candidates = True
+            for guid in career_candidates:
+                candidate_skills.append(
+                    {"guid": guid, "label": None, "source": "career"}
+                )
+    if not had_career_candidates and settings.director_fallback_to_started_skills:
         started_candidates = _get_started_skill_candidates(sim_info)
         if started_candidates:
-            chosen_skill_guid = _skill_guid64(started_candidates[0])
-            chosen_skill_label = _skill_label(started_candidates[0])
-            candidate_skill_count = len(started_candidates)
-    if not chosen_skill_guid:
+            for skill_obj in started_candidates:
+                guid = _skill_guid64(skill_obj)
+                if guid is None:
+                    continue
+                candidate_skills.append(
+                    {
+                        "guid": guid,
+                        "label": _skill_label(skill_obj),
+                        "source": "started",
+                    }
+                )
+    candidate_skill_count = len(candidate_skills)
+    if not candidate_skills:
         details["reason"] = "no_skill_candidates"
         details["candidate_skill_count"] = candidate_skill_count
         _LAST_SKILL_PLAN_STRICT = details
         return False, details
+
+    covered = [
+        (item["guid"], _cand_count_for_skill(item["guid"]), index)
+        for index, item in enumerate(candidate_skills)
+    ]
+    covered = [(guid, count, index) for guid, count, index in covered if count > 0]
+    if not covered:
+        by_skill_keys_count = len(by_skill) if isinstance(by_skill, dict) else 0
+        top_zero = []
+        for item in candidate_skills[:10]:
+            guid = item["guid"]
+            diag = _candidate_diagnostics(guid)
+            diag.update(
+                {
+                    "skill_guid64": guid,
+                    "candidate_count": 0,
+                    "observed_in_catalog": _observed_in_catalog(guid),
+                }
+            )
+            top_zero.append(diag)
+        primary_guid = candidate_skills[0]["guid"] if candidate_skills else None
+        primary_diag = _candidate_diagnostics(primary_guid) if primary_guid is not None else {
+            "skill_guid_present_in_caps": False,
+            "caps_candidate_total": 0,
+            "caps_candidate_after_filters": 0,
+            "caps_filtered_breakdown": {
+                "safe_push_false": 0,
+                "allow_autonomous_false": 0,
+                "picker_like": 0,
+            },
+        }
+        details["reason"] = "no_skill_candidates_with_affordances"
+        details["candidate_skill_count"] = candidate_skill_count
+        details["top_zero_skills"] = top_zero
+        details["by_skill_guid_keys_count"] = by_skill_keys_count
+        details.update(primary_diag)
+        details["observed_in_catalog"] = (
+            _observed_in_catalog(primary_guid) if primary_guid is not None else 0
+        )
+        _LAST_SKILL_PLAN_STRICT = details
+        return False, details
+
+    chosen_skill_guid, _chosen_count, _chosen_index = max(
+        covered, key=lambda item: (item[1], -item[2])
+    )
+    chosen_skill_label = None
+    for item in candidate_skills:
+        if item["guid"] == chosen_skill_guid:
+            chosen_skill_label = item["label"]
+            break
 
     details["chosen_skill_guid"] = chosen_skill_guid
     details["chosen_skill_label"] = chosen_skill_label
@@ -1312,6 +1433,9 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
     details["candidate_affordance_count"] = len(candidates)
     if not candidates:
         details["reason"] = "no_affordance_candidates_for_skill_guid"
+        diag = _candidate_diagnostics(chosen_skill_guid)
+        details.update(diag)
+        details["observed_in_catalog"] = _observed_in_catalog(chosen_skill_guid)
         _LAST_SKILL_PLAN_STRICT = details
         return False, details
 

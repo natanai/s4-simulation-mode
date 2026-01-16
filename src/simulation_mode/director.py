@@ -83,6 +83,7 @@ last_director_debug = []
 
 _LAST_ACTION_DETAILS = None
 _LAST_WANT_DETAILS = None
+_LAST_SKILL_PLAN_STRICT = None
 
 _last_motive_snapshot_by_sim = {}
 _LAST_CAREER_PROBE = []
@@ -465,6 +466,28 @@ def _skill_guid64(skill_obj):
         except Exception:
             continue
     return None
+
+
+def _skill_label(skill_obj):
+    if skill_obj is None:
+        return None
+    for attr in ("name", "display_name", "skill_name"):
+        value = getattr(skill_obj, attr, None)
+        if value is None:
+            continue
+        try:
+            value = value() if callable(value) else value
+        except Exception:
+            continue
+        if value:
+            return str(value)
+    class_name = getattr(getattr(skill_obj, "__class__", None), "__name__", None)
+    if class_name:
+        return class_name
+    try:
+        return str(skill_obj)
+    except Exception:
+        return None
 
 
 def _skill_is_allowed(skill_obj):
@@ -1226,6 +1249,93 @@ def run_skill_plan(sim_info, sim, now, force=False, source="director"):
         "failure_counts": failure_counts,
         "attempted": attempted,
     }
+
+
+def get_last_skill_plan_strict():
+    if isinstance(_LAST_SKILL_PLAN_STRICT, dict):
+        return dict(_LAST_SKILL_PLAN_STRICT)
+    return _LAST_SKILL_PLAN_STRICT
+
+
+def try_push_skill_plan_strict(sim_info, caps: dict):
+    global _LAST_SKILL_PLAN_STRICT
+    details = {
+        "chosen_skill_guid": None,
+        "chosen_skill_label": None,
+        "candidate_skill_count": 0,
+        "candidate_affordance_count": 0,
+        "attempted_pushes": [],
+        "reason": "unknown",
+    }
+    sim = None
+    if sim_info is not None:
+        try:
+            sim = sim_info.get_sim_instance()
+        except Exception:
+            sim = None
+    if sim is None:
+        details["reason"] = "sim_instance_missing"
+        _LAST_SKILL_PLAN_STRICT = details
+        return False, details
+
+    chosen_skill_guid = None
+    chosen_skill_label = None
+    candidate_skill_count = 0
+    if settings.director_prefer_career_skills:
+        career_candidates, _satisfied = _filter_unmet_career_skills(
+            sim_info, _get_career_skill_candidates(sim_info)
+        )
+        if career_candidates:
+            chosen_skill_guid = career_candidates[0]
+            candidate_skill_count = len(career_candidates)
+    if chosen_skill_guid is None and settings.director_fallback_to_started_skills:
+        started_candidates = _get_started_skill_candidates(sim_info)
+        if started_candidates:
+            chosen_skill_guid = _skill_guid64(started_candidates[0])
+            chosen_skill_label = _skill_label(started_candidates[0])
+            candidate_skill_count = len(started_candidates)
+    if not chosen_skill_guid:
+        details["reason"] = "no_skill_candidates"
+        details["candidate_skill_count"] = candidate_skill_count
+        _LAST_SKILL_PLAN_STRICT = details
+        return False, details
+
+    details["chosen_skill_guid"] = chosen_skill_guid
+    details["chosen_skill_label"] = chosen_skill_label
+    details["candidate_skill_count"] = candidate_skill_count
+
+    candidates = capabilities.get_candidates_for_skill_guid(chosen_skill_guid, caps)
+    candidates = [
+        entry
+        for entry in candidates
+        if entry.get("allow_autonomous") is True and entry.get("safe_push") is True
+    ]
+    details["candidate_affordance_count"] = len(candidates)
+    if not candidates:
+        details["reason"] = "no_affordance_candidates_for_skill_guid"
+        _LAST_SKILL_PLAN_STRICT = details
+        return False, details
+
+    for entry in candidates:
+        def_id = entry.get("obj_def_id")
+        aff_guid = entry.get("aff_guid64")
+        ok = push_by_def_and_aff_guid(
+            sim,
+            def_id,
+            aff_guid,
+            reason=f"director_skill_plan_strict_guid64={chosen_skill_guid}",
+        )
+        details["attempted_pushes"].append(
+            {"def_id": def_id, "aff_guid64": aff_guid, "ok": ok}
+        )
+        if ok:
+            details["reason"] = "ok"
+            _LAST_SKILL_PLAN_STRICT = details
+            return True, details
+
+    details["reason"] = "all_candidate_pushes_failed"
+    _LAST_SKILL_PLAN_STRICT = details
+    return False, details
 
 
 def _is_proto_message(obj):

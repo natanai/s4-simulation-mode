@@ -13,7 +13,7 @@ logger = sims4.log.Logger("SimulationMode")
 
 
 KNOWN_DEFAULTS = [
-    ("enabled", "false"),
+    ("enabled", "true"),
     ("auto_unpause", "true"),
     ("allow_death", "false"),
     ("allow_pregnancy", "false"),
@@ -25,15 +25,18 @@ KNOWN_DEFAULTS = [
     ("guardian_per_sim_cooldown_seconds", "60"),
     ("guardian_max_pushes_per_sim_per_hour", "30"),
     ("director_enabled", "true"),
-    ("director_check_seconds", "20"),
+    ("director_check_seconds", "30"),
     ("director_min_safe_motive", "-10"),
     ("director_green_motive_percent", "0.50"),
     ("director_green_min_commodities", "6"),
     ("director_allow_social_goals", "false"),
     ("director_allow_social_wants", "true"),
     ("director_enable_wants", "false"),
+    ("director_enable_aspirations", "false"),
+    ("director_wants_weight", "0.0"),
+    ("director_aspiration_weight", "0.0"),
     ("director_use_guardian_when_low", "true"),
-    ("director_per_sim_cooldown_seconds", "300"),
+    ("director_per_sim_cooldown_seconds", "120"),
     ("director_max_pushes_per_sim_per_hour", "12"),
     ("director_prefer_career_skills", "true"),
     ("director_fallback_to_started_skills", "true"),
@@ -52,6 +55,7 @@ KNOWN_DEFAULTS = [
     ("verified_gain_min_delta_value", "0.001"),
     ("invalidation_strikes_to_skip", "1"),
     ("verified_prefer_verified", "true"),
+    ("skill_plan_max_skill_attempts", "5"),
     ("skill_cycle_window_sim_minutes", "720"),
     ("skill_cycle_block_last_skill_if_other_viable", "true"),
     ("catalog_include_sims", "false"),
@@ -114,6 +118,15 @@ def _build_default_template_text():
     )
     lines.append(
         "director_enable_wants={}".format(defaults["director_enable_wants"])
+    )
+    lines.append(
+        "director_enable_aspirations={}".format(defaults["director_enable_aspirations"])
+    )
+    lines.append(
+        "director_wants_weight={}".format(defaults["director_wants_weight"])
+    )
+    lines.append(
+        "director_aspiration_weight={}".format(defaults["director_aspiration_weight"])
     )
     lines.append(
         "director_use_guardian_when_low={}".format(defaults["director_use_guardian_when_low"])
@@ -180,6 +193,11 @@ def _build_default_template_text():
     )
     lines.append(
         "verified_prefer_verified={}".format(defaults["verified_prefer_verified"])
+    )
+    lines.append(
+        "skill_plan_max_skill_attempts={}".format(
+            defaults["skill_plan_max_skill_attempts"]
+        )
     )
     lines.append(
         "skill_cycle_window_sim_minutes={}".format(
@@ -374,15 +392,18 @@ class SimulationModeSettings:
         guardian_per_sim_cooldown_seconds=60,
         guardian_max_pushes_per_sim_per_hour=30,
         director_enabled=True,
-        director_check_seconds=20,
+        director_check_seconds=30,
         director_min_safe_motive=-10,
         director_green_motive_percent=0.5,
         director_green_min_commodities=6,
         director_allow_social_goals=False,
         director_allow_social_wants=True,
         director_enable_wants=False,
+        director_enable_aspirations=False,
+        director_wants_weight=0.0,
+        director_aspiration_weight=0.0,
         director_use_guardian_when_low=True,
-        director_per_sim_cooldown_seconds=300,
+        director_per_sim_cooldown_seconds=120,
         director_max_pushes_per_sim_per_hour=12,
         director_prefer_career_skills=True,
         director_fallback_to_started_skills=True,
@@ -401,6 +422,7 @@ class SimulationModeSettings:
         verified_gain_min_delta_value=0.001,
         invalidation_strikes_to_skip=1,
         verified_prefer_verified=True,
+        skill_plan_max_skill_attempts=5,
         skill_cycle_window_sim_minutes=720,
         skill_cycle_block_last_skill_if_other_viable=True,
         catalog_include_sims=False,
@@ -434,6 +456,9 @@ class SimulationModeSettings:
         self.director_allow_social_goals = director_allow_social_goals
         self.director_allow_social_wants = director_allow_social_wants
         self.director_enable_wants = director_enable_wants
+        self.director_enable_aspirations = director_enable_aspirations
+        self.director_wants_weight = director_wants_weight
+        self.director_aspiration_weight = director_aspiration_weight
         self.director_use_guardian_when_low = director_use_guardian_when_low
         self.director_per_sim_cooldown_seconds = director_per_sim_cooldown_seconds
         self.director_max_pushes_per_sim_per_hour = director_max_pushes_per_sim_per_hour
@@ -454,6 +479,7 @@ class SimulationModeSettings:
         self.verified_gain_min_delta_value = verified_gain_min_delta_value
         self.invalidation_strikes_to_skip = invalidation_strikes_to_skip
         self.verified_prefer_verified = verified_prefer_verified
+        self.skill_plan_max_skill_attempts = skill_plan_max_skill_attempts
         self.skill_cycle_window_sim_minutes = skill_cycle_window_sim_minutes
         self.skill_cycle_block_last_skill_if_other_viable = (
             skill_cycle_block_last_skill_if_other_viable
@@ -723,6 +749,21 @@ def load_settings(target):
                     target.director_enable_wants = value
                 else:
                     _log_invalid_value(key, raw_value)
+            elif key == "director_enable_aspirations":
+                if isinstance(value, bool):
+                    target.director_enable_aspirations = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_wants_weight":
+                try:
+                    target.director_wants_weight = float(value)
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_aspiration_weight":
+                try:
+                    target.director_aspiration_weight = float(value)
+                except Exception:
+                    _log_invalid_value(key, raw_value)
             elif key == "director_use_guardian_when_low":
                 if isinstance(value, bool):
                     target.director_use_guardian_when_low = value
@@ -814,6 +855,11 @@ def load_settings(target):
                 if isinstance(value, bool):
                     target.verified_prefer_verified = value
                 else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "skill_plan_max_skill_attempts":
+                try:
+                    target.skill_plan_max_skill_attempts = max(1, int(value))
+                except Exception:
                     _log_invalid_value(key, raw_value)
             elif key == "skill_cycle_window_sim_minutes":
                 try:

@@ -1,4 +1,4 @@
-# Simulation Mode (The Sims 4) — Settings (Build 61)
+# Simulation Mode (The Sims 4) — Settings (Build 69)
 # Edit this file, then in-game run: simulation reload
 
 enabled=true
@@ -17,20 +17,24 @@ guardian_max_pushes_per_sim_per_hour=30
 
 # Life Director (skill progression; no cheating; pushes real interactions)
 director_enabled=true
-director_check_seconds=90
+director_check_seconds=30
 director_min_safe_motive=-10
 director_green_motive_percent=0.50
 director_green_min_commodities=6
 director_allow_social_goals=false
 director_allow_social_wants=true
 director_enable_wants=false
+director_enable_aspirations=false
+director_wants_weight=0.0
+director_aspiration_weight=0.0
 director_use_guardian_when_low=true
-director_per_sim_cooldown_seconds=300
+director_per_sim_cooldown_seconds=120
 director_max_pushes_per_sim_per_hour=12
 director_prefer_career_skills=true
 director_fallback_to_started_skills=true
 director_skill_allow_list=
 director_skill_block_list=
+skill_plan_max_skill_attempts=5
 collect_log_filename=simulation-mode-collect.log
 story_log_enabled=true
 story_log_filename=simulation-mode-story.log

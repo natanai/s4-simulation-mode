@@ -18,6 +18,7 @@ from simulation_mode import clock_utils
 from simulation_mode import guardian
 from simulation_mode import probe_log
 from simulation_mode import capabilities
+from simulation_mode import sim_scope
 from simulation_mode import settings as settings_module
 from simulation_mode import story_log
 from simulation_mode import verified_gain
@@ -100,11 +101,16 @@ _LAST_STARTED_SKILL_GUID_MISSING = 0
 _recent_skill_plans = {}
 _VERIFY_ALARM_HANDLES = {}
 _RECENT_SKILL_SUCCESS = {}
+_RECENT_SKILL_SUCCESS_LIST = {}
+_LAST_SUCCESS_SKILL = {}
+_failed_skill_until = {}
+_candidate_fail_strikes = {}
 _last_idle_override_ts = 0.0
 
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
 _SKILL_PLAN_COOLDOWN_SECONDS = 1800
+_SKILL_FAIL_COOLDOWN_SECONDS = 600
 
 _CACHED_WHIM_MANAGER = None
 _CACHED_WHIM_TYPE_NAME = None
@@ -369,29 +375,7 @@ def _safe_min_motive(snapshot):
 
 def _get_instantiated_sims_for_director():
     sims = []
-    try:
-        active_sim = services.get_active_sim()
-    except Exception:
-        active_sim = None
-    if active_sim is not None:
-        sims.append(active_sim)
-
-    try:
-        sim_infos = list(services.sim_info_manager().get_all())
-    except Exception:
-        sim_infos = []
-
-    current_zone_id = None
-    try:
-        current_zone_id = services.current_zone_id()
-    except Exception:
-        pass
-
-    for sim_info in sim_infos:
-        if sim_info is None:
-            continue
-        if active_sim is not None and getattr(active_sim, "sim_info", None) is sim_info:
-            continue
+    for sim_info in sim_scope.iter_active_household_sim_infos() or []:
         sim = None
         try:
             get_inst = getattr(sim_info, "get_sim_instance", None)
@@ -403,16 +387,10 @@ def _get_instantiated_sims_for_director():
         except Exception:
             sim = None
         if sim is None:
+            sim = getattr(sim_info, "sim", None)
+        if sim is None:
             continue
-
-        try:
-            zid = getattr(sim, "zone_id", None)
-            if current_zone_id is not None and zid == current_zone_id:
-                sims.append(sim)
-            else:
-                sims.append(sim)
-        except Exception:
-            sims.append(sim)
+        sims.append(sim)
 
     seen = set()
     out = []
@@ -1526,6 +1504,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         "candidate_skill_count": 0,
         "candidate_affordance_count": 0,
         "attempted_pushes": [],
+        "attempted_skill_guids": [],
         "reason": "unknown",
     }
     sim = None
@@ -1542,10 +1521,18 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
     by_skill = caps.get("by_skill_gain_guid") if isinstance(caps, dict) else {}
     sim_id = _sim_identifier(sim_info)
     now = time.time()
+    max_skill_attempts = getattr(settings, "skill_plan_max_skill_attempts", 5) or 5
     if _recent_skill_plans:
         for key, ts in list(_recent_skill_plans.items()):
             if now - ts > (_SKILL_PLAN_COOLDOWN_SECONDS * 4):
                 _recent_skill_plans.pop(key, None)
+    fail_map = _failed_skill_until.get(sim_id, {})
+    if fail_map:
+        for guid, until in list(fail_map.items()):
+            if now >= until:
+                fail_map.pop(guid, None)
+        if not fail_map:
+            _failed_skill_until.pop(sim_id, None)
 
     def _cooldown_key(guid, entry):
         return (
@@ -1561,6 +1548,17 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         if ts is None:
             return False
         return (now - ts) < _SKILL_PLAN_COOLDOWN_SECONDS
+
+    def _skill_on_fail_cooldown(guid):
+        skill_map = _failed_skill_until.get(sim_id, {})
+        until = skill_map.get(guid)
+        if until is None:
+            return False
+        return now < until
+
+    def _mark_skill_failed(guid):
+        skill_map = _failed_skill_until.setdefault(sim_id, {})
+        skill_map[guid] = now + _SKILL_FAIL_COOLDOWN_SECONDS
 
     def _cand_count_for_skill(guid):
         candidates = []
@@ -1650,6 +1648,9 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                         "source": "started",
                     }
                 )
+    candidate_skills = [
+        item for item in candidate_skills if not _skill_on_fail_cooldown(item["guid"])
+    ]
     skill_cycle_entries = _RECENT_SKILL_SUCCESS.get(sim_id, [])
     if skill_cycle_entries:
         window_seconds = settings.skill_cycle_window_sim_minutes * 60
@@ -1674,7 +1675,20 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
             candidate_skills = [
                 item for item in candidate_skills if item["guid"] not in recent_skill_guids
             ]
+    recent_success_list = list(_RECENT_SKILL_SUCCESS_LIST.get(sim_id, []))
+    if recent_success_list:
+        recent_set = set(recent_success_list)
+        has_alternative = any(
+            item["guid"] not in recent_set
+            and _cand_count_for_skill(item["guid"]) > 0
+            for item in candidate_skills
+        )
+        if has_alternative:
+            candidate_skills = [
+                item for item in candidate_skills if item["guid"] not in recent_set
+            ]
     candidate_skill_count = len(candidate_skills)
+    details["candidate_skill_count"] = candidate_skill_count
     if not candidate_skills:
         details["reason"] = "no_skill_candidates"
         details["candidate_skill_count"] = candidate_skill_count
@@ -1762,107 +1776,122 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         score += random.random()
         return score
 
-    chosen = max(skill_meta, key=_score)
-    chosen_skill_guid = chosen["guid"]
-    chosen_skill_label = None
-    for item in candidate_skills:
-        if item["guid"] == chosen_skill_guid:
-            chosen_skill_label = item["label"]
+    ordered_skills = sorted(skill_meta, key=_score, reverse=True)
+    last_success_skill = _LAST_SUCCESS_SKILL.get(sim_id)
+    if last_success_skill is not None and len(ordered_skills) > 1:
+        for idx, entry in enumerate(ordered_skills):
+            if entry["guid"] == last_success_skill:
+                ordered_skills.append(ordered_skills.pop(idx))
+                break
+
+    attempted_skills = 0
+    last_failure_reason = "unknown"
+    for skill_entry in ordered_skills:
+        if attempted_skills >= max_skill_attempts:
             break
+        chosen_skill_guid = skill_entry["guid"]
+        chosen_skill_label = None
+        for item in candidate_skills:
+            if item["guid"] == chosen_skill_guid:
+                chosen_skill_label = item["label"]
+                break
+        attempted_skills += 1
+        details["attempted_skill_guids"].append(chosen_skill_guid)
+        baseline = _read_skill_progress_for_guid(sim_info, chosen_skill_guid)
 
-    details["chosen_skill_guid"] = chosen_skill_guid
-    details["chosen_skill_label"] = chosen_skill_label
-    details["candidate_skill_count"] = candidate_skill_count
-
-    baseline = _read_skill_progress_for_guid(sim_info, chosen_skill_guid)
-
-    candidates = capabilities.get_candidates_for_skill_gain_guid(
-        chosen_skill_guid, caps
-    )
-    candidates = [
-        entry
-        for entry in candidates
-        if entry.get("allow_autonomous") is True and entry.get("safe_push") is True
-        and not _on_cooldown(chosen_skill_guid, entry)
-    ]
-    verified_path = _get_verified_gain_path()
-    verified_data = verified_gain.load(verified_path)
-    filtered = []
-    for entry in candidates:
-        def_id = entry.get("obj_def_id")
-        aff_guid = entry.get("aff_guid64")
-        status = verified_gain.get_status(
-            verified_data, chosen_skill_guid, def_id, aff_guid
+        candidates = capabilities.get_candidates_for_skill_gain_guid(
+            chosen_skill_guid, caps
         )
-        if status == "invalid":
-            continue
-        filtered.append((entry, status))
-    if settings.verified_prefer_verified:
+        candidates = [
+            entry
+            for entry in candidates
+            if entry.get("allow_autonomous") is True
+            and entry.get("safe_push") is True
+            and not _on_cooldown(chosen_skill_guid, entry)
+        ]
+        verified_path = _get_verified_gain_path()
+        verified_data = verified_gain.load(verified_path)
+        filtered = []
+        for entry in candidates:
+            def_id = entry.get("obj_def_id")
+            aff_guid = entry.get("aff_guid64")
+            status = verified_gain.get_status(
+                verified_data, chosen_skill_guid, def_id, aff_guid
+            )
+            if status == "invalid":
+                continue
+            filtered.append((entry, status))
         verified_candidates = [entry for entry, status in filtered if status == "verified"]
         unknown_candidates = [entry for entry, status in filtered if status != "verified"]
         random.shuffle(verified_candidates)
         random.shuffle(unknown_candidates)
         candidates = verified_candidates + unknown_candidates
-    else:
-        candidates = [entry for entry, _status in filtered]
-    details["candidate_affordance_count"] = len(candidates)
-    if not candidates:
-        details["reason"] = "no_affordance_candidates_for_skill_guid"
-        diag = _candidate_diagnostics(chosen_skill_guid)
-        details.update(diag)
-        details["observed_in_catalog"] = _observed_in_catalog(chosen_skill_guid)
-        _LAST_SKILL_PLAN_STRICT = details
-        return False, details
+        details["candidate_affordance_count"] = len(candidates)
+        if not candidates:
+            last_failure_reason = "no_affordance_candidates_for_skill_guid"
+            continue
 
-    for entry in candidates:
-        def_id = entry.get("obj_def_id")
-        aff_guid = entry.get("aff_guid64")
-        aff_name = entry.get("aff_name")
-        ok = push_by_def_and_aff_guid(
-            sim,
-            def_id,
-            aff_guid,
-            reason=f"director_skill_plan_strict_guid64={chosen_skill_guid}",
-        )
-        details["attempted_pushes"].append(
-            {
-                "def_id": def_id,
-                "aff_guid64": aff_guid,
-                "aff_name": aff_name,
-                "ok": ok,
-            }
-        )
-        if ok:
-            details["reason"] = "ok"
-            _recent_skill_plans[_cooldown_key(chosen_skill_guid, entry)] = time.time()
-            if sim_id is not None:
-                history = _RECENT_SKILL_SUCCESS.get(sim_id, [])
-                window_seconds = settings.skill_cycle_window_sim_minutes * 60
-                history = [
-                    (guid, ts)
-                    for guid, ts in history
-                    if (time.time() - ts) <= window_seconds
-                ]
-                history.append((chosen_skill_guid, time.time()))
-                _RECENT_SKILL_SUCCESS[sim_id] = history
-            if settings.verify_skill_gain_enabled:
-                started_ts = time.time()
-                _schedule_skill_plan_verification(
-                    sim_info,
-                    chosen_skill_guid,
-                    chosen_skill_label,
-                    baseline,
-                    def_id,
-                    aff_guid,
-                    aff_name,
-                    1,
-                    settings.verify_skill_gain_delay_sim_minutes,
-                    expected_def_id=def_id,
-                    expected_aff_guid64=aff_guid,
-                    started_ts=started_ts,
-                    max_wait_sim_minutes=120,
+        for entry in candidates:
+            def_id = entry.get("obj_def_id")
+            aff_guid = entry.get("aff_guid64")
+            aff_name = entry.get("aff_name")
+            strike_key = (chosen_skill_guid, def_id, aff_guid)
+            strike_count = _candidate_fail_strikes.get(strike_key, 0)
+            if strike_count >= 3:
+                details["attempted_pushes"].append(
+                    {
+                        "def_id": def_id,
+                        "aff_guid64": aff_guid,
+                        "aff_name": aff_name,
+                        "ok": False,
+                        "reason": "skip_fail_strikes",
+                    }
                 )
-                if settings.verify_skill_gain_recheck_count > 1:
+                continue
+            ok, push_reason = push_by_def_and_aff_guid(
+                sim,
+                def_id,
+                aff_guid,
+                reason=f"director_skill_plan_strict_guid64={chosen_skill_guid}",
+                precheck=True,
+            )
+            normalized_reason = push_reason
+            if normalized_reason.startswith("no_object_instances") or normalized_reason.startswith(
+                "no_world_objects"
+            ):
+                normalized_reason = "skip_no_object"
+            details["attempted_pushes"].append(
+                {
+                    "def_id": def_id,
+                    "aff_guid64": aff_guid,
+                    "aff_name": aff_name,
+                    "ok": ok,
+                    "reason": normalized_reason,
+                }
+            )
+            if ok:
+                details["reason"] = "ok"
+                details["chosen_skill_guid"] = chosen_skill_guid
+                details["chosen_skill_label"] = chosen_skill_label
+                _recent_skill_plans[_cooldown_key(chosen_skill_guid, entry)] = time.time()
+                if sim_id is not None:
+                    history = _RECENT_SKILL_SUCCESS.get(sim_id, [])
+                    window_seconds = settings.skill_cycle_window_sim_minutes * 60
+                    history = [
+                        (guid, ts)
+                        for guid, ts in history
+                        if (time.time() - ts) <= window_seconds
+                    ]
+                    history.append((chosen_skill_guid, time.time()))
+                    _RECENT_SKILL_SUCCESS[sim_id] = history
+                    _LAST_SUCCESS_SKILL[sim_id] = chosen_skill_guid
+                    recent_list = _RECENT_SKILL_SUCCESS_LIST.get(sim_id, deque(maxlen=5))
+                    if not isinstance(recent_list, deque):
+                        recent_list = deque(recent_list, maxlen=5)
+                    recent_list.append(chosen_skill_guid)
+                    _RECENT_SKILL_SUCCESS_LIST[sim_id] = recent_list
+                if settings.verify_skill_gain_enabled:
+                    started_ts = time.time()
                     _schedule_skill_plan_verification(
                         sim_info,
                         chosen_skill_guid,
@@ -1871,17 +1900,36 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                         def_id,
                         aff_guid,
                         aff_name,
-                        2,
-                        settings.verify_skill_gain_recheck_sim_minutes,
+                        1,
+                        settings.verify_skill_gain_delay_sim_minutes,
                         expected_def_id=def_id,
                         expected_aff_guid64=aff_guid,
                         started_ts=started_ts,
                         max_wait_sim_minutes=120,
                     )
-            _LAST_SKILL_PLAN_STRICT = details
-            return True, details
-
-    details["reason"] = "all_candidate_pushes_failed"
+                    if settings.verify_skill_gain_recheck_count > 1:
+                        _schedule_skill_plan_verification(
+                            sim_info,
+                            chosen_skill_guid,
+                            chosen_skill_label,
+                            baseline,
+                            def_id,
+                            aff_guid,
+                            aff_name,
+                            2,
+                            settings.verify_skill_gain_recheck_sim_minutes,
+                            expected_def_id=def_id,
+                            expected_aff_guid64=aff_guid,
+                            started_ts=started_ts,
+                            max_wait_sim_minutes=120,
+                        )
+                _LAST_SKILL_PLAN_STRICT = details
+                return True, details
+            _candidate_fail_strikes[strike_key] = strike_count + 1
+            last_failure_reason = normalized_reason or "push_failed"
+        _mark_skill_failed(chosen_skill_guid)
+    details["reason"] = "all_skills_failed"
+    details["last_failure_reason"] = last_failure_reason
     _LAST_SKILL_PLAN_STRICT = details
     return False, details
 
@@ -3014,7 +3062,7 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
     for entry in candidates:
         def_id = entry.get("obj_def_id")
         aff_guid = entry.get("aff_guid64")
-        ok = push_by_def_and_aff_guid(
+        ok, _push_reason = push_by_def_and_aff_guid(
             sim,
             def_id,
             aff_guid,
@@ -3289,7 +3337,7 @@ def build_plan_preview(sim, now=None):
     }
 
 
-def _evaluate(now: float, force: bool = False):
+def _evaluate(now: float, force: bool = False, reason: str = None):
     global last_director_time
     _DEBUG_RING.clear()
     last_director_debug[:] = []
@@ -3342,11 +3390,16 @@ def _evaluate(now: float, force: bool = False):
                         _dbg(f"{sim_name}: CARE disabled (unsafe motive)")
                     continue
                 if green_count < settings.director_green_min_commodities:
+                    if reason != "idle_override":
+                        _dbg(
+                            f"{sim_name}: SKIP green gate "
+                            f"({green_count}/{len(snapshot)} < {settings.director_green_min_commodities})"
+                        )
+                        continue
                     _dbg(
-                        f"{sim_name}: SKIP green gate "
+                        f"{sim_name}: BYPASS green gate "
                         f"({green_count}/{len(snapshot)} < {settings.director_green_min_commodities})"
                     )
-                    continue
             else:
                 _dbg(f"{sim_name}: SKIP motives unreadable (no motive stats found)")
                 continue
@@ -3360,6 +3413,16 @@ def _evaluate(now: float, force: bool = False):
                 _dbg(f"{sim_name}: SKIP cooldown")
                 continue
 
+            if reason is not None:
+                try:
+                    story_log.append_event(
+                        "director_idle_plan_attempt",
+                        sim_info=sim_info,
+                        sim_name=sim_name,
+                        reason=reason,
+                    )
+                except Exception:
+                    pass
             result = run_skill_plan(sim_info, sim, now, force=force, source="director")
             if result.get("success"):
                 skill_key = result.get("skill_key")
@@ -3411,7 +3474,7 @@ def on_tick(now: float):
         _last_idle_override_ts = now
         _last_check_time = now
         last_director_run_time = now
-        _evaluate(now, force=False)
+        _evaluate(now, force=False, reason="idle_override")
         return
     _last_check_time = now
     last_director_run_time = now

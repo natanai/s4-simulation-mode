@@ -6,6 +6,7 @@ import sims4.log
 import sims4.resources
 
 from simulation_mode import capabilities
+from simulation_mode import sim_scope
 from simulation_mode import clock_utils
 from simulation_mode.push_utils import push_by_def_and_aff_guid
 from simulation_mode.settings import settings
@@ -49,6 +50,7 @@ _PER_SIM_PUSH_HISTORY = {}
 _PER_SIM_LAST_CHOSEN_MOTIVE = {}
 _MOTIVE_STATS = {}
 _LAST_CARE_DETAILS = None
+_CARE_LOCKS = {}
 
 _CARE_KIND_TO_MOTIVE = {
     "eat": "motive_hunger",
@@ -60,6 +62,13 @@ _CARE_KIND_TO_MOTIVE = {
 }
 
 _MOTIVE_TO_CARE_KIND = {value: key for key, value in _CARE_KIND_TO_MOTIVE.items()}
+
+_CARE_LOCK_DURATIONS = {
+    "motive_hunger": 180,
+    "motive_energy": 120,
+    "motive_bladder": 90,
+    "motive_hygiene": 90,
+}
 
 
 def motive_percent(value: float) -> float:
@@ -135,6 +144,58 @@ def _motive_guid64_from_key(motive_key):
 def _sim_identifier(sim_info):
     sim_id = getattr(sim_info, "sim_id", None)
     return sim_id or id(sim_info)
+
+
+def _care_lock_duration(motive_key):
+    return _CARE_LOCK_DURATIONS.get(motive_key, 60)
+
+
+def _get_care_lock(sim_id, motive_key):
+    return _CARE_LOCKS.get(sim_id, {}).get(motive_key)
+
+
+def _set_care_lock(sim_id, motive_key, now, reason):
+    lock = {"until_ts": now + _care_lock_duration(motive_key), "reason": reason}
+    _CARE_LOCKS.setdefault(sim_id, {})[motive_key] = lock
+    return lock
+
+
+def _care_lock_blocks(sim_id, motive_key, now):
+    lock = _get_care_lock(sim_id, motive_key)
+    if not lock:
+        return False, 0
+    until_ts = lock.get("until_ts")
+    if until_ts is None:
+        return False, 0
+    remaining = until_ts - now
+    if remaining <= 0:
+        _CARE_LOCKS.get(sim_id, {}).pop(motive_key, None)
+        return False, 0
+    return True, remaining
+
+
+def _has_running_non_idle(sim):
+    queue = getattr(sim, "queue", None)
+    if queue is None:
+        return False, None
+    running = getattr(queue, "running", None)
+    if running is None:
+        return False, None
+    if isinstance(running, (list, tuple)):
+        running = running[0] if running else None
+    if running is None:
+        return False, None
+    return not _interaction_is_idle(running), running
+
+
+def _safe_story_event(event_type, **kwargs):
+    from simulation_mode import story_log
+
+    try:
+        story_log.append_event(event_type, **kwargs)
+        return True
+    except Exception:
+        return False
 
 
 def _is_sim_busy(sim):
@@ -390,7 +451,7 @@ def _attempt_care_push(sim, motive_key, force=False):
     for entry in candidates:
         def_id = entry.get("obj_def_id")
         aff_guid = entry.get("aff_guid64")
-        ok = push_by_def_and_aff_guid(
+        ok, _push_reason = push_by_def_and_aff_guid(
             sim,
             def_id,
             aff_guid,
@@ -452,6 +513,26 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
             sim_name=sim_name,
         )
         return False, "already_running_care"
+    critical = motive_value is not None and motive_value <= settings.guardian_red_motive
+    running_non_idle, running_interaction = _has_running_non_idle(sim)
+    if running_non_idle and not critical:
+        running_type, running_aff_name, _running_label = _running_interaction_info(sim)
+        sim_name = getattr(sim, "full_name", None)
+        if callable(sim_name):
+            try:
+                sim_name = sim_name()
+            except Exception:
+                sim_name = None
+        sim_name = sim_name or getattr(sim, "first_name", None)
+        _safe_story_event(
+            "guardian_skip_running_noncritical",
+            sim_info=sim_info,
+            motive_key=motive_key,
+            running_aff_name=running_aff_name,
+            running_type=running_type,
+            sim_name=sim_name,
+        )
+        return False, "running_noncritical"
     if not _cooldown_allows_push(
         sim, sim_id, now, motive_key, motive_unsafe, bypass_cooldown=bypass_cooldown
     ):
@@ -474,10 +555,21 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
             attempted.append(key)
             attempted_non_social = True
             value = snapshot_dict.get(key)
+            critical = value is not None and value <= settings.guardian_red_motive
+            lock_active, remaining = _care_lock_blocks(sim_id, key, now)
+            if lock_active and not critical:
+                _safe_story_event(
+                    "guardian_care_lock_skip",
+                    sim_info=sim_info,
+                    motive_key=key,
+                    seconds_remaining=round(remaining, 2),
+                )
+                continue
             force = value is not None and value <= settings.guardian_red_motive
             pushed, message = _attempt_care_push(sim, key, force=force)
             if pushed:
                 _record_push(sim_id, now)
+                _set_care_lock(sim_id, key, now, "pushed_care")
                 from simulation_mode import story_log
                 story_log.append_event(
                     "guardian_push",
@@ -491,10 +583,21 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
     else:
         attempted.append(lowest_key)
         value = snapshot_dict.get(lowest_key)
+        critical = value is not None and value <= settings.guardian_red_motive
+        lock_active, remaining = _care_lock_blocks(sim_id, lowest_key, now)
+        if lock_active and not critical:
+            _safe_story_event(
+                "guardian_care_lock_skip",
+                sim_info=sim_info,
+                motive_key=lowest_key,
+                seconds_remaining=round(remaining, 2),
+            )
+            return False, "guardian care lock"
         force = value is not None and value <= settings.guardian_red_motive
         pushed, message = _attempt_care_push(sim, lowest_key, force=force)
         if pushed:
             _record_push(sim_id, now)
+            _set_care_lock(sim_id, lowest_key, now, "pushed_care")
             from simulation_mode import story_log
             story_log.append_event(
                 "guardian_push",
@@ -515,10 +618,21 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
         )
         if allow_social and "motive_social" not in attempted:
             value = snapshot_dict.get("motive_social")
+            critical = value is not None and value <= settings.guardian_red_motive
+            lock_active, remaining = _care_lock_blocks(sim_id, "motive_social", now)
+            if lock_active and not critical:
+                _safe_story_event(
+                    "guardian_care_lock_skip",
+                    sim_info=sim_info,
+                    motive_key="motive_social",
+                    seconds_remaining=round(remaining, 2),
+                )
+                return False, "guardian care lock"
             force = value is not None and value <= settings.guardian_red_motive
             pushed, message = _attempt_care_push(sim, "motive_social", force=force)
             if pushed:
                 _record_push(sim_id, now)
+                _set_care_lock(sim_id, "motive_social", now, "pushed_care")
                 from simulation_mode import story_log
                 story_log.append_event(
                     "guardian_push",
@@ -611,12 +725,42 @@ def _process_sim(sim_info, now):
     if motive_value >= settings.guardian_min_motive:
         return
 
+    critical = motive_value <= settings.guardian_red_motive
+    running_non_idle, running_interaction = _has_running_non_idle(sim)
+    if running_non_idle and not critical:
+        running_type, running_aff_name, _running_label = _running_interaction_info(sim)
+        sim_name = getattr(sim, "full_name", None)
+        if callable(sim_name):
+            try:
+                sim_name = sim_name()
+            except Exception:
+                sim_name = None
+        sim_name = sim_name or getattr(sim, "first_name", None)
+        _safe_story_event(
+            "guardian_skip_running_noncritical",
+            sim_info=sim_info,
+            motive_key=motive_key,
+            running_aff_name=running_aff_name,
+            running_type=running_type,
+            sim_name=sim_name,
+        )
+        return
+
     busy_state, _busy_reason = _is_sim_busy(sim)
     if busy_state:
         return
 
     sim_id = _sim_identifier(sim_info)
     _PER_SIM_LAST_CHOSEN_MOTIVE[sim_id] = motive_key
+    lock_active, remaining = _care_lock_blocks(sim_id, motive_key, now)
+    if lock_active and not critical:
+        _safe_story_event(
+            "guardian_care_lock_skip",
+            sim_info=sim_info,
+            motive_key=motive_key,
+            seconds_remaining=round(remaining, 2),
+        )
+        return
     if not _cooldown_allows_push(sim, sim_id, now, motive_key, True, bypass_cooldown=False):
         return
     if not _can_push_for_sim(sim_id, now):
@@ -626,6 +770,7 @@ def _process_sim(sim_info, now):
     pushed, message = _attempt_care_push(sim, motive_key, force=force)
     if pushed:
         _record_push(sim_id, now)
+        _set_care_lock(sim_id, motive_key, now, "pushed_care")
     else:
         if "obj=none" in message:
             if "autonomy refresh attempted" in message:
@@ -695,18 +840,9 @@ def run_guardian():
         logger.warn(f"Pause detection failed: {exc}")
         return
 
-    household = services.active_household()
-    if household is None:
+    sim_infos = list(sim_scope.iter_active_household_sim_infos() or [])
+    if not sim_infos:
         return
-
-    try:
-        sim_infos = list(household)
-    except Exception:
-        sim_infos = []
-        try:
-            sim_infos = list(household.sim_infos)
-        except Exception:
-            return
 
     for sim_info in sim_infos:
         try:

@@ -1,8 +1,12 @@
 import inspect
+import os
+import random
 import re
 import time
 from collections import deque
 
+import alarms
+import clock
 from interactions.context import (
     InteractionContext,
     InteractionSource,
@@ -14,6 +18,9 @@ from simulation_mode import clock_utils
 from simulation_mode import guardian
 from simulation_mode import probe_log
 from simulation_mode import capabilities
+from simulation_mode import settings as settings_module
+from simulation_mode import story_log
+from simulation_mode import verified_gain
 from simulation_mode.push_utils import (
     affordance_name,
     call_push_super_affordance,
@@ -91,13 +98,12 @@ _LAST_CAREER_PROBE = []
 _LAST_STARTED_SKILL_VALUES = {}
 _LAST_STARTED_SKILL_GUID_MISSING = 0
 _recent_skill_plans = {}
-_PENDING_SKILL_PLAN_VERIFY_ALARMS = {}
+_VERIFY_ALARM_HANDLES = {}
+_RECENT_SKILL_SUCCESS = {}
 
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
 _SKILL_PLAN_COOLDOWN_SECONDS = 1800
-_SKILL_PLAN_VERIFY_SIM_MINUTES = 30
-_SKILL_PLAN_VERIFY_REAL_SECONDS = 30
 
 _CACHED_WHIM_MANAGER = None
 _CACHED_WHIM_TYPE_NAME = None
@@ -128,6 +134,17 @@ def _safe_call(obj, name, *args, **kwargs):
 def _sim_identifier(sim_info):
     sim_id = getattr(sim_info, "sim_id", None)
     return sim_id or id(sim_info)
+
+
+def _get_verified_gain_path():
+    filename = getattr(settings, "verified_gain_filename", None) or "simulation-mode-verified-gain.json"
+    settings_path = getattr(settings, "settings_path", None)
+    if isinstance(settings_path, str) and settings_path.lower().endswith(".txt"):
+        folder = os.path.dirname(os.path.abspath(settings_path))
+        return os.path.join(folder, filename)
+    cfg = settings_module.get_config_path()
+    folder = os.path.dirname(os.path.abspath(cfg))
+    return os.path.join(folder, filename)
 
 
 def _get_current_interaction(sim):
@@ -766,6 +783,19 @@ def _skill_progress_snapshot(sim_info, guid64):
     return level, None
 
 
+def _read_skill_progress_for_guid(sim_info, skill_guid):
+    if sim_info is None or not skill_guid:
+        return {"ok": False, "level": None, "value": None, "source": "missing"}
+    level, value = _skill_progress_snapshot(sim_info, skill_guid)
+    ok = level is not None or value is not None
+    return {
+        "ok": ok,
+        "level": level,
+        "value": value,
+        "source": "snapshot",
+    }
+
+
 def _iter_careers(sim_info):
     if sim_info is None:
         return []
@@ -1279,70 +1309,110 @@ def get_last_skill_plan_strict():
 def _schedule_skill_plan_verification(
     sim_info,
     chosen_skill_guid,
-    baseline_level,
-    baseline_value,
+    chosen_skill_label,
+    baseline,
+    obj_def_id,
     interaction_aff_guid64,
     interaction_aff_name,
+    check_index,
+    delay_sim_minutes,
 ):
     if sim_info is None:
         return False, "sim_info_missing"
     sim_id = getattr(sim_info, "sim_id", None)
     if sim_id is None:
         return False, "sim_id_missing"
-    alarms = __import__("alarms")
-    clock = __import__("clock")
-    story_log = __import__("simulation_mode.story_log", fromlist=["append_event"])
-
-    old_handle = _PENDING_SKILL_PLAN_VERIFY_ALARMS.pop(sim_id, None)
+    handle_key = (
+        sim_id,
+        chosen_skill_guid,
+        obj_def_id,
+        interaction_aff_guid64,
+        check_index,
+    )
+    old_handle = _VERIFY_ALARM_HANDLES.pop(handle_key, None)
     if old_handle is not None:
         try:
             old_handle.cancel()
         except Exception:
             pass
 
-    def _verify_cb(handle, _sim_id=sim_id):
-        _PENDING_SKILL_PLAN_VERIFY_ALARMS.pop(_sim_id, None)
+    def _verify_cb(handle, _sim_id=sim_id, _check_index=check_index):
+        _VERIFY_ALARM_HANDLES.pop(handle_key, None)
         sim_info_inner = _resolve_sim_info_by_id(_sim_id)
-        after_level = None
-        after_value = None
-        if sim_info_inner is not None:
-            after_level, after_value = _skill_progress_snapshot(
-                sim_info_inner, chosen_skill_guid
-            )
+        after = _read_skill_progress_for_guid(sim_info_inner, chosen_skill_guid)
+        baseline_ok = bool(baseline.get("ok")) if isinstance(baseline, dict) else False
+        after_ok = bool(after.get("ok")) if isinstance(after, dict) else False
+        baseline_level = baseline.get("level") if isinstance(baseline, dict) else None
+        baseline_value = baseline.get("value") if isinstance(baseline, dict) else None
+        after_level = after.get("level")
+        after_value = after.get("value")
+        increased_level = False
+        increased_value = False
         increased = "unknown"
-        if baseline_level is not None and after_level is not None:
-            try:
-                increased = bool(after_level > baseline_level)
-            except Exception:
-                increased = "unknown"
-        elif baseline_value is not None and after_value is not None:
-            try:
-                increased = bool(after_value > baseline_value)
-            except Exception:
-                increased = "unknown"
+        if baseline_ok and after_ok:
+            if baseline_level is not None and after_level is not None:
+                try:
+                    increased_level = bool(after_level > baseline_level)
+                except Exception:
+                    increased_level = False
+            if baseline_value is not None and after_value is not None:
+                try:
+                    increased_value = bool(
+                        (after_value - baseline_value)
+                        >= settings.verified_gain_min_delta_value
+                    )
+                except Exception:
+                    increased_value = False
+            increased = bool(increased_level or increased_value)
         story_log.append_event(
             "skill_plan_verify",
             sim_info=sim_info_inner,
             sim_id=_sim_id,
             chosen_skill_guid=chosen_skill_guid,
-            baseline_level=baseline_level,
-            baseline_value=baseline_value,
-            after_level=after_level,
-            after_value=after_value,
+            chosen_skill_label=chosen_skill_label,
+            obj_def_id=obj_def_id,
+            aff_guid64=interaction_aff_guid64,
+            aff_name=interaction_aff_name,
+            baseline=baseline,
+            after=after,
+            check_index=_check_index,
             increased=increased,
-            interaction_aff_guid64=interaction_aff_guid64,
-            interaction_aff_name=interaction_aff_name,
         )
+        if not settings.verify_skill_gain_enabled:
+            return
+        path = _get_verified_gain_path()
+        data = verified_gain.load(path)
+        if increased is True:
+            verified_gain.mark_verified(
+                data,
+                chosen_skill_guid,
+                obj_def_id,
+                interaction_aff_guid64,
+                time.time(),
+            )
+            verified_gain.save_atomic(path, data)
+            return
+        if (
+            _check_index == settings.verify_skill_gain_recheck_count
+            and increased is False
+            and baseline_ok
+            and after_ok
+        ):
+            verified_gain.mark_invalid(
+                data,
+                chosen_skill_guid,
+                obj_def_id,
+                interaction_aff_guid64,
+                time.time(),
+            )
+            verified_gain.save_atomic(path, data)
 
     try:
-        timespan = clock.interval_in_sim_minutes(_SKILL_PLAN_VERIFY_SIM_MINUTES)
-    except Exception:
-        timespan = clock.interval_in_real_seconds(_SKILL_PLAN_VERIFY_REAL_SECONDS)
-    try:
-        handle = alarms.add_alarm_real_time(sim_info, timespan, _verify_cb)
+        timespan = clock.interval_in_sim_minutes(delay_sim_minutes)
+        handle = alarms.add_alarm(sim_info, timespan, _verify_cb)
     except Exception as exc:
         return False, f"alarm_failed:{exc}"
-    _PENDING_SKILL_PLAN_VERIFY_ALARMS[sim_id] = handle
+    _VERIFY_ALARM_HANDLES[handle_key] = handle
     return True, "ok"
 
 
@@ -1478,6 +1548,30 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                         "source": "started",
                     }
                 )
+    skill_cycle_entries = _RECENT_SKILL_SUCCESS.get(sim_id, [])
+    if skill_cycle_entries:
+        window_seconds = settings.skill_cycle_window_sim_minutes * 60
+        pruned = [
+            (guid, ts)
+            for guid, ts in skill_cycle_entries
+            if (now - ts) <= window_seconds
+        ]
+        if pruned:
+            _RECENT_SKILL_SUCCESS[sim_id] = pruned
+        else:
+            _RECENT_SKILL_SUCCESS.pop(sim_id, None)
+        skill_cycle_entries = pruned
+    last_skill = skill_cycle_entries[-1][0] if skill_cycle_entries else None
+    if last_skill and settings.skill_cycle_block_last_skill_if_other_viable:
+        other_viable = any(
+            item["guid"] != last_skill and _cand_count_for_skill(item["guid"]) > 0
+            for item in candidate_skills
+        )
+        if other_viable:
+            for index, item in enumerate(list(candidate_skills)):
+                if item["guid"] == last_skill:
+                    candidate_skills.append(candidate_skills.pop(index))
+                    break
     candidate_skill_count = len(candidate_skills)
     if not candidate_skills:
         details["reason"] = "no_skill_candidates"
@@ -1539,9 +1633,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
     details["chosen_skill_label"] = chosen_skill_label
     details["candidate_skill_count"] = candidate_skill_count
 
-    baseline_level, baseline_value = _skill_progress_snapshot(
-        sim_info, chosen_skill_guid
-    )
+    baseline = _read_skill_progress_for_guid(sim_info, chosen_skill_guid)
 
     candidates = capabilities.get_candidates_for_skill_gain_guid(
         chosen_skill_guid, caps
@@ -1552,6 +1644,31 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         if entry.get("allow_autonomous") is True and entry.get("safe_push") is True
         and not _on_cooldown(chosen_skill_guid, entry)
     ]
+    verified_path = _get_verified_gain_path()
+    verified_data = verified_gain.load(verified_path)
+    filtered = []
+    for entry in candidates:
+        def_id = entry.get("obj_def_id")
+        aff_guid = entry.get("aff_guid64")
+        status = verified_gain.get_status(
+            verified_data, chosen_skill_guid, def_id, aff_guid
+        )
+        if status == "invalid":
+            invalid_entry = verified_gain.get_entry(
+                verified_data, "invalidated", chosen_skill_guid, def_id, aff_guid
+            )
+            fails = invalid_entry.get("fails", 0) if invalid_entry else 0
+            if fails >= settings.invalidation_strikes_to_skip:
+                continue
+        filtered.append((entry, status))
+    if settings.verified_prefer_verified:
+        verified_candidates = [entry for entry, status in filtered if status == "verified"]
+        unknown_candidates = [entry for entry, status in filtered if status != "verified"]
+        random.shuffle(verified_candidates)
+        random.shuffle(unknown_candidates)
+        candidates = verified_candidates + unknown_candidates
+    else:
+        candidates = [entry for entry, _status in filtered]
     details["candidate_affordance_count"] = len(candidates)
     if not candidates:
         details["reason"] = "no_affordance_candidates_for_skill_guid"
@@ -1582,14 +1699,40 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         if ok:
             details["reason"] = "ok"
             _recent_skill_plans[_cooldown_key(chosen_skill_guid, entry)] = time.time()
-            _schedule_skill_plan_verification(
-                sim_info,
-                chosen_skill_guid,
-                baseline_level,
-                baseline_value,
-                aff_guid,
-                aff_name,
-            )
+            if sim_id is not None:
+                history = _RECENT_SKILL_SUCCESS.get(sim_id, [])
+                window_seconds = settings.skill_cycle_window_sim_minutes * 60
+                history = [
+                    (guid, ts)
+                    for guid, ts in history
+                    if (time.time() - ts) <= window_seconds
+                ]
+                history.append((chosen_skill_guid, time.time()))
+                _RECENT_SKILL_SUCCESS[sim_id] = history
+            if settings.verify_skill_gain_enabled:
+                _schedule_skill_plan_verification(
+                    sim_info,
+                    chosen_skill_guid,
+                    chosen_skill_label,
+                    baseline,
+                    def_id,
+                    aff_guid,
+                    aff_name,
+                    1,
+                    settings.verify_skill_gain_delay_sim_minutes,
+                )
+                if settings.verify_skill_gain_recheck_count > 1:
+                    _schedule_skill_plan_verification(
+                        sim_info,
+                        chosen_skill_guid,
+                        chosen_skill_label,
+                        baseline,
+                        def_id,
+                        aff_guid,
+                        aff_name,
+                        2,
+                        settings.verify_skill_gain_recheck_sim_minutes,
+                    )
             _LAST_SKILL_PLAN_STRICT = details
             return True, details
 

@@ -9,6 +9,7 @@ import sims4.commands
 from sims4.commands import BOOL_TRUE, CommandType
 
 import simulation_mode.settings as sm_settings
+from simulation_mode import verified_gain
 from simulation_mode.settings import get_config_path, load_settings, settings
 
 _FALSE_STRINGS = {"false", "f", "0", "off", "no", "n"}
@@ -18,7 +19,7 @@ _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
 # Keep alarm handles alive per-sim so they are not garbage-collected.
 _PENDING_SKILL_PLAN_ALARMS = {}
-BUILD_NUMBER = "66"
+BUILD_NUMBER = "67"
 
 
 def _parse_bool(arg: str):
@@ -117,6 +118,16 @@ def _status_lines():
         f"story_log_filename={settings.story_log_filename}",
         f"capabilities_filename={settings.capabilities_filename}",
         f"capabilities_auto_build_on_enable={settings.capabilities_auto_build_on_enable}",
+        f"verified_gain_filename={settings.verified_gain_filename}",
+        f"verify_skill_gain_enabled={settings.verify_skill_gain_enabled}",
+        f"verify_skill_gain_delay_sim_minutes={settings.verify_skill_gain_delay_sim_minutes}",
+        f"verify_skill_gain_recheck_sim_minutes={settings.verify_skill_gain_recheck_sim_minutes}",
+        f"verify_skill_gain_recheck_count={settings.verify_skill_gain_recheck_count}",
+        f"verified_gain_min_delta_value={settings.verified_gain_min_delta_value}",
+        f"invalidation_strikes_to_skip={settings.invalidation_strikes_to_skip}",
+        f"verified_prefer_verified={settings.verified_prefer_verified}",
+        f"skill_cycle_window_sim_minutes={settings.skill_cycle_window_sim_minutes}",
+        f"skill_cycle_block_last_skill_if_other_viable={settings.skill_cycle_block_last_skill_if_other_viable}",
         f"catalog_include_sims={settings.catalog_include_sims}",
         f"catalog_include_non_autonomous={settings.catalog_include_non_autonomous}",
         f"catalog_max_records={settings.catalog_max_records}",
@@ -138,6 +149,17 @@ def _status_lines():
 def _emit_status(output):
     for line in _status_lines():
         output(line)
+
+
+def _get_verified_gain_path():
+    filename = settings.verified_gain_filename or "simulation-mode-verified-gain.json"
+    settings_path = getattr(settings, "settings_path", None)
+    if isinstance(settings_path, str) and settings_path.lower().endswith(".txt"):
+        folder = os.path.dirname(os.path.abspath(settings_path))
+        return os.path.join(folder, filename)
+    cfg = get_config_path()
+    folder = os.path.dirname(os.path.abspath(cfg))
+    return os.path.join(folder, filename)
 
 
 def _start_daemon():
@@ -1649,6 +1671,28 @@ def _collect_internal_probes(sim_info):
         lines.append(
             f"skill_tracker_attrs_hint={type(tracker).__name__} attrs={attrs[:10]}"
         )
+    lines.append("")
+    lines.append("VERIFIED SKILL GAIN (FILE)")
+    path = _get_verified_gain_path()
+    lines.append(f"path={path}")
+    data = verified_gain.load(path)
+    exists = False
+    schema_version = "missing"
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+            if isinstance(raw, dict) and raw.get("schema_version") == 1:
+                exists = True
+                schema_version = raw.get("schema_version")
+        except Exception:
+            exists = False
+    totals = verified_gain.totals(data)
+    lines.append(f"exists={exists}")
+    lines.append(f"schema_version={schema_version}")
+    lines.append(f"verified_pairs_total={totals.get('verified_pairs_total', 0)}")
+    lines.append(f"invalid_pairs_total={totals.get('invalid_pairs_total', 0)}")
+    lines.append("note=Delete this file (game closed) to reset learned verified actions.")
     return lines
 
 

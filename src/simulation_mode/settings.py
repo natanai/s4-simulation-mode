@@ -44,6 +44,16 @@ KNOWN_DEFAULTS = [
     ("story_log_filename", "simulation-mode-story.log"),
     ("capabilities_filename", "simulation-mode-capabilities.json"),
     ("capabilities_auto_build_on_enable", "true"),
+    ("verified_gain_filename", "simulation-mode-verified-gain.json"),
+    ("verify_skill_gain_enabled", "true"),
+    ("verify_skill_gain_delay_sim_minutes", "10"),
+    ("verify_skill_gain_recheck_sim_minutes", "20"),
+    ("verify_skill_gain_recheck_count", "2"),
+    ("verified_gain_min_delta_value", "0.001"),
+    ("invalidation_strikes_to_skip", "1"),
+    ("verified_prefer_verified", "true"),
+    ("skill_cycle_window_sim_minutes", "720"),
+    ("skill_cycle_block_last_skill_if_other_viable", "true"),
     ("catalog_include_sims", "false"),
     ("catalog_include_non_autonomous", "false"),
     ("catalog_max_records", "0"),
@@ -137,6 +147,48 @@ def _build_default_template_text():
     lines.append(
         "capabilities_auto_build_on_enable={}".format(
             defaults["capabilities_auto_build_on_enable"]
+        )
+    )
+    lines.append("verified_gain_filename={}".format(defaults["verified_gain_filename"]))
+    lines.append(
+        "verify_skill_gain_enabled={}".format(defaults["verify_skill_gain_enabled"])
+    )
+    lines.append(
+        "verify_skill_gain_delay_sim_minutes={}".format(
+            defaults["verify_skill_gain_delay_sim_minutes"]
+        )
+    )
+    lines.append(
+        "verify_skill_gain_recheck_sim_minutes={}".format(
+            defaults["verify_skill_gain_recheck_sim_minutes"]
+        )
+    )
+    lines.append(
+        "verify_skill_gain_recheck_count={}".format(
+            defaults["verify_skill_gain_recheck_count"]
+        )
+    )
+    lines.append(
+        "verified_gain_min_delta_value={}".format(
+            defaults["verified_gain_min_delta_value"]
+        )
+    )
+    lines.append(
+        "invalidation_strikes_to_skip={}".format(
+            defaults["invalidation_strikes_to_skip"]
+        )
+    )
+    lines.append(
+        "verified_prefer_verified={}".format(defaults["verified_prefer_verified"])
+    )
+    lines.append(
+        "skill_cycle_window_sim_minutes={}".format(
+            defaults["skill_cycle_window_sim_minutes"]
+        )
+    )
+    lines.append(
+        "skill_cycle_block_last_skill_if_other_viable={}".format(
+            defaults["skill_cycle_block_last_skill_if_other_viable"]
         )
     )
     lines.append("")
@@ -341,6 +393,16 @@ class SimulationModeSettings:
         story_log_filename="simulation-mode-story.log",
         capabilities_filename="simulation-mode-capabilities.json",
         capabilities_auto_build_on_enable=True,
+        verified_gain_filename="simulation-mode-verified-gain.json",
+        verify_skill_gain_enabled=True,
+        verify_skill_gain_delay_sim_minutes=10,
+        verify_skill_gain_recheck_sim_minutes=20,
+        verify_skill_gain_recheck_count=2,
+        verified_gain_min_delta_value=0.001,
+        invalidation_strikes_to_skip=1,
+        verified_prefer_verified=True,
+        skill_cycle_window_sim_minutes=720,
+        skill_cycle_block_last_skill_if_other_viable=True,
         catalog_include_sims=False,
         catalog_include_non_autonomous=False,
         catalog_max_records=50000,
@@ -384,6 +446,18 @@ class SimulationModeSettings:
         self.story_log_filename = story_log_filename
         self.capabilities_filename = capabilities_filename
         self.capabilities_auto_build_on_enable = capabilities_auto_build_on_enable
+        self.verified_gain_filename = verified_gain_filename
+        self.verify_skill_gain_enabled = verify_skill_gain_enabled
+        self.verify_skill_gain_delay_sim_minutes = verify_skill_gain_delay_sim_minutes
+        self.verify_skill_gain_recheck_sim_minutes = verify_skill_gain_recheck_sim_minutes
+        self.verify_skill_gain_recheck_count = verify_skill_gain_recheck_count
+        self.verified_gain_min_delta_value = verified_gain_min_delta_value
+        self.invalidation_strikes_to_skip = invalidation_strikes_to_skip
+        self.verified_prefer_verified = verified_prefer_verified
+        self.skill_cycle_window_sim_minutes = skill_cycle_window_sim_minutes
+        self.skill_cycle_block_last_skill_if_other_viable = (
+            skill_cycle_block_last_skill_if_other_viable
+        )
         self.catalog_include_sims = catalog_include_sims
         self.catalog_include_non_autonomous = catalog_include_non_autonomous
         self.catalog_max_records = catalog_max_records
@@ -699,6 +773,56 @@ def load_settings(target):
             elif key == "capabilities_auto_build_on_enable":
                 if isinstance(value, bool):
                     target.capabilities_auto_build_on_enable = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "verified_gain_filename":
+                value = str(raw_value).strip()
+                target.verified_gain_filename = (
+                    value if value else "simulation-mode-verified-gain.json"
+                )
+            elif key == "verify_skill_gain_enabled":
+                if isinstance(value, bool):
+                    target.verify_skill_gain_enabled = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "verify_skill_gain_delay_sim_minutes":
+                try:
+                    target.verify_skill_gain_delay_sim_minutes = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "verify_skill_gain_recheck_sim_minutes":
+                try:
+                    target.verify_skill_gain_recheck_sim_minutes = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "verify_skill_gain_recheck_count":
+                try:
+                    target.verify_skill_gain_recheck_count = max(1, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "verified_gain_min_delta_value":
+                try:
+                    target.verified_gain_min_delta_value = float(value)
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "invalidation_strikes_to_skip":
+                try:
+                    target.invalidation_strikes_to_skip = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "verified_prefer_verified":
+                if isinstance(value, bool):
+                    target.verified_prefer_verified = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "skill_cycle_window_sim_minutes":
+                try:
+                    target.skill_cycle_window_sim_minutes = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "skill_cycle_block_last_skill_if_other_viable":
+                if isinstance(value, bool):
+                    target.skill_cycle_block_last_skill_if_other_viable = value
                 else:
                     _log_invalid_value(key, raw_value)
             elif key == "catalog_include_sims":

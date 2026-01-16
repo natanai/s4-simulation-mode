@@ -84,6 +84,7 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
         "meta": None,
         "by_ad_guid": {},
         "by_loot_guid": {},
+        "by_skill_guid": {},
         "generated_ts": time.time(),
     }
     if not catalog_path or not os.path.exists(catalog_path):
@@ -118,7 +119,9 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
                     continue
                 entry = {
                     "obj_def_id": int(obj_def_id),
+                    "obj_name": record.get("obj_name"),
                     "aff_guid64": int(aff_guid64),
+                    "aff_name": record.get("aff_name"),
                     "allow_autonomous": bool(record.get("allow_autonomous")),
                     "allow_user_directed": bool(record.get("allow_user_directed")),
                     "safe_push": True,
@@ -127,9 +130,19 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
                     _add_to_index(data["by_ad_guid"], guid, entry)
                 for guid in record.get("loot_ref_guids") or []:
                     _add_to_index(data["by_loot_guid"], guid, entry)
+                for guid in record.get("skill_guids") or []:
+                    _add_to_index(data["by_skill_guid"], guid, entry)
     except Exception:
         return data
-
+    meta = data.get("meta") or {}
+    by_skill = data.get("by_skill_guid") or {}
+    if isinstance(by_skill, dict):
+        keys = list(by_skill.keys())
+        meta["by_skill_guid_keys"] = len(keys)
+        meta["by_skill_guid_entries_total"] = sum(
+            len(by_skill.get(key, [])) for key in keys
+        )
+    data["meta"] = meta
     return data
 
 
@@ -144,6 +157,13 @@ def get_candidates_for_loot_guid(guid64: int, caps: dict):
     if not guid64 or not caps:
         return []
     index = caps.get("by_loot_guid") or {}
+    return list(index.get(str(guid64)) or [])
+
+
+def get_candidates_for_skill_guid(guid64: int, caps: dict):
+    if not guid64 or not caps:
+        return []
+    index = caps.get("by_skill_guid") or {}
     return list(index.get(str(guid64)) or [])
 
 

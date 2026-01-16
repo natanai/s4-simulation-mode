@@ -140,7 +140,7 @@ def _build_default_template_text():
         )
     )
     lines.append("")
-    lines.append("# catalog defaults (Build 60)")
+    lines.append("# catalog defaults (Build 61)")
     lines.append("catalog_include_sims={}".format(defaults["catalog_include_sims"]))
     lines.append(
         "catalog_include_non_autonomous={}".format(
@@ -155,7 +155,7 @@ def _build_default_template_text():
         )
     )
     lines.append("")
-    lines.append("# collect-integrated sampling caps (Build 60)")
+    lines.append("# collect-integrated sampling caps (Build 61)")
     lines.append(
         "catalog_collect_sample_objects={}".format(
             defaults["catalog_collect_sample_objects"]
@@ -279,9 +279,9 @@ def _append_missing_keys(path):
             "# Optional integration if you ALSO installed a mod that defines this trait ID",
             lambda key: key.startswith("integrate_") or key.startswith("better_autonomy_"),
         )
-        _append_group("# catalog defaults (Build 60)", lambda key: key in catalog_defaults)
+        _append_group("# catalog defaults (Build 61)", lambda key: key in catalog_defaults)
         _append_group(
-            "# collect-integrated sampling caps (Build 60)", lambda key: key in collect_caps
+            "# collect-integrated sampling caps (Build 61)", lambda key: key in collect_caps
         )
         _append_group(
             "# affordance meta probe list (pipe-delimited)", lambda key: key in aff_meta
@@ -457,6 +457,11 @@ def _parse_list(value):
         return [str(item).strip().lower() for item in value if str(item).strip()]
     text = str(value)
     return [item.strip().lower() for item in text.split(",") if item.strip()]
+
+
+def _non_negative_int(value):
+    numeric = int(value)
+    return max(0, numeric)
 
 
 def _ensure_template(path: Path):
@@ -708,17 +713,17 @@ def load_settings(target):
                     _log_invalid_value(key, raw_value)
             elif key == "catalog_max_records":
                 try:
-                    target.catalog_max_records = max(1, int(value))
+                    target.catalog_max_records = _non_negative_int(value)
                 except Exception:
                     _log_invalid_value(key, raw_value)
             elif key == "catalog_max_objects":
                 try:
-                    target.catalog_max_objects = max(1, int(value))
+                    target.catalog_max_objects = _non_negative_int(value)
                 except Exception:
                     _log_invalid_value(key, raw_value)
             elif key == "catalog_max_affordances_per_object":
                 try:
-                    target.catalog_max_affordances_per_object = max(1, int(value))
+                    target.catalog_max_affordances_per_object = _non_negative_int(value)
                 except Exception:
                     _log_invalid_value(key, raw_value)
             elif key == "catalog_collect_sample_objects":

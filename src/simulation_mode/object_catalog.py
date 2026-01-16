@@ -390,7 +390,11 @@ def scan_zone_catalog(
 
     notes = []
     try:
-        skill_manager = services.get_instance_manager(sims4.resources.Types.SKILL)
+        Types = sims4.resources.Types
+        if hasattr(Types, "SKILL"):
+            skill_manager = services.get_instance_manager(Types.SKILL)
+        else:
+            skill_manager = services.get_instance_manager(Types.STATISTIC)
     except Exception:
         skill_manager = None
     try:
@@ -428,6 +432,9 @@ def scan_zone_catalog(
     unresolved_objects = 0
     scanned_affordances = 0
     record_lines_written = 0
+    records_with_loot_ref_guids = 0
+    records_with_skill_guids = 0
+    skill_guids_total = 0
     truncated = False
     skipped_sims = 0
     filtered_flags = 0
@@ -441,9 +448,23 @@ def scan_zone_catalog(
     write_failed = False
     path = get_catalog_log_path(filename)
 
+    skill_manager_unavailable = False
+
     def _filter_skill_guids(guids):
-        if not guids or skill_manager is None:
+        nonlocal skill_manager_unavailable
+        if not guids:
             return []
+        if skill_manager is None:
+            skill_manager_unavailable = True
+            best_effort = []
+            for guid in guids:
+                if guid is None:
+                    continue
+                try:
+                    best_effort.append(int(guid))
+                except Exception:
+                    continue
+            return sorted(set(best_effort))[:25]
         filtered = []
         for guid in guids:
             if guid is None:
@@ -615,6 +636,7 @@ def scan_zone_catalog(
                     record_limit_hit = True
                     break
 
+                skill_guids = _filter_skill_guids(skill_guid_candidates)
                 record = {
                     "ts": time.time(),
                     "zone_id": zone_id,
@@ -638,7 +660,7 @@ def scan_zone_catalog(
                     "autonomy_ad_guids": autonomy_ad_guids,
                     "commodity_flag_guids": commodity_flag_guids,
                     "loot_ref_guids": loot_ref_guids,
-                    "skill_guids": _filter_skill_guids(skill_guid_candidates),
+                    "skill_guids": skill_guids,
                     "skill_loot_sig": skill_loot_sig,
                     "skill_loot_call_ok": skill_loot_call_ok,
                     "skill_loot_err": skill_loot_err,
@@ -655,6 +677,11 @@ def scan_zone_catalog(
                         write_failed = True
                         notes.append(f"write_error err={write_error}")
                         break
+                if loot_ref_guids:
+                    records_with_loot_ref_guids += 1
+                if skill_guids:
+                    records_with_skill_guids += 1
+                    skill_guids_total += len(skill_guids)
                 record_lines_written += 1
     except Exception as exc:
         ok = False
@@ -669,12 +696,15 @@ def scan_zone_catalog(
         notes.append(
             "all_affordances_filtered_out; check allow_ud/allow_auto extraction and picker/debug flags"
         )
+    if skill_manager_unavailable:
+        notes.append("skill_manager_unavailable; skill_guids_unvalidated")
     notes = [note for note in notes if note][:10]
     written_records = record_lines_written + (1 if handle is not None else 0)
     meta_record = {
         "type": "meta",
         "generated_ts": time.time(),
         "zone_id": zone_id,
+        "records_total": record_lines_written,
         "scanned_objects": scanned_objects,
         "unresolved_objects": unresolved_objects,
         "scanned_affordances": scanned_affordances,
@@ -683,6 +713,9 @@ def scan_zone_catalog(
         "skipped_sims": skipped_sims,
         "filtered_flags": filtered_flags,
         "filtered_non_autonomy": filtered_non_autonomy,
+        "records_with_loot_ref_guids": records_with_loot_ref_guids,
+        "records_with_skill_guids": records_with_skill_guids,
+        "skill_guids_total": skill_guids_total,
         "notes": notes,
     }
     if sample:

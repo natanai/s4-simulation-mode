@@ -18,7 +18,7 @@ _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
 # Keep alarm handles alive per-sim so they are not garbage-collected.
 _PENDING_SKILL_PLAN_ALARMS = {}
-BUILD_NUMBER = "61"
+BUILD_NUMBER = "63"
 
 
 def _parse_bool(arg: str):
@@ -366,6 +366,27 @@ def _collect_daemon_snapshot():
     return lines
 
 
+def _collect_capabilities_health(_sim_info):
+    capabilities = importlib.import_module("simulation_mode.capabilities")
+    lines = ["COLLECT: CAPABILITIES HEALTH"]
+    caps = capabilities.load_capabilities()
+    meta = caps.get("meta") if isinstance(caps, dict) else None
+    by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
+    keys = list(by_skill.keys()) if isinstance(by_skill, dict) else []
+    entries_total = (
+        sum(len(by_skill.get(key, [])) for key in keys)
+        if isinstance(by_skill, dict)
+        else 0
+    )
+    lines.append(f"meta.zone_id={meta.get('zone_id') if meta else None}")
+    lines.append(f"meta.truncated={meta.get('truncated') if meta else None}")
+    lines.append(f"meta.by_skill_guid_keys={len(keys)}")
+    lines.append(f"meta.by_skill_guid_entries_total={entries_total}")
+    if len(keys) == 0:
+        lines.append("WARNING: by_skill_guid empty (skill matching cannot work)")
+    return lines
+
+
 def _collect_career_summary(sim_info):
     director = importlib.import_module("simulation_mode.director")
     lines = []
@@ -400,6 +421,8 @@ def _collect_started_skills(sim_info):
         lines.append("started_skills= (none)")
         return lines
     lines.append("started_skills:")
+    missing_guids = getattr(director, "_LAST_STARTED_SKILL_GUID_MISSING", 0)
+    lines.append(f"started_skills_missing_guid64={missing_guids}")
     skill_values = getattr(director, "_LAST_STARTED_SKILL_VALUES", {}) or {}
     for skill_obj in candidates:
         guid64 = director._skill_guid64(skill_obj)
@@ -1647,6 +1670,9 @@ def _build_collect_payload():
     lines.append("")
     lines.extend(_collect_daemon_snapshot())
     lines.append("")
+    sim_info = _active_sim_info()
+    lines.extend(_collect_capabilities_health(sim_info))
+    lines.append("")
     lines.append("COLLECT: DIRECTOR — PLAN PREVIEW (NO ACTIONS)")
     now = time.time()
     sims = director._get_instantiated_sims_for_director()
@@ -1674,6 +1700,8 @@ def _build_collect_payload():
     lines.append("")
     active_sim = _get_active_sim(services)
     lines.extend(_collect_active_sim_details(active_sim))
+    lines.append("")
+    lines.extend(director.probe_skill_tracker(sim_info))
     lines.append("")
     sim_info = _active_sim_info()
     if sim_info is None:

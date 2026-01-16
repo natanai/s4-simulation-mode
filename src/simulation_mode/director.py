@@ -8,6 +8,7 @@ from interactions.context import (
     InteractionSource,
 )
 import services
+import sims4.resources
 
 from simulation_mode import clock_utils
 from simulation_mode import guardian
@@ -100,6 +101,23 @@ _CACHED_WHIM_TYPE_NAME = None
 def _norm(s: str) -> str:
     s = (s or "").lower()
     return re.sub(r"[\s_\-]+", "", s)
+
+
+def _safe_get(obj, name, default=None):
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return default
+
+
+def _safe_call(obj, name, *args, **kwargs):
+    fn = _safe_get(obj, name)
+    if not callable(fn):
+        return False, None, f"not callable: {name}"
+    try:
+        return True, fn(*args, **kwargs), None
+    except Exception as exc:
+        return False, None, f"{type(exc).__name__}: {exc}"
 
 
 def _sim_identifier(sim_info):
@@ -603,32 +621,128 @@ def _skill_max_from_skill(skill):
     return None
 
 
+def _tuning_is_skill(tuning):
+    if tuning is None:
+        return False
+    attr = _safe_get(tuning, "is_skill")
+    if attr is not None:
+        try:
+            if bool(attr() if callable(attr) else attr):
+                return True
+        except Exception:
+            pass
+    module = (
+        _safe_get(tuning, "__module__")
+        or _safe_get(_safe_get(tuning, "__class__"), "__module__")
+        or ""
+    ).lower()
+    name = (
+        _safe_get(tuning, "__name__")
+        or _safe_get(_safe_get(tuning, "__class__"), "__name__")
+        or ""
+    ).lower()
+    if ("skill" in module or "skill" in name) and not (
+        "commodity" in module or "commodity" in name
+    ):
+        return True
+    for attr_name in ("skill_value", "get_skill_value", "max_level", "get_max_level"):
+        if hasattr(tuning, attr_name):
+            return True
+    return False
+
+
+def _iter_skill_like_statistics(sim_info):
+    tracker = _safe_get(sim_info, "commodity_tracker")
+    if tracker is None:
+        return
+    ok, stats, _err = _safe_call(tracker, "get_all_commodities")
+    if not ok or stats is None:
+        stats = []
+    try:
+        stats_list = list(stats)
+    except Exception:
+        stats_list = []
+    stat_mgr = services.get_instance_manager(sims4.resources.Types.STATISTIC)
+    for stat in stats_list:
+        guid = _skill_guid64(stat)
+        if guid is None:
+            continue
+        tuning = stat_mgr.get(guid) if stat_mgr is not None else None
+        if tuning is None:
+            continue
+        if _tuning_is_skill(tuning):
+            yield stat
+
+
+def _resolve_skill_tracker(sim_info):
+    tracker = _safe_get(sim_info, "skill_tracker")
+    if tracker is not None:
+        return tracker, "sim_info.skill_tracker"
+    tracker = _safe_get(sim_info, "_skill_tracker")
+    if tracker is not None:
+        return tracker, "sim_info._skill_tracker"
+    ok, sim, _err = _safe_call(sim_info, "get_sim_instance")
+    if ok and sim is not None:
+        tracker = _safe_get(sim, "skill_tracker")
+        if tracker is not None:
+            return tracker, "sim_instance.skill_tracker"
+        tracker = _safe_get(sim, "_skill_tracker")
+        if tracker is not None:
+            return tracker, "sim_instance._skill_tracker"
+    return None, "none"
+
+
+def _skill_from_handle(skill_tracker, handle):
+    if handle is None:
+        return None
+    return _pick_skill_entry(handle)
+
+
+def _iter_all_skill_objects(sim_info):
+    tracker, _source = _resolve_skill_tracker(sim_info)
+    seen_guids = set()
+    if tracker is not None:
+        for handle in _iter_skill_handles(tracker):
+            skill = _skill_from_handle(tracker, handle)
+            if skill is None:
+                continue
+            guid = _skill_guid64(skill)
+            if guid is not None:
+                if guid in seen_guids:
+                    continue
+                seen_guids.add(guid)
+            yield skill
+    for stat in _iter_skill_like_statistics(sim_info):
+        guid = _skill_guid64(stat)
+        if guid is not None and guid in seen_guids:
+            continue
+        if guid is not None:
+            seen_guids.add(guid)
+        yield stat
+
+
 def _skill_level_and_max_for_guid(sim_info, guid64):
     if sim_info is None or not guid64:
         return None, None
-    skill_tracker = getattr(sim_info, "skill_tracker", None)
-    get_skills = None
-    if skill_tracker is not None:
-        get_skills = getattr(skill_tracker, "get_all_skills", None)
-        if get_skills is None:
-            get_skills = getattr(skill_tracker, "get_all_skill_types", None)
-    if not callable(get_skills):
-        return None, None
-    try:
-        skills = list(get_skills())
-    except Exception:
-        return None, None
-    for skill in skills:
+    for skill in _iter_all_skill_objects(sim_info):
         skill_guid = _skill_guid64(skill)
         if skill_guid != guid64:
             continue
         level = _skill_level_from_skill(skill)
-        if level is None and skill_tracker is not None:
-            level = _skill_level_from_tracker(skill_tracker, skill)
         max_level = _skill_max_from_skill(skill)
-        if max_level is None and skill_tracker is not None:
-            max_level = _skill_max_from_tracker(skill_tracker, skill)
         return level, max_level
+    stat_mgr = services.get_instance_manager(sims4.resources.Types.STATISTIC)
+    tracker = _safe_get(sim_info, "commodity_tracker")
+    tuning = stat_mgr.get(guid64) if stat_mgr is not None else None
+    if tuning is not None and tracker is not None:
+        ok, stat, _err = _safe_call(tracker, "get_statistic", tuning, add=False)
+        if not ok:
+            ok, stat, _err = _safe_call(tracker, "get_statistic", tuning)
+        if stat is not None:
+            level = _skill_level_from_skill(stat)
+            max_level = _skill_max_from_skill(stat)
+            if level is not None or max_level is not None:
+                return level, max_level
     return None, None
 
 
@@ -664,30 +778,55 @@ def _iter_careers(sim_info):
     return careers
 
 
-def _iter_skill_tuning_values(value):
-    if value is None:
-        return []
-    if isinstance(value, dict):
-        items = list(value.values())
-    elif isinstance(value, (list, tuple, set)):
-        items = list(value)
-    else:
-        items = [value]
-    out = []
-    for item in items:
-        if item is None:
+def _walk_for_guid64s(value, max_nodes=400, max_depth=6):
+    seen = set()
+    found = set()
+    stack = [(value, 0)]
+    nodes = 0
+
+    while stack and nodes < max_nodes:
+        current, depth = stack.pop()
+        if current is None:
             continue
-        out.append(item)
-    return out
+        obj_id = id(current)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        nodes += 1
 
-
-def _extract_skill_candidates_from_value(value):
-    candidates = []
-    for item in _iter_skill_tuning_values(value):
-        guid = _skill_guid64(item)
+        guid = _skill_guid64(current)
         if guid is not None:
-            candidates.append(guid)
-    return candidates
+            found.add(guid)
+
+        if depth >= max_depth:
+            continue
+
+        if isinstance(current, dict):
+            for key, val in current.items():
+                stack.append((key, depth + 1))
+                stack.append((val, depth + 1))
+            continue
+        if isinstance(current, (list, tuple, set)):
+            for item in current:
+                stack.append((item, depth + 1))
+            continue
+
+        for attr in (
+            "skill",
+            "skills",
+            "skill_type",
+            "statistic",
+            "statistics",
+            "commodity",
+            "commodities",
+        ):
+            if hasattr(current, attr):
+                try:
+                    stack.append((getattr(current, attr), depth + 1))
+                except Exception:
+                    continue
+
+    return found
 
 
 def _get_career_skill_candidates(sim_info):
@@ -695,58 +834,58 @@ def _get_career_skill_candidates(sim_info):
     _LAST_CAREER_PROBE = []
     if sim_info is None or not settings.director_prefer_career_skills:
         return []
-    candidates = []
+    candidates = set()
     careers = _iter_careers(sim_info)
     if not careers:
         _LAST_CAREER_PROBE.append("career_probe=no careers found")
         return []
+    stat_mgr = services.get_instance_manager(sims4.resources.Types.STATISTIC)
     for career in careers:
         career_name = getattr(getattr(career, "__class__", None), "__name__", "") or "Career"
         career_guid = getattr(career, "guid64", None)
-        for obj_label, obj in (
-            ("career", career),
-            ("career_track", getattr(career, "current_track", None)),
-            ("current_level", getattr(career, "current_level_tuning", None)),
-            ("next_level", getattr(career, "next_level_tuning", None)),
-        ):
-            if obj is None:
-                continue
-            for attr in dir(obj):
-                if "skill" not in attr.lower():
-                    continue
-                try:
-                    value = getattr(obj, attr)
-                except Exception:
-                    continue
-                if callable(value):
-                    try:
-                        value = value()
-                    except Exception:
-                        continue
-                _LAST_CAREER_PROBE.append(
-                    f"{career_name}.{obj_label}.{attr} type={type(value).__name__} repr={_trim_repr(value)}"
-                )
-                for guid in _extract_skill_candidates_from_value(value):
-                    detail = f"career_requirement:{career_name}.{obj_label}.{attr} guid64={guid}"
-                    if career_guid is not None:
-                        detail = f"{detail} career_id={career_guid}"
-                    _LAST_CAREER_PROBE.append(detail)
-                    candidates.append(guid)
+        career_tuning = _safe_get(career, "career_tuning")
+        current_level_tuning = _safe_get(career, "current_level_tuning")
+        next_level_tuning = _safe_get(career, "next_level_tuning")
+        track_tuning = _safe_get(career, "current_track") or _safe_get(career, "track_tuning")
+        roots = [
+            root
+            for root in (
+                career,
+                career_tuning,
+                current_level_tuning,
+                next_level_tuning,
+                track_tuning,
+            )
+            if root is not None
+        ]
+        for root in roots:
+            candidates.update(_walk_for_guid64s(root))
+        _LAST_CAREER_PROBE.append(
+            "career_probe=scan roots={roots} guid_candidates={count} career_id={career_id}".format(
+                roots=len(roots),
+                count=len(candidates),
+                career_id=career_guid,
+            )
+        )
     if not candidates:
         return []
-    deduped = []
-    seen = set()
+    filtered = []
     for guid in candidates:
-        if guid in seen:
+        if guid is None:
             continue
-        seen.add(guid)
-        deduped.append(guid)
-    deduped.sort(
+        tuning = stat_mgr.get(guid) if stat_mgr is not None else None
+        if tuning is None:
+            continue
+        if _tuning_is_skill(tuning):
+            filtered.append(guid)
+    if not filtered:
+        return []
+    filtered.sort(
         key=lambda guid: _skill_level_and_max_for_guid(sim_info, guid)[0]
         if _skill_level_and_max_for_guid(sim_info, guid)[0] is not None
         else 999
     )
-    return deduped
+    return filtered
 
 
 def _choose_career_skill(sim_info):
@@ -885,28 +1024,26 @@ def _handle_max_level(handle, skill_tracker, guid64):
 def _get_started_skill_candidates(sim_info):
     if sim_info is None or not settings.director_fallback_to_started_skills:
         return []
-    skill_tracker = getattr(sim_info, "skill_tracker", None)
-    skills = _iter_skill_handles(skill_tracker)
-    if not skills:
-        return []
+    tracker, _source = _resolve_skill_tracker(sim_info)
     candidates = []
     skill_levels = {}
     skill_values = {}
     missing_guid_count = 0
-    for skill in skills:
+    for skill in _iter_all_skill_objects(sim_info):
         try:
             if not _skill_is_allowed(skill):
                 continue
-            guid64 = _handle_guid64(skill)
+            guid64 = _skill_guid64(skill)
             if guid64 is None:
                 missing_guid_count += 1
-            level = _handle_level(skill, skill_tracker, guid64)
-            if level is None or level <= 0:
                 continue
-            max_level = _handle_max_level(skill, skill_tracker, guid64)
-            if max_level is not None and level >= max_level:
+            level = _skill_level_from_skill(skill)
+            max_level = _skill_max_from_skill(skill)
+            if level is None or max_level is None:
                 continue
-            skill_value = _skill_value_from_skill(skill, skill_tracker=skill_tracker)
+            if level <= 0 or level >= max_level:
+                continue
+            skill_value = _skill_value_from_skill(skill, skill_tracker=tracker)
             skill_values[id(skill)] = skill_value
             candidates.append(skill)
             skill_levels[id(skill)] = level
@@ -922,189 +1059,51 @@ def _get_started_skill_candidates(sim_info):
     return candidates
 
 
-def probe_skill_tracker(sim_info, limit=25):
-    lines = ["SKILL TRACKER (PROBE)"]
+def probe_skills(sim_info, limit=30):
+    lines = ["SKILLS (PROBE)"]
+    tracker, source = _resolve_skill_tracker(sim_info)
+    lines.append(f"skill_tracker_source={source}")
+    lines.append(f"commodity_tracker_present={bool(_safe_get(sim_info, 'commodity_tracker'))}")
 
-    def _safe_get(obj, name, default=None):
-        try:
-            return getattr(obj, name)
-        except Exception:
-            return default
-
-    if sim_info is None:
-        lines.append("skill_tracker=(missing)")
-        return lines
-    tracker = _safe_get(sim_info, "skill_tracker")
-    if not tracker:
-        lines.append("skill_tracker=(missing)")
-        return lines
-    lines.append(f"tracker_type={type(tracker).__name__}")
-
-    sources = []
-    for name in ("get_all_skills", "get_all_skill_types", "get_skills"):
-        fn = getattr(tracker, name, None)
-        if callable(fn):
-            ok, val = True, None
-            try:
-                val = fn()
-            except Exception as exc:
-                ok, val = False, exc
-            sources.append((name, ok, val))
-    for name in (
-        "_skills",
-        "skills",
-        "_skill_map",
-        "_skill_type_to_skill",
-        "_statistics",
-        "_statistic_values",
-    ):
-        if hasattr(tracker, name):
-            try:
-                sources.append((name, True, getattr(tracker, name)))
-            except Exception as exc:
-                sources.append((name, False, exc))
-
-    for name, ok, val in sources:
-        if not ok:
-            lines.append(f"source={name} ok=false err={val!r}")
-            continue
-        try:
-            if isinstance(val, dict):
-                lines.append(
-                    "source={name} type=dict len={length} key_type={key_type} val_type={val_type}".format(
-                        name=name,
-                        length=len(val),
-                        key_type=type(next(iter(val.keys()), None)).__name__,
-                        val_type=type(next(iter(val.values()), None)).__name__,
-                    )
-                )
-            elif isinstance(val, (list, tuple, set)):
-                lines.append(
-                    "source={name} type={type_name} len={length} elem_type={elem_type}".format(
-                        name=name,
-                        type_name=type(val).__name__,
-                        length=len(val),
-                        elem_type=type(next(iter(val), None)).__name__,
-                    )
-                )
-            else:
-                lines.append(
-                    f"source={name} type={type(val).__name__} repr={_trim_repr(val)}"
-                )
-        except Exception as exc:
-            lines.append(f"source={name} summary_err={exc!r}")
-
-    priority = [
-        "get_all_skills",
-        "get_all_skill_types",
-        "get_skills",
-        "_skill_type_to_skill",
-        "_skills",
-        "skills",
-        "_skill_map",
-        "_statistics",
-        "_statistic_values",
-    ]
-    source_map = {name: val for name, ok, val in sources if ok}
-    chosen_name = None
-    chosen_value = None
-    for name in priority:
-        value = source_map.get(name)
-        if isinstance(value, dict) and value:
-            chosen_name = name
-            chosen_value = value
-            break
-        if isinstance(value, (list, tuple, set)) and value:
-            chosen_name = name
-            chosen_value = value
-            break
-    if chosen_name is None:
-        lines.append("chosen_source=(none)")
-        return lines
-    lines.append(f"chosen_source={chosen_name}")
-
-    def _guid64_from_entry(entry):
-        guid = _skill_guid64(entry)
-        if guid is not None:
-            return guid
-        for attr in ("skill_type", "stat_type"):
-            type_obj = _safe_get(entry, attr)
-            if type_obj is None:
-                continue
-            guid = _skill_guid64(type_obj)
-            if guid is not None:
-                return guid
-        return None
-
-    def _level_for_entry(entry, guid64):
-        for attr in ("level",):
-            value = _safe_get(entry, attr)
-            if value is None:
-                continue
-            try:
-                return value() if callable(value) else value
-            except Exception:
-                continue
-        getter = _safe_get(entry, "get_level")
-        if callable(getter):
-            try:
-                return getter()
-            except Exception:
-                pass
-        for target in (entry, guid64):
-            if target is None:
-                continue
-            level = _skill_level_from_tracker(tracker, target)
-            if level is not None:
-                return level
-            tracker_get_value = _safe_get(tracker, "get_value")
-            if callable(tracker_get_value):
-                try:
-                    return tracker_get_value(target)
-                except Exception:
+    discovered = []
+    seen = set()
+    if sim_info is not None:
+        if tracker is not None:
+            for handle in _iter_skill_handles(tracker):
+                skill = _skill_from_handle(tracker, handle)
+                if skill is None:
                     continue
-        return None
-
-    def _value_for_entry(entry, guid64):
-        value = _skill_value_from_skill(entry, skill_tracker=tracker)
-        if value is not None:
-            return value
-        tracker_get_value = _safe_get(tracker, "get_value")
-        if callable(tracker_get_value):
-            for target in (entry, guid64):
-                if target is None:
+                guid = _skill_guid64(skill)
+                if guid is None or guid in seen:
                     continue
-                try:
-                    return tracker_get_value(target)
-                except Exception:
-                    continue
-        return None
+                seen.add(guid)
+                discovered.append((skill, guid, "tracker"))
+        for stat in _iter_skill_like_statistics(sim_info):
+            guid = _skill_guid64(stat)
+            if guid is None or guid in seen:
+                continue
+            seen.add(guid)
+            discovered.append((stat, guid, "commodity"))
 
-    entries = []
-    if isinstance(chosen_value, dict):
-        entries.extend(list(chosen_value.keys()))
-        entries.extend(list(chosen_value.values()))
-    elif isinstance(chosen_value, (list, tuple, set)):
-        entries.extend(list(chosen_value))
-
-    for i, entry in enumerate(entries[:limit]):
-        try:
-            entry = _pick_skill_entry(entry)
-            guid64 = _guid64_from_entry(entry)
-            level = _level_for_entry(entry, guid64)
-            value = _value_for_entry(entry, guid64)
-            lines.append(
-                "i={index} entry_type={entry_type} guid64={guid} level={level} value={value}".format(
-                    index=i,
-                    entry_type=type(entry).__name__,
-                    guid=guid64,
-                    level=level,
-                    value=value,
-                )
+    lines.append(f"discovered_skill_count={len(discovered)}")
+    for skill, guid, skill_source in discovered[:limit]:
+        level = _skill_level_from_skill(skill)
+        max_level = _skill_max_from_skill(skill)
+        label = _skill_label(skill) or "Skill"
+        lines.append(
+            "skill={label}(guid64={guid}) level={level} max={max_level} source={source}".format(
+                label=label,
+                guid=guid,
+                level=level,
+                max_level=max_level,
+                source=skill_source,
             )
-        except Exception:
-            continue
+        )
     return lines
+
+
+def probe_skill_tracker(sim_info, limit=25):
+    return probe_skills(sim_info, limit=limit)
 
 
 def _choose_started_skill(sim_info):

@@ -18,7 +18,7 @@ _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
 # Keep alarm handles alive per-sim so they are not garbage-collected.
 _PENDING_SKILL_PLAN_ALARMS = {}
-BUILD_NUMBER = "63"
+BUILD_NUMBER = "64"
 
 
 def _parse_bool(arg: str):
@@ -1723,7 +1723,7 @@ def _build_collect_payload():
     active_sim = _get_active_sim(services)
     lines.extend(_collect_active_sim_details(active_sim))
     lines.append("")
-    lines.extend(director.probe_skill_tracker(sim_info))
+    lines.extend(director.probe_skills(sim_info))
     lines.append("")
     sim_info = _active_sim_info()
     if sim_info is None:

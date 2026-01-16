@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.5.0, Build 64)
+# Simulation Mode Kernel Mod (v0.5.0, Build 66)
 
 ## What it is
 
@@ -95,7 +95,12 @@ Expected artifacts:
 * `simulation-mode-object-catalog.jsonl`
 * `simulation-mode-capabilities.json`
 
-`skill_plan_now` behavior: “Attempts a single strict skill-building push using the capability index (career skills preferred; else started skills). Logs decision details to story log.”
+### What `skill_plan_now` does (Build 66)
+
+* Picks a skill the active Sim already has.
+* Chooses an interaction that empirically grants skill gain (from the `by_skill_gain_guid` index).
+* Pushes the interaction.
+* Logs a follow-up verification event indicating whether the skill actually increased.
 
 ## Test plan
 

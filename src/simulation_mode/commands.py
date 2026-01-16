@@ -18,7 +18,7 @@ _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
 # Keep alarm handles alive per-sim so they are not garbage-collected.
 _PENDING_SKILL_PLAN_ALARMS = {}
-BUILD_NUMBER = "65"
+BUILD_NUMBER = "66"
 
 
 def _parse_bool(arg: str):
@@ -372,18 +372,29 @@ def _collect_capabilities_health(_sim_info):
     caps = capabilities.load_capabilities()
     meta = caps.get("meta") if isinstance(caps, dict) else None
     by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
+    by_skill_gain = caps.get("by_skill_gain_guid") if isinstance(caps, dict) else {}
     keys = list(by_skill.keys()) if isinstance(by_skill, dict) else []
     entries_total = (
         sum(len(by_skill.get(key, [])) for key in keys)
         if isinstance(by_skill, dict)
         else 0
     )
+    gain_keys = list(by_skill_gain.keys()) if isinstance(by_skill_gain, dict) else []
+    gain_entries_total = (
+        sum(len(by_skill_gain.get(key, [])) for key in gain_keys)
+        if isinstance(by_skill_gain, dict)
+        else 0
+    )
     lines.append(f"meta.zone_id={meta.get('zone_id') if meta else None}")
     lines.append(f"meta.truncated={meta.get('truncated') if meta else None}")
     lines.append(f"meta.by_skill_guid_keys={len(keys)}")
     lines.append(f"meta.by_skill_guid_entries_total={entries_total}")
+    lines.append(f"meta.by_skill_gain_guid_keys={len(gain_keys)}")
+    lines.append(f"meta.by_skill_gain_guid_entries_total={gain_entries_total}")
     if len(keys) == 0:
         lines.append("WARNING: by_skill_guid empty (skill matching cannot work)")
+    if len(gain_keys) == 0:
+        lines.append("WARNING: by_skill_gain_guid empty (skill gain planning cannot work)")
     return lines
 
 
@@ -491,6 +502,68 @@ def _collect_skill_coverage(sim_info):
     lines.append(f"skills_without_candidates={without_candidates}")
     for guid, label, count in coverage[:15]:
         lines.append(f" - skill={label} guid64={guid} candidates={count}")
+    return lines
+
+
+def _collect_skill_gain_coverage(sim_info):
+    director = importlib.import_module("simulation_mode.director")
+    capabilities = importlib.import_module("simulation_mode.capabilities")
+    lines = ["SKILL GAIN COVERAGE (ACTIVE SIM)"]
+    if sim_info is None:
+        lines.append("skills= (none)")
+        return lines
+    caps = capabilities.load_capabilities()
+    by_skill_gain = caps.get("by_skill_gain_guid") if isinstance(caps, dict) else {}
+
+    def _cand_count_for_skill(guid):
+        candidates = list(
+            by_skill_gain.get(str(guid)) or by_skill_gain.get(guid) or []
+        )
+        count = 0
+        for entry in candidates:
+            if entry.get("safe_push", True) is False:
+                continue
+            if entry.get("allow_autonomous", True) is False:
+                continue
+            count += 1
+        return count
+
+    skills = []
+    seen = set()
+    for skill_obj in director._iter_all_skill_objects(sim_info):
+        guid = director._skill_guid64(skill_obj)
+        if guid is None or guid in seen:
+            continue
+        seen.add(guid)
+        label = director._skill_label(skill_obj) or getattr(
+            skill_obj.__class__, "__name__", "Skill"
+        )
+        skills.append((guid, label))
+
+    if not skills:
+        lines.append("skills= (none)")
+        return lines
+
+    with_candidates = 0
+    without_candidates = 0
+    coverage = []
+    for guid, label in skills:
+        count = _cand_count_for_skill(guid)
+        if count > 0:
+            with_candidates += 1
+        else:
+            without_candidates += 1
+        coverage.append((guid, label, count))
+    lines.append(f"sim_skill_count={len(skills)}")
+    lines.append(f"skills_with_gain_candidates={with_candidates}")
+    lines.append(f"skills_without_gain_candidates={without_candidates}")
+    lines.append(
+        "by_skill_gain_guid_keys_count={}".format(
+            len(by_skill_gain) if isinstance(by_skill_gain, dict) else 0
+        )
+    )
+    for guid, label, count in coverage[:20]:
+        lines.append(f" - skill={label} guid64={guid} gain_candidates={count}")
     return lines
 
 
@@ -925,14 +998,23 @@ def _collect_kernel_index_status(_sim_info):
     lines.append(f"caps_meta_zone_match={caps_zone == current_zone if caps_zone is not None else False}")
     lines.append(f"caps_meta_truncated={caps_meta.get('truncated') if caps_meta else None}")
     by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
+    by_skill_gain = caps.get("by_skill_gain_guid") if isinstance(caps, dict) else {}
     skill_keys = list(by_skill.keys()) if isinstance(by_skill, dict) else []
+    skill_gain_keys = list(by_skill_gain.keys()) if isinstance(by_skill_gain, dict) else []
     skill_entries = (
         sum(len(by_skill.get(key, [])) for key in skill_keys)
         if isinstance(by_skill, dict)
         else 0
     )
+    skill_gain_entries = (
+        sum(len(by_skill_gain.get(key, [])) for key in skill_gain_keys)
+        if isinstance(by_skill_gain, dict)
+        else 0
+    )
     lines.append(f"capabilities.by_skill_guid_keys={len(skill_keys)}")
     lines.append(f"capabilities.by_skill_guid_entries_total={skill_entries}")
+    lines.append(f"capabilities.by_skill_gain_guid_keys={len(skill_gain_keys)}")
+    lines.append(f"capabilities.by_skill_gain_guid_entries_total={skill_gain_entries}")
     return lines
 
 
@@ -942,10 +1024,10 @@ def _collect_skill_plan_now_diagnostics():
     lines = ["SKILL PLAN NOW (STRICT) DIAGNOSTICS"]
     caps = capabilities.load_capabilities()
     kernel_valid, kernel_reason = capabilities.is_skill_kernel_valid(caps)
-    by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
-    skill_keys = list(by_skill.keys()) if isinstance(by_skill, dict) else []
+    by_skill_gain = caps.get("by_skill_gain_guid") if isinstance(caps, dict) else {}
+    skill_keys = list(by_skill_gain.keys()) if isinstance(by_skill_gain, dict) else []
     lines.append(f"kernel_valid={kernel_valid} kernel_reason={kernel_reason}")
-    lines.append(f"by_skill_guid_keys={len(skill_keys)}")
+    lines.append(f"by_skill_gain_guid_keys={len(skill_keys)}")
     last_attempt = director.get_last_skill_plan_strict()
     if last_attempt is None:
         lines.append("last_skill_plan_now=(none)")
@@ -971,20 +1053,29 @@ def _collect_capabilities_status(_sim_info):
     by_ad = caps.get("by_ad_guid") if isinstance(caps, dict) else {}
     by_loot = caps.get("by_loot_guid") if isinstance(caps, dict) else {}
     by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
+    by_skill_gain = caps.get("by_skill_gain_guid") if isinstance(caps, dict) else {}
     ad_keys = list(by_ad.keys()) if isinstance(by_ad, dict) else []
     loot_keys = list(by_loot.keys()) if isinstance(by_loot, dict) else []
     skill_keys = list(by_skill.keys()) if isinstance(by_skill, dict) else []
+    skill_gain_keys = list(by_skill_gain.keys()) if isinstance(by_skill_gain, dict) else []
     lines.append(f"by_ad_guid_keys={len(ad_keys)}")
     lines.append(f"by_loot_guid_keys={len(loot_keys)}")
     lines.append(f"by_skill_guid_keys={len(skill_keys)}")
+    lines.append(f"by_skill_gain_guid_keys={len(skill_gain_keys)}")
     entries_total_ad = sum(len(by_ad.get(key, [])) for key in ad_keys) if isinstance(by_ad, dict) else 0
     entries_total_loot = sum(len(by_loot.get(key, [])) for key in loot_keys) if isinstance(by_loot, dict) else 0
     entries_total_skill = (
         sum(len(by_skill.get(key, [])) for key in skill_keys) if isinstance(by_skill, dict) else 0
     )
+    entries_total_skill_gain = (
+        sum(len(by_skill_gain.get(key, [])) for key in skill_gain_keys)
+        if isinstance(by_skill_gain, dict)
+        else 0
+    )
     lines.append(f"entries_total_ad={entries_total_ad}")
     lines.append(f"entries_total_loot={entries_total_loot}")
     lines.append(f"entries_total_skill={entries_total_skill}")
+    lines.append(f"entries_total_skill_gain={entries_total_skill_gain}")
     for guid in sorted(ad_keys)[:10]:
         candidates = by_ad.get(guid, [])
         lines.append(f"ad_guid={guid} candidates={len(candidates)}")
@@ -994,6 +1085,9 @@ def _collect_capabilities_status(_sim_info):
     for guid in sorted(skill_keys)[:10]:
         candidates = by_skill.get(guid, [])
         lines.append(f"skill_guid={guid} candidates={len(candidates)}")
+    for guid in sorted(skill_gain_keys)[:10]:
+        candidates = by_skill_gain.get(guid, [])
+        lines.append(f"skill_gain_guid={guid} candidates={len(candidates)}")
     return lines
 
 
@@ -1780,6 +1874,8 @@ def _build_collect_payload():
     lines.append("")
     sim_info = _active_sim_info()
     lines.extend(_collect_skill_coverage(sim_info))
+    lines.append("")
+    lines.extend(_collect_skill_gain_coverage(sim_info))
     lines.append("")
     lines.extend(director.probe_skills(sim_info))
     lines.append("")

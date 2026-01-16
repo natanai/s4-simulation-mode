@@ -207,6 +207,18 @@ def is_skill_kernel_valid(caps: dict):
     return True, "ok"
 
 
+def is_guardian_kernel_valid(caps: dict):
+    if caps is None:
+        return False, "caps_missing"
+    meta = caps.get("meta", {})
+    if meta.get("truncated") is True:
+        return False, "caps_truncated"
+    by_ad = caps.get("by_ad_guid") or {}
+    if not by_ad or len(by_ad) == 0:
+        return False, "by_ad_guid_empty"
+    return True, "ok"
+
+
 def _current_zone_id():
     try:
         services = __import__("services")

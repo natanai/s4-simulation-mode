@@ -74,16 +74,13 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 | --- | --- |
 | Enable Simulation Mode | `simulation true` |
 | Disable Simulation Mode | `simulation false` |
-| Reload settings | `simulation reload` |
 | Collect snapshot log | `simulation collect` |
 | Force object scan | `simulation force_scan` |
 | Trigger skill plan | `simulation skill_plan_now` |
-| Status | `simulation status` |
 
 Notes:
 
 * The Life Director nudges real skill-building interactions (no motive/skill cheating) when Sims are safe and idle.
-* `simulation skill_plan_now` will defer with a short retry if the Sim is already running a different interaction.
 * `death.toggle` is applied on enable and reasserted periodically while Simulation Mode is running.
 
 ## Testing workflow (for development)
@@ -95,12 +92,12 @@ Expected artifacts:
 * `simulation-mode-object-catalog.jsonl`
 * `simulation-mode-capabilities.json`
 
-### What `skill_plan_now` does (Build 66)
+### What `skill_plan_now` does
 
-* Picks a skill the active Sim already has.
-* Chooses an interaction that empirically grants skill gain (from the `by_skill_gain_guid` index).
+* Chooses a non-maxed skill for the active Sim.
+* Selects a candidate affordance from the catalog that should grant skill gain.
 * Pushes the interaction.
-* Logs a follow-up verification event indicating whether the skill actually increased.
+* Verifies the skill gain and updates `SimulationMode/simulation-mode-verified-gain.json`.
 
 ## Test plan
 
@@ -115,8 +112,7 @@ Quick smoke checklist:
 1. Put `simulation-mode.ts4script` into `Mods/SimulationMode/`.
 2. Add `simulation-mode.txt` to `Mods/SimulationMode/`.
 3. Enable script mods and restart.
-4. In-game, run `simulation status` (should show loaded + version if provided).
-5. Run `simulation true`, wait 3–5 seconds, then run `simulation status` again (confirm `tick_count` is > 0 and `daemon_running` is `True`).
-6. Run `simulation debug` and confirm `clock_speed`/alarm info are printed.
-7. Pause the game for 2 seconds and confirm it auto-unpauses (if `auto_unpause=true`).
-8. Let a Sim dip into yellow motives and confirm the guardian pushes a self-care interaction.
+4. In-game, run `simulation collect` (should emit a snapshot log).
+5. Run `simulation true`, wait 3–5 seconds, then run `simulation collect` again (confirm `tick_count` increases).
+6. Pause the game for 2 seconds and confirm it auto-unpauses (if `auto_unpause=true`).
+7. Let a Sim dip into yellow motives and confirm the guardian pushes a self-care interaction.

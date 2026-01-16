@@ -167,6 +167,18 @@ def get_candidates_for_skill_guid(guid64: int, caps: dict):
     return list(index.get(str(guid64)) or [])
 
 
+def is_skill_kernel_valid(caps: dict):
+    if caps is None:
+        return False, "caps_missing"
+    meta = caps.get("meta", {})
+    if meta.get("truncated") is True:
+        return False, "caps_truncated"
+    by_skill = caps.get("by_skill_guid") or {}
+    if not by_skill or len(by_skill) == 0:
+        return False, "by_skill_guid_empty"
+    return True, "ok"
+
+
 def _current_zone_id():
     try:
         services = __import__("services")

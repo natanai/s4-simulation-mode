@@ -881,6 +881,28 @@ def _collect_kernel_index_status(_sim_info):
     return lines
 
 
+def _collect_skill_plan_now_diagnostics():
+    capabilities = importlib.import_module("simulation_mode.capabilities")
+    director = importlib.import_module("simulation_mode.director")
+    lines = ["SKILL PLAN NOW (STRICT) DIAGNOSTICS"]
+    caps = capabilities.load_capabilities()
+    kernel_valid, kernel_reason = capabilities.is_skill_kernel_valid(caps)
+    by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
+    skill_keys = list(by_skill.keys()) if isinstance(by_skill, dict) else []
+    lines.append(f"kernel_valid={kernel_valid} kernel_reason={kernel_reason}")
+    lines.append(f"by_skill_guid_keys={len(skill_keys)}")
+    last_attempt = director.get_last_skill_plan_strict()
+    if last_attempt is None:
+        lines.append("last_skill_plan_now=(none)")
+    else:
+        try:
+            payload = json.dumps(last_attempt, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            payload = str(last_attempt)
+        lines.append(f"last_skill_plan_now={payload}")
+    return lines
+
+
 def _collect_capabilities_status(_sim_info):
     capabilities = importlib.import_module("simulation_mode.capabilities")
     lines = ["CAPABILITIES (KERNEL)"]
@@ -1713,6 +1735,8 @@ def _build_collect_payload():
         lines.extend(_collect_internal_probes(sim_info))
     lines.append("")
     lines.extend(_collect_kernel_index_status(sim_info))
+    lines.append("")
+    lines.extend(_collect_skill_plan_now_diagnostics())
     lines.append("")
     lines.extend(_collect_catalog_sample(sim_info))
     lines.append("")
@@ -2962,86 +2986,69 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "skill_plan_now":
         director = importlib.import_module("simulation_mode.director")
-        guardian = importlib.import_module("simulation_mode.guardian")
         logging_utils = importlib.import_module("simulation_mode.logging_utils")
         services = importlib.import_module("services")
         capabilities = importlib.import_module("simulation_mode.capabilities")
+        story_log = importlib.import_module("simulation_mode.story_log")
         sim = _get_active_sim(services)
         sim_info = getattr(sim, "sim_info", None) if sim is not None else None
         if sim is None or sim_info is None:
             output("No active sim found.")
             return True
         caps = capabilities.ensure_full_capabilities(sim_info, force_rebuild=False)
-        if not caps:
-            output("skill_plan_now FAIL capabilities unavailable")
-            return True
-        now = time.time()
         sim_name = director._sim_display_name(sim_info)
-        snapshot = director.get_motive_snapshot_for_sim(sim_info)
-        min_motive = director._safe_min_motive(snapshot) if snapshot else None
-        motive_unsafe = (
-            min_motive is not None and min_motive < settings.director_min_safe_motive
-        )
+        kernel_ok, kernel_reason = capabilities.is_skill_kernel_valid(caps)
         result_lines = [
             f"skill_plan_now sim={sim_name} sim_id={director._sim_identifier(sim_info)}",
-            f"min_motive={min_motive} min_safe_threshold={settings.director_min_safe_motive}",
-            f"motive_unsafe={motive_unsafe}",
+            f"kernel_valid={kernel_ok}",
+            f"kernel_reason={kernel_reason}",
         ]
-        success = False
-        if motive_unsafe and settings.director_use_guardian_when_low:
-            ok, detail = guardian.push_self_care(
-                sim_info,
-                now,
-                settings.director_green_motive_percent,
-                bypass_cooldown=True,
+        if not kernel_ok:
+            result_lines.append("skill_plan_result=FAIL")
+            result_lines.append(f"failure_reason=kernel_invalid:{kernel_reason}")
+            payload = "\n".join(result_lines)
+            path = logging_utils.append_log_block(
+                settings.collect_log_filename, "SimulationMode SKILL_PLAN_NOW", payload
             )
-            result_lines.append(f"guardian_invoked={ok} detail={detail}")
-            result_lines.append(
-                f"skill_plan_now: motive_unsafe=True -> guardian(force=True) result={detail}"
+            output(f"skill_plan_now FAIL kernel_invalid reason={kernel_reason}")
+            output(f"skill_plan_now_written={path} result=failure")
+            story_log.append_event(
+                "skill_plan_now_failed", sim_info=sim_info, reason=kernel_reason
             )
-            success = ok
-        else:
-            result = director.run_skill_plan(
-                sim_info, sim, now, force=True, source="skill_plan_now"
-            )
-            result_lines.append(f"wants_reason={result.get('wants_reason')}")
-            result_lines.append(f"career_reason={result.get('career_reason')}")
-            started_candidates = result.get("started_candidates") or []
-            result_lines.append(
-                f"started_candidates_count={len(started_candidates)}"
-            )
-            if started_candidates:
-                result_lines.append("started_skills_order_top5:")
-                for skill_key, _reason, level in started_candidates[:5]:
-                    result_lines.append(f"- {skill_key} level={level}")
-            if result.get("success"):
-                skill_key = result.get("skill_key")
-                reason = result.get("skill_reason")
-                skill_source = result.get("skill_source")
-                result_lines.append("skill_plan_result=SUCCESS")
-                result_lines.append(f"skill_key={skill_key}")
-                result_lines.append(f"skill_source={skill_source}")
-                result_lines.append(f"skill_reason={reason}")
-                director._record_push(director._sim_identifier(sim_info), now)
-                director._record_action(sim_info, skill_key, reason, now)
-                success = True
-            else:
-                result_lines.append("skill_plan_result=FAIL")
-                result_lines.append(
-                    f"attempted_started={result.get('attempted', 0)}"
-                )
-                failure_counts = result.get("failure_counts", {})
-                result_lines.append(
-                    "failure_counts no_object={} no_affordance={} push_failed={}".format(
-                        failure_counts.get("no_object", 0),
-                        failure_counts.get("no_affordance", 0),
-                        failure_counts.get("push_failed", 0),
-                    )
-                )
+            return True
+
+        success, details = director.try_push_skill_plan_strict(sim_info, caps=caps)
+        result_lines.append(f"chosen_skill_guid={details.get('chosen_skill_guid')}")
+        result_lines.append(f"chosen_skill_label={details.get('chosen_skill_label')}")
+        result_lines.append(
+            f"candidate_skill_count={details.get('candidate_skill_count')}"
+        )
+        result_lines.append(
+            f"candidate_affordance_count={details.get('candidate_affordance_count')}"
+        )
+        result_lines.append(f"attempted_pushes={details.get('attempted_pushes')}")
+        result_lines.append(f"reason={details.get('reason')}")
+        result_lines.append(
+            f"skill_plan_result={'SUCCESS' if success else 'FAIL'}"
+        )
         payload = "\n".join(result_lines)
         path = logging_utils.append_log_block(
             settings.collect_log_filename, "SimulationMode SKILL_PLAN_NOW", payload
         )
+        if success:
+            output(
+                "skill_plan_now OK reason={reason} skill_guid64={guid} affordance_candidates={aff_count}".format(
+                    reason=details.get("reason"),
+                    guid=details.get("chosen_skill_guid"),
+                    aff_count=details.get("candidate_affordance_count"),
+                )
+            )
+            story_log.append_event("skill_plan_now", sim_info=sim_info, **details)
+        else:
+            output(f"skill_plan_now FAIL {details.get('reason')}")
+            story_log.append_event(
+                "skill_plan_now_failed", sim_info=sim_info, **details
+            )
         output(
             f"skill_plan_now_written={path} result={'success' if success else 'failure'}"
         )

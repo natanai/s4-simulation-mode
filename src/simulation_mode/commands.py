@@ -18,7 +18,7 @@ _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
 # Keep alarm handles alive per-sim so they are not garbage-collected.
 _PENDING_SKILL_PLAN_ALARMS = {}
-BUILD_NUMBER = "64"
+BUILD_NUMBER = "65"
 
 
 def _parse_bool(arg: str):
@@ -436,6 +436,61 @@ def _collect_started_skills(sim_info):
                 skill_value=skill_value,
             )
         )
+    return lines
+
+
+def _collect_skill_coverage(sim_info):
+    director = importlib.import_module("simulation_mode.director")
+    capabilities = importlib.import_module("simulation_mode.capabilities")
+    lines = ["SKILL COVERAGE (ACTIVE SIM)"]
+    if sim_info is None:
+        lines.append("skills= (none)")
+        return lines
+    caps = capabilities.load_capabilities()
+    by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
+
+    def _cand_count_for_skill(guid):
+        candidates = list(by_skill.get(str(guid)) or by_skill.get(guid) or [])
+        count = 0
+        for entry in candidates:
+            if entry.get("safe_push", True) is False:
+                continue
+            if entry.get("allow_autonomous", True) is False:
+                continue
+            count += 1
+        return count
+
+    skills = []
+    seen = set()
+    for skill_obj in director._iter_all_skill_objects(sim_info):
+        guid = director._skill_guid64(skill_obj)
+        if guid is None or guid in seen:
+            continue
+        seen.add(guid)
+        label = director._skill_label(skill_obj) or getattr(
+            skill_obj.__class__, "__name__", "Skill"
+        )
+        skills.append((guid, label))
+
+    if not skills:
+        lines.append("skills= (none)")
+        return lines
+
+    with_candidates = 0
+    without_candidates = 0
+    coverage = []
+    for guid, label in skills:
+        count = _cand_count_for_skill(guid)
+        if count > 0:
+            with_candidates += 1
+        else:
+            without_candidates += 1
+        coverage.append((guid, label, count))
+    lines.append(f"total_skills={len(skills)}")
+    lines.append(f"skills_with_candidates={with_candidates}")
+    lines.append(f"skills_without_candidates={without_candidates}")
+    for guid, label, count in coverage[:15]:
+        lines.append(f" - skill={label} guid64={guid} candidates={count}")
     return lines
 
 
@@ -1723,9 +1778,11 @@ def _build_collect_payload():
     active_sim = _get_active_sim(services)
     lines.extend(_collect_active_sim_details(active_sim))
     lines.append("")
+    sim_info = _active_sim_info()
+    lines.extend(_collect_skill_coverage(sim_info))
+    lines.append("")
     lines.extend(director.probe_skills(sim_info))
     lines.append("")
-    sim_info = _active_sim_info()
     if sim_info is None:
         lines.append("COLLECT: INTERNAL PROBES")
         lines.append("active_sim= (none)")

@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.5.0, Build 66)
+# Simulation Mode Kernel Mod (v0.5.0, Build 69)
 
 ## What it is
 
@@ -76,12 +76,15 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 | Disable Simulation Mode | `simulation false` |
 | Collect snapshot log | `simulation collect` |
 | Force object scan | `simulation force_scan` |
-| Trigger skill plan | `simulation skill_plan_now` |
+| Trigger skill plan | `simulation skill_plan_now <sim_firstname>` |
+| Trigger wants plan | `simulation wants_plan_now <sim_firstname>` |
+| Trigger aspiration plan | `simulation aspiration_plan_now <sim_firstname>` |
 
 Notes:
 
 * The Life Director nudges real skill-building interactions (no motive/skill cheating) when Sims are safe and idle.
 * `death.toggle` is applied on enable and reasserted periodically while Simulation Mode is running.
+* The mod only operates on active household Sims.
 
 ## Testing workflow (for development)
 
@@ -94,10 +97,11 @@ Expected artifacts:
 
 ### What `skill_plan_now` does
 
-* Chooses a non-maxed skill for the active Sim.
+* Chooses a non-maxed skill for the selected active household Sim.
 * Selects a candidate affordance from the catalog that should grant skill gain.
 * Pushes the interaction.
 * Verifies the skill gain and updates `SimulationMode/simulation-mode-verified-gain.json`.
+* To reset verified actions, delete the verified-gain file while the game is closed.
 
 ## Test plan
 

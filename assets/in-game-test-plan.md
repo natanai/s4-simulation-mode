@@ -4,8 +4,9 @@
 
 This plan validates that the Simulation Mode kernel loads, responds to console commands, and
 executes guardian/director behavior safely during live gameplay.
+Simulation Mode operates only on active household Sims.
 
-Build 68 note: the README now highlights the primary command examples (`simulation true/false/collect/force_scan/skill_plan_now`).
+Build 69 note: the README now highlights the primary command examples (`simulation true/false/collect/force_scan/skill_plan_now/wants_plan_now/aspiration_plan_now`).
 
 ## Preconditions
 
@@ -57,13 +58,13 @@ Build 68 note: the README now highlights the primary command examples (`simulati
    * **Expected:** `last_director_actions` prints and an interaction may be queued.
 4. Run `simulation director_why`.
    * **Expected:** recent director debug lines or an empty set message.
-5. Run `simulation want_now`.
-   * **Expected:** console prints `want_now result=<SUCCESS|FAIL>` plus the probe log path.
-6. Optional: run `simulation director_push <skill_key>` on a known skill.
+5. Optional: run `simulation director_push <skill_key>` on a known skill.
    * **Expected:** success/failure message plus last action/debug.
-7. Optional: run `simulation director_takeover <skill_key>` to cancel current interactions and push.
-8. Run `simulation skill_plan_now` while the Sim is already performing an unrelated interaction.
+6. Optional: run `simulation director_takeover <skill_key>` to cancel current interactions and push.
+7. Run `simulation skill_plan_now <sim_firstname>` while the Sim is already performing an unrelated interaction.
    * **Expected:** a result is logged to the collect log file and the console reports success/failure.
+8. Optional: run `simulation wants_plan_now <sim_firstname>` and `simulation aspiration_plan_now <sim_firstname>`.
+   * **Expected:** console reports success/failure plus candidate counts (if affordance GUIDs were found).
 
 ## Settings reload
 

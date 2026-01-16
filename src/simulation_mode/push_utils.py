@@ -36,6 +36,23 @@ if _PICKER_SPEC is not None:
 _UNSAFE_AFFORDANCE_CACHE = set()
 
 
+def _safe_get(obj, name, default=None):
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return default
+
+
+def _safe_call(obj, name, *args, **kwargs):
+    fn = _safe_get(obj, name)
+    if not callable(fn):
+        return False, None, f"not callable: {name}"
+    try:
+        return True, fn(*args, **kwargs), None
+    except Exception as exc:
+        return False, None, f"{type(exc).__name__}: {exc}"
+
+
 def is_picker_affordance(affordance):
     if affordance is None:
         return False
@@ -440,6 +457,67 @@ def resolve_affordance_by_guid(obj, aff_guid64: int):
     return None
 
 
+def _object_on_active_lot(obj):
+    zone_id = _safe_get(obj, "zone_id")
+    if zone_id is None:
+        return True
+    current_zone_id = _safe_get(services, "current_zone_id")
+    if callable(current_zone_id):
+        ok, value, _error = _safe_call(services, "current_zone_id")
+        current_zone_id = value if ok else None
+    if current_zone_id is None:
+        return True
+    return zone_id == current_zone_id
+
+
+def _object_is_hidden(obj):
+    for attr in ("is_hidden", "hidden", "is_object_hidden"):
+        value = _safe_get(obj, attr)
+        if value is None:
+            continue
+        if callable(value):
+            ok, result, _error = _safe_call(obj, attr)
+            if ok and result:
+                return True
+        elif value:
+            return True
+    return False
+
+
+def _object_in_inventory(obj):
+    value = _safe_get(obj, "is_in_inventory")
+    if value is not None:
+        if callable(value):
+            ok, result, _error = _safe_call(obj, "is_in_inventory")
+            if ok:
+                return bool(result)
+        else:
+            return bool(value)
+    comp = _safe_get(obj, "inventoryitem_component")
+    if comp is not None:
+        value = _safe_get(comp, "is_in_inventory")
+        if value is not None:
+            if callable(value):
+                ok, result, _error = _safe_call(comp, "is_in_inventory")
+                if ok:
+                    return bool(result)
+            else:
+                return bool(value)
+    return False
+
+
+def _is_world_interactable_object(obj):
+    if obj is None:
+        return False, "obj_none"
+    if _object_in_inventory(obj):
+        return False, "obj_in_inventory"
+    if _object_is_hidden(obj):
+        return False, "obj_hidden"
+    if not _object_on_active_lot(obj):
+        return False, "obj_not_on_active_lot"
+    return True, "ok"
+
+
 def _distance(sim, obj):
     sim_pos = getattr(sim, "position", None)
     obj_pos = getattr(obj, "position", None)
@@ -463,22 +541,77 @@ def _distance(sim, obj):
         return None
 
 
-def push_by_def_and_aff_guid(sim, def_id: int, aff_guid64: int, reason: str, probe_details=None):
+def precheck_affordance(sim, obj, affordance):
+    if sim is None or obj is None or affordance is None:
+        return None, "precheck_unavailable"
+    resolver = None
+    resolver_spec = importlib.util.find_spec("event_testing.resolver")
+    if resolver_spec is not None:
+        resolver_module = importlib.import_module("event_testing.resolver")
+        resolver_cls = _safe_get(resolver_module, "SingleActorAndObjectResolver")
+        if resolver_cls is not None:
+            try:
+                resolver = resolver_cls(sim, obj)
+            except Exception:
+                resolver = None
+    tests = _safe_get(affordance, "tests")
+    if tests is not None and callable(_safe_get(tests, "run_tests")) and resolver is not None:
+        ok, result, error = _safe_call(tests, "run_tests", resolver)
+        if ok:
+            passed = bool(result)
+            detail = "tests_run" if passed else "tests_failed"
+            return passed, detail
+        return None, f"tests_error:{error}"
+    if callable(_safe_get(affordance, "test")):
+        ok, result, error = _safe_call(affordance, "test", sim, obj)
+        if ok:
+            passed = bool(result)
+            detail = "test_passed" if passed else "test_failed"
+            return passed, detail
+        return None, f"test_error:{error}"
+    return None, "precheck_unavailable"
+
+
+def push_by_def_and_aff_guid(
+    sim, def_id: int, aff_guid64: int, reason: str, probe_details=None, precheck=False
+):
     if sim is None or def_id is None or aff_guid64 is None:
-        return False
+        return False, "invalid_params"
     objects = find_objects_by_definition_id(def_id)
     if not objects:
         if probe_details is not None:
             probe_details.setdefault("push_attempts", []).append(
-                {"obj_def_id": def_id, "aff_guid64": aff_guid64, "result": "no_objects"}
+                {
+                    "obj_def_id": def_id,
+                    "aff_guid64": aff_guid64,
+                    "result": "no_objects",
+                    "reason": "no_object_instances_def_id",
+                }
             )
-        return False
+        return False, "no_object_instances_def_id"
     sorted_objects = []
     for obj in objects:
+        ok, filter_reason = _is_world_interactable_object(obj)
+        if not ok:
+            if probe_details is not None:
+                probe_details.setdefault("push_attempts", []).append(
+                    {
+                        "obj_def_id": def_id,
+                        "aff_guid64": aff_guid64,
+                        "result": "obj_filtered",
+                        "reason": f"filtered:{filter_reason}",
+                    }
+                )
+            continue
         distance = _distance(sim, obj)
         sorted_objects.append((distance if distance is not None else float("inf"), obj))
+    if not sorted_objects:
+        return False, "no_world_objects_def_id"
     sorted_objects.sort(key=lambda item: item[0])
     context, _client_attached = make_interaction_context(sim, force=False)
+    failure_reason = None
+    precheck_failure_detail = None
+    had_push_attempt = False
     for _distance_value, obj in sorted_objects:
         aff = resolve_affordance_by_guid(obj, aff_guid64)
         if aff is None:
@@ -488,9 +621,25 @@ def push_by_def_and_aff_guid(sim, def_id: int, aff_guid64: int, reason: str, pro
                         "obj_def_id": def_id,
                         "aff_guid64": aff_guid64,
                         "result": "aff_not_found",
+                        "reason": "no_affordance_tuning",
                     }
                 )
             continue
+        if precheck:
+            passed, detail = precheck_affordance(sim, obj, aff)
+            if passed is False:
+                precheck_failure_detail = detail
+                if probe_details is not None:
+                    probe_details.setdefault("push_attempts", []).append(
+                        {
+                            "obj_def_id": def_id,
+                            "aff_guid64": aff_guid64,
+                            "result": "precheck_failed",
+                            "reason": f"precheck_failed:{detail}",
+                        }
+                )
+                continue
+        had_push_attempt = True
         ok, failure_reason, _sig_names = call_push_super_affordance(
             sim, aff, obj, context
         )
@@ -505,5 +654,7 @@ def push_by_def_and_aff_guid(sim, def_id: int, aff_guid64: int, reason: str, pro
                 }
             )
         if ok:
-            return True
-    return False
+            return True, "pushed"
+    if not had_push_attempt and precheck_failure_detail:
+        return False, f"precheck_failed:{precheck_failure_detail}"
+    return False, f"push_failed:{failure_reason or 'unknown'}"

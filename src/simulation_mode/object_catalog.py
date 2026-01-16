@@ -390,14 +390,6 @@ def scan_zone_catalog(
 
     notes = []
     try:
-        Types = sims4.resources.Types
-        if hasattr(Types, "SKILL"):
-            skill_manager = services.get_instance_manager(Types.SKILL)
-        else:
-            skill_manager = services.get_instance_manager(Types.STATISTIC)
-    except Exception:
-        skill_manager = None
-    try:
         if include_sims is None:
             include_sims = sm_settings.get_bool("catalog_include_sims", False)
         if include_non_autonomous is None:
@@ -448,33 +440,84 @@ def scan_zone_catalog(
     write_failed = False
     path = get_catalog_log_path(filename)
 
-    skill_manager_unavailable = False
+    skill_guid_filter_no_instance_managers = False
+    skill_guids_all_filtered_out = False
 
     def _filter_skill_guids(guids):
-        nonlocal skill_manager_unavailable
+        nonlocal skill_guid_filter_no_instance_managers
+        nonlocal skill_guids_all_filtered_out
         if not guids:
             return []
-        if skill_manager is None:
-            skill_manager_unavailable = True
-            best_effort = []
-            for guid in guids:
-                if guid is None:
-                    continue
+        managers = []
+        try:
+            Types = sims4.resources.Types
+            if hasattr(Types, "SKILL"):
+                manager = services.get_instance_manager(Types.SKILL)
+                if manager is not None:
+                    managers.append(("Types.SKILL", manager))
+            stat_mgr = services.get_instance_manager(Types.STATISTIC)
+            if stat_mgr is not None:
+                managers.append(("Types.STATISTIC", stat_mgr))
+        except Exception:
+            managers = []
+        if not managers:
+            skill_guid_filter_no_instance_managers = True
+            if guids:
+                skill_guids_all_filtered_out = True
+            return []
+
+        def _tuning_is_skill(tuning):
+            if tuning is None:
+                return False
+            attr = _safe_get(tuning, "is_skill")
+            if attr is not None:
                 try:
-                    best_effort.append(int(guid))
+                    if bool(attr() if callable(attr) else attr):
+                        return True
                 except Exception:
-                    continue
-            return sorted(set(best_effort))[:25]
+                    pass
+            module = (
+                _safe_get(tuning, "__module__")
+                or _safe_get(_safe_get(tuning, "__class__"), "__module__")
+                or ""
+            ).lower()
+            name = (
+                _safe_get(tuning, "__name__")
+                or _safe_get(_safe_get(tuning, "__class__"), "__name__")
+                or ""
+            ).lower()
+            if ("skill" in module or "skill" in name) and not (
+                "commodity" in module or "commodity" in name
+            ):
+                return True
+            for attr_name in ("skill_value", "get_skill_value", "max_level", "get_max_level"):
+                if hasattr(tuning, attr_name):
+                    return True
+            return False
+
         filtered = []
         for guid in guids:
             if guid is None:
                 continue
-            try:
-                if skill_manager.get(guid) is not None:
-                    filtered.append(int(guid))
-            except Exception:
+            tuning = None
+            for _source_name, manager in managers:
+                try:
+                    tuning = manager.get(guid)
+                except Exception:
+                    tuning = None
+                if tuning is not None:
+                    break
+            if tuning is None:
                 continue
-        return sorted(set(filtered))
+            if _tuning_is_skill(tuning):
+                try:
+                    filtered.append(int(guid))
+                except Exception:
+                    continue
+        filtered = sorted(set(filtered))
+        if guids and not filtered:
+            skill_guids_all_filtered_out = True
+        return filtered
 
     try:
         if path:
@@ -696,8 +739,10 @@ def scan_zone_catalog(
         notes.append(
             "all_affordances_filtered_out; check allow_ud/allow_auto extraction and picker/debug flags"
         )
-    if skill_manager_unavailable:
-        notes.append("skill_manager_unavailable; skill_guids_unvalidated")
+    if skill_guid_filter_no_instance_managers:
+        notes.append("skill_guid_filter_no_instance_managers")
+    if skill_guids_all_filtered_out:
+        notes.append("skill_guids_all_filtered_out")
     notes = [note for note in notes if note][:10]
     written_records = record_lines_written + (1 if handle is not None else 0)
     meta_record = {

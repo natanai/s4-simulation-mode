@@ -13,7 +13,7 @@ logger = sims4.log.Logger("SimulationMode")
 
 
 KNOWN_DEFAULTS = [
-    ("enabled", "true"),
+    ("enabled", "false"),
     ("auto_unpause", "true"),
     ("allow_death", "false"),
     ("allow_pregnancy", "false"),

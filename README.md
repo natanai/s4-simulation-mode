@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.5.0, Build 43)
+# Simulation Mode Kernel Mod (v0.5.0, Build 64)
 
 ## What it is
 
@@ -45,11 +45,7 @@ Run the “Build Simulation Mode Script” workflow and download the artifact na
 
 ## Install
 
-```bash
-python tools/install_to_mods.py
-```
-
-Place both files in your Mods folder:
+Drop both files in your Mods folder:
 
 ```
 Mods/SimulationMode/simulation-mode.ts4script
@@ -65,92 +61,41 @@ If the `simulation` command does not register, verify the archive contains a roo
 
 In-game: Options → Game Options → Other → enable “Enable Custom Content and Mods” and “Script Mods Allowed”, then restart the game.
 
-## Use
+## How to run
 
-Open the cheat console and run:
+1. Start the game and load a household.
+2. Run: `simulation true`
 
 All commands are exposed under `simulation` (and the alias `simulation_mode`).
 
-### Console command reference
+### Command reference (examples)
 
-| Command | What it does |
+| Command | Example |
 | --- | --- |
-| `simulation status` | Show enablement state, daemon status, and tick counters. |
-| `simulation true` | Enable Simulation Mode and start the daemon. |
-| `simulation false` | Disable Simulation Mode and stop the daemon. |
-| `simulation help` | Print usage plus available settings keys. |
-| `simulation reload` | Reload `simulation-mode.txt` from disk and apply changes. |
-| `simulation set <key> <value>` | Set a runtime setting (non-persistent). |
-| `simulation set tick 1..120` | Set the watchdog tick interval in seconds. |
-| `simulation tick <1..120>` | Shorthand for `simulation set tick ...`. |
-| `simulation allow_pregnancy <true|false>` | Shorthand for `simulation set allow_pregnancy ...`. |
-| `simulation auto_unpause <true|false>` | Shorthand for `simulation set auto_unpause ...`. |
-| `simulation allow_death <true|false>` | Shorthand for `simulation set allow_death ...`. |
-| `simulation debug` | Print daemon timing, alarm, and auto-unpause diagnostics. |
-| `simulation director` | Show Life Director configuration, last run info, and motive snapshot. |
-| `simulation director_gate` | Print green-gate evaluation (safe-to-push check). |
-| `simulation director_now` | Force a Life Director run and print the last actions. |
-| `simulation director_why` | Dump the most recent Life Director debug lines. |
-| `simulation director_push <skill_key>` | Push a skill interaction on the active Sim. |
-| `simulation director_takeover <skill_key>` | Cancel current interactions, then push a skill. |
-| `simulation guardian_now [force]` | Force a guardian self-care push for the active Sim. |
-| `simulation story path` | Print the story log file path. |
-| `simulation story tail [n]` | Tail the last N story log lines (default 20). |
-| `simulation story clear` | Clear the story log. |
-| `simulation want_now` | Force the want resolver to push an active want for the active Sim. |
-| `simulation collect` | Append a snapshot block to the collect log file (defaults to `simulation-mode-collect.log`). |
-| `simulation force_scan` | Scan the active Sim's zone object catalog and write summary details to the collect log. |
-| `simulation skill_plan_now` | Force a skill plan evaluation for the active Sim and log the result. |
-| `simulation configpath` | Print the resolved `simulation-mode.txt` path and existence. |
-| `simulation dump_log` | Write a `simulation-mode.log` snapshot to disk. |
-| `simulation probe_all` | Run all probe diagnostics and report to the probe log. |
-| `simulation probe_wants` | Dump active wants to the probe log. |
-| `simulation probe_want <index>` | Inspect a specific want slot by index. |
-| `simulation probe_career` | Inspect career tuning and interactions in the probe log. |
-| `simulation probe_aspiration` | Inspect aspiration tuning and interactions in the probe log. |
-
-### Settings keys for `simulation set`
-
-`auto_unpause`, `allow_death`, `allow_pregnancy`, `tick`, `guardian_enabled`,
-`guardian_check_seconds`, `guardian_min_motive`, `guardian_red_motive`,
-`guardian_per_sim_cooldown_seconds`, `guardian_max_pushes_per_sim_per_hour`,
-`director_enabled`, `director_check_seconds`, `director_min_safe_motive`,
-`director_green_motive_percent`, `director_green_min_commodities`,
-`director_allow_social_goals`, `director_allow_social_wants`,
-`director_enable_wants`, `director_use_guardian_when_low`,
-`director_per_sim_cooldown_seconds`,
-`director_max_pushes_per_sim_per_hour`, `director_prefer_career_skills`,
-`director_fallback_to_started_skills`, `director_skill_allow_list`,
-`director_skill_block_list`, `collect_log_filename`,
-`integrate_better_autonomy_trait`, `better_autonomy_trait_id`.
-
-Settings are stored in the manually editable file:
-
-`Mods/SimulationMode/simulation-mode.txt`
-
-After editing the TXT file, run `simulation reload` in-game to apply changes without restarting.
+| Enable Simulation Mode | `simulation true` |
+| Disable Simulation Mode | `simulation false` |
+| Reload settings | `simulation reload` |
+| Collect snapshot log | `simulation collect` |
+| Force object scan | `simulation force_scan` |
+| Trigger skill plan | `simulation skill_plan_now` |
+| Status | `simulation status` |
 
 Notes:
 
-* `guardian_min_motive` starts intervening when a core motive drops below this value. Motives generally range from -100..100, with yellow between -1..-50 and red below -50.
 * The Life Director nudges real skill-building interactions (no motive/skill cheating) when Sims are safe and idle.
-* Use `simulation want_now` to quickly confirm active wants can be resolved during a live session.
 * `simulation skill_plan_now` will defer with a short retry if the Sim is already running a different interaction.
 * `death.toggle` is applied on enable and reasserted periodically while Simulation Mode is running.
 
-## Life Director settings
+## Testing workflow (for development)
 
-```text
-director_enabled=true
-director_check_seconds=90
-director_min_safe_motive=-10
-director_per_sim_cooldown_seconds=300
-director_max_pushes_per_sim_per_hour=12
-director_prefer_career_skills=true
-director_fallback_to_started_skills=true
-director_skill_allow_list=
-director_skill_block_list=
-```
+Expected artifacts:
+
+* `simulation-mode-collect.log`
+* `simulation-mode-story.log`
+* `simulation-mode-object-catalog.jsonl`
+* `simulation-mode-capabilities.json`
+
+`skill_plan_now` behavior: “Attempts a single strict skill-building push using the capability index (career skills preferred; else started skills). Logs decision details to story log.”
 
 ## Test plan
 

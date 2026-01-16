@@ -139,22 +139,30 @@ def _sim_identifier(sim_info):
 
 def _is_sim_busy(sim):
     """
-    Return True only when the Sim has pending queued interactions waiting to run.
-    Do NOT treat queue.running as 'busy' because it's commonly a truthy idle/default interaction.
+    Return True when the Sim has a running non-idle interaction or queued interactions waiting to run.
+    Do NOT treat queue.running as 'busy' if it is idle/default.
     """
     queue = getattr(sim, "queue", None)
     if queue is None:
-        return False
+        return False, "queue_missing"
+
+    running = getattr(queue, "running", None)
+    if running is not None:
+        if isinstance(running, (list, tuple)):
+            running = running[0] if running else None
+        if running is not None and not _interaction_is_idle(running):
+            return True, "running_non_idle"
 
     # Primary signal: pending queued interactions (not the running SI).
     try:
         queued = getattr(queue, "_queue", None)
         if queued is not None and hasattr(queued, "__len__"):
-            return len(queued) > 0
+            if len(queued) > 0:
+                return True, "queued_interactions"
     except Exception:
         pass
 
-    return False
+    return False, "idle_or_empty_queue"
 
 
 def _log_once_per_hour(message, last_timestamp_attr):
@@ -249,6 +257,65 @@ def _running_interaction_info(sim):
                 affordance_name = None
     running_label = affordance_name or running_type
     return running_type, affordance_name, running_label
+
+
+def _interaction_is_idle(interaction):
+    for attr in ("is_idle", "is_idle_interaction", "is_sim_idle"):
+        value = getattr(interaction, attr, None)
+        if callable(value):
+            try:
+                return bool(value())
+            except Exception:
+                continue
+        if value is not None:
+            return bool(value)
+    type_name = ""
+    try:
+        type_name = type(interaction).__name__.lower()
+    except Exception:
+        type_name = ""
+    if type_name == "emotion_idle":
+        return True
+    if type_name.startswith("idle_"):
+        return True
+    if type_name.endswith("_idle") or type_name.endswith("idle"):
+        return True
+
+    affordance = None
+    for attr in ("affordance", "_affordance"):
+        affordance = getattr(interaction, attr, None)
+        if affordance is not None:
+            break
+    if affordance is None:
+        getter = getattr(interaction, "get_affordance", None)
+        if callable(getter):
+            try:
+                affordance = getter()
+            except Exception:
+                affordance = None
+    if affordance is not None:
+        aff_name = None
+        try:
+            aff_name = getattr(affordance, "__name__", None)
+        except Exception:
+            aff_name = None
+        if not aff_name:
+            try:
+                aff_name = getattr(affordance, "name", None)
+            except Exception:
+                aff_name = None
+        if not aff_name:
+            try:
+                aff_name = str(affordance)
+            except Exception:
+                aff_name = None
+        if aff_name:
+            aff_name = str(aff_name).lower()
+            if aff_name == "sim-stand":
+                return True
+            if aff_name == "idle" or aff_name.endswith("idle") or "_idle" in aff_name:
+                return True
+    return False
 
 
 def _is_running_care_for_motive(sim, motive_key: str) -> bool:
@@ -366,6 +433,25 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
     sim_id = _sim_identifier(sim_info)
     _PER_SIM_LAST_CHOSEN_MOTIVE[sim_id] = motive_key
     motive_unsafe = motive_value is not None and motive_value < settings.guardian_min_motive
+    if motive_unsafe and _is_running_care_for_motive(sim, motive_key):
+        running_type, running_aff_name, _running_label = _running_interaction_info(sim)
+        from simulation_mode import story_log
+        sim_name = getattr(sim, "full_name", None)
+        if callable(sim_name):
+            try:
+                sim_name = sim_name()
+            except Exception:
+                sim_name = None
+        sim_name = sim_name or getattr(sim, "first_name", None)
+        story_log.append_event(
+            "guardian_skip_running_care",
+            sim_info=sim_info,
+            motive_key=motive_key,
+            running_aff_name=running_aff_name,
+            running_type=running_type,
+            sim_name=sim_name,
+        )
+        return False, "already_running_care"
     if not _cooldown_allows_push(
         sim, sim_id, now, motive_key, motive_unsafe, bypass_cooldown=bypass_cooldown
     ):
@@ -373,7 +459,7 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
     if not _can_push_for_sim(sim_id, now):
         return False, "guardian max pushes"
 
-    busy_state = _is_sim_busy(sim)
+    busy_state, _busy_reason = _is_sim_busy(sim)
     if busy_state:
         return False, "sim busy"
 
@@ -525,7 +611,7 @@ def _process_sim(sim_info, now):
     if motive_value >= settings.guardian_min_motive:
         return
 
-    busy_state = _is_sim_busy(sim)
+    busy_state, _busy_reason = _is_sim_busy(sim)
     if busy_state:
         return
 

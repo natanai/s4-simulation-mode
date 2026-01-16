@@ -5,6 +5,8 @@
 This plan validates that the Simulation Mode kernel loads, responds to console commands, and
 executes guardian/director behavior safely during live gameplay.
 
+Build 68 note: the README now highlights the primary command examples (`simulation true/false/collect/force_scan/skill_plan_now`).
+
 ## Preconditions
 
 1. Build or download `simulation-mode.ts4script`.

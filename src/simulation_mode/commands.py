@@ -1571,6 +1571,7 @@ def _collect_aspiration_probe_lines(sim_info):
 def _collect_plan_preview(sim, now):
     director = importlib.import_module("simulation_mode.director")
     guardian = importlib.import_module("simulation_mode.guardian")
+    capabilities = importlib.import_module("simulation_mode.capabilities")
     preview = director.build_plan_preview(sim, now=now)
     if preview is None:
         return ["plan_preview= (unavailable)"]
@@ -1592,6 +1593,9 @@ def _collect_plan_preview(sim, now):
     )
     lines.append(f"guardian_chosen_motive={chosen_motive}")
     lines.append(f"guardian_running_care_relevant={running_care_relevant}")
+    caps = capabilities.load_capabilities()
+    kernel_valid, kernel_reason = capabilities.is_guardian_kernel_valid(caps)
+    lines.append(f"kernel_valid={kernel_valid} kernel_reason={kernel_reason}")
     lines.append(
         f"busy={preview['busy']} reason={preview['busy_reason']}"
     )

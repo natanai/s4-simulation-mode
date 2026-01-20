@@ -22,7 +22,7 @@ _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
 # Keep alarm handles alive per-sim so they are not garbage-collected.
 _PENDING_SKILL_PLAN_ALARMS = {}
-BUILD_NUMBER = "69"
+BUILD_NUMBER = "71"
 
 
 def _parse_bool(arg: str):
@@ -126,6 +126,8 @@ def _status_lines():
         f"skill_plan_max_skill_attempts={settings.skill_plan_max_skill_attempts}",
         f"director_skill_allow_list={settings.director_skill_allow_list}",
         f"director_skill_block_list={settings.director_skill_block_list}",
+        f"director_skill_cooldown_seconds={settings.director_skill_cooldown_seconds}",
+        f"director_affordance_cooldown_seconds={settings.director_affordance_cooldown_seconds}",
         f"guardian_hunger_prefer_quick_meal_threshold={settings.guardian_hunger_prefer_quick_meal_threshold}",
         f"collect_log_filename={settings.collect_log_filename}",
         f"story_log_enabled={settings.story_log_enabled}",
@@ -148,6 +150,7 @@ def _status_lines():
         f"catalog_max_objects={settings.catalog_max_objects}",
         f"catalog_max_affordances_per_object={settings.catalog_max_affordances_per_object}",
         f"catalog_write_sample={settings.catalog_write_sample}",
+        f"debug_write_object_catalog_sample={settings.debug_write_object_catalog_sample}",
         f"catalog_collect_sample_objects={settings.catalog_collect_sample_objects}",
         f"catalog_collect_sample_affordances_per_object={settings.catalog_collect_sample_affordances_per_object}",
         f"catalog_collect_top_auto_n={settings.catalog_collect_top_auto_n}",
@@ -947,7 +950,7 @@ def _collect_affordance_probe_lines(sim_info):
 
 def _collect_catalog_sample(sim_info):
     object_catalog = importlib.import_module("simulation_mode.object_catalog")
-    if not sm_settings.get_bool("catalog_write_sample", False):
+    if not sm_settings.get_bool("debug_write_object_catalog_sample", False):
         return ["CATALOG SAMPLE (PROBE)", "catalog_sample=disabled"]
     max_objects = sm_settings.get_int("catalog_collect_sample_objects", 150)
     max_aff = sm_settings.get_int("catalog_collect_sample_affordances_per_object", 60)
@@ -1329,6 +1332,20 @@ def _collect_aspiration_objectives(sim_info):
     if tracker is None:
         lines.append("aspiration_tracker=(not found)")
         return lines
+    active = _safe_get(tracker, "active_aspiration") or _safe_get(
+        tracker, "_active_aspiration"
+    )
+    active_name = (
+        _safe_get(active, "__name__")
+        or _safe_get(active, "name")
+        or _safe_get(active, "display_name")
+        or None
+    )
+    active_ids = _probe_item_ids(active) if active is not None else []
+    lines.append(f"active_aspiration_label={_trim_repr(active_name)}")
+    lines.append(
+        "active_aspiration_ids={}".format(active_ids if active_ids else "missing")
+    )
     milestone_attr, milestone_value = _find_first_attr(
         tracker,
         (
@@ -1387,10 +1404,13 @@ def _collect_aspiration_objectives(sim_info):
         lines.append(f"MILESTONE DISCOVERY HINT: {hint_names[:20]}")
     lines.append(f"current_milestone_source={milestone_attr}")
     lines.append(f"current_milestone={_trim_repr(milestone_value)}")
-
-    active = _safe_get(tracker, "active_aspiration") or _safe_get(
-        tracker, "_active_aspiration"
+    milestone_ids = _probe_item_ids(milestone_value) if milestone_value is not None else []
+    lines.append(
+        "current_milestone_ids={}".format(
+            milestone_ids if milestone_ids else "missing"
+        )
     )
+
     providers = [tracker]
     objective_tracker = _safe_get(tracker, "objective_tracker") or _safe_get(
         tracker, "_objective_tracker"
@@ -1435,17 +1455,7 @@ def _collect_aspiration_objectives(sim_info):
                     lines.append(f"get_objectives_error={error}")
             elif required == 1:
                 if milestone_value is None:
-                    ok, result, error = _safe_call(provider, "get_objectives", None)
-                    if ok and result:
-                        objectives = result
-                        lines.append("get_objectives_called_with_None=success")
-                    else:
-                        if ok:
-                            lines.append("get_objectives_called_with_None=failed:empty")
-                        else:
-                            lines.append(
-                                f"get_objectives_called_with_None=failed:{error}"
-                            )
+                    lines.append("get_objectives_skipped=milestone_missing")
                 else:
                     ok, result, error = _safe_call(
                         provider, "get_objectives", milestone_value
@@ -1535,6 +1545,7 @@ def _collect_aspiration_objectives(sim_info):
 
 
 def _collect_wants_probe_lines(sim_info):
+    director = importlib.import_module("simulation_mode.director")
     lines = ["WANTS (PROBE)"]
     if sim_info is None:
         lines.append("sim_info= (none)")
@@ -1542,35 +1553,25 @@ def _collect_wants_probe_lines(sim_info):
     tracker_name, tracker = _select_want_tracker(sim_info)
     if tracker is None:
         lines.append("want_tracker= (not found)")
-        return lines
-    lines.append(f"want_tracker_attr={tracker_name} type={type(tracker).__name__}")
-    wants = None
-    for method in ("get_current_wants", "get_wants", "get_active_wants"):
-        if callable(_safe_get(tracker, method)):
-            ok, result, _error = _safe_call(tracker, method)
-            if ok:
-                if isinstance(result, (list, tuple)):
-                    wants = list(result)
-                elif result is not None:
-                    wants = [result]
-                else:
-                    wants = []
-                break
-    if wants is None:
-        wants = []
+    else:
+        lines.append(f"want_tracker_attr={tracker_name} type={type(tracker).__name__}")
+    wants = director._get_active_wants(sim_info)
     lines.append(f"wants_count={len(wants)}")
+    lines.append(f"active_wants_count={len(wants)}")
     for idx, want in enumerate(wants[:10]):
-        want_name = (
-            _safe_get(want, "__name__")
-            or _safe_get(want, "name")
-            or _safe_get(want, "display_name")
-            or _trim_repr(want)
+        guid64 = director._get_whim_guid64(want)
+        tuning = director._resolve_whim_tuning_by_guid64(guid64)
+        label = getattr(tuning, "__name__", None) if tuning is not None else None
+        if not label:
+            label = director._extract_whim_name(want)
+        lines.append(
+            "want[{idx}] guid64={guid64} label={label} type={kind}".format(
+                idx=idx,
+                guid64=guid64,
+                label=_trim_repr(label),
+                kind=type(want).__name__,
+            )
         )
-        lines.append(f"want[{idx}] type={type(want).__name__} name={want_name!r}")
-        _log_identifiers(lines, f"want[{idx}].", want)
-        for attr in ("target", "target_sim", "target_id", "whim_target_sim"):
-            if hasattr(want, attr):
-                lines.append(f"want[{idx}].{attr}={_safe_get(want, attr)!r}")
     return lines
 
 
@@ -2300,7 +2301,7 @@ def _build_collect_payload():
     lines.append("")
     lines.extend(_collect_skill_plan_now_diagnostics())
     lines.append("")
-    if sm_settings.get_bool("catalog_write_sample", False) and sm_settings.get_int(
+    if sm_settings.get_bool("debug_write_object_catalog_sample", False) and sm_settings.get_int(
         "catalog_collect_sample_objects", 150
     ) > 0:
         lines.extend(_collect_catalog_sample(sim_info))
@@ -3238,8 +3239,10 @@ def _usage_lines():
         "director_skill_push_precheck, director_push_fail_strikes_limit, "
         "director_push_fail_strikes_decay_seconds, director_idle_override_enabled, "
         "director_idle_override_min_seconds_idle, director_idle_override_check_seconds, "
-        "director_skill_allow_list, director_skill_block_list, skill_plan_max_skill_attempts, "
-        "guardian_hunger_prefer_quick_meal_threshold, collect_log_filename, catalog_write_sample, "
+        "director_skill_allow_list, director_skill_block_list, director_skill_cooldown_seconds, "
+        "director_affordance_cooldown_seconds, skill_plan_max_skill_attempts, "
+        "guardian_hunger_prefer_quick_meal_threshold, collect_log_filename, "
+        "debug_write_object_catalog_sample, catalog_write_sample, "
         "integrate_better_autonomy_trait, better_autonomy_trait_id",
     ]
 
@@ -3256,11 +3259,13 @@ def _handle_set(key, value, _connection, output):
         return False
 
     key = key.strip().lower()
+    if key == "catalog_write_sample":
+        key = "debug_write_object_catalog_sample"
     if key in {"auto_unpause", "allow_death", "allow_pregnancy", "guardian_enabled",
                "director_allow_social_goals", "director_allow_social_wants",
                "director_enable_wants", "director_enable_aspirations",
                "director_use_guardian_when_low", "director_skill_push_precheck",
-               "director_idle_override_enabled", "catalog_write_sample",
+               "director_idle_override_enabled", "debug_write_object_catalog_sample",
                "integrate_better_autonomy_trait"}:
         parsed = _parse_bool(value)
         if parsed is None:

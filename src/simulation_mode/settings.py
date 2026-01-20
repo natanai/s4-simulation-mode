@@ -48,6 +48,8 @@ KNOWN_DEFAULTS = [
     ("director_idle_override_check_seconds", "10"),
     ("director_skill_allow_list", ""),
     ("director_skill_block_list", ""),
+    ("director_skill_cooldown_seconds", "7200"),
+    ("director_affordance_cooldown_seconds", "1800"),
     ("guardian_hunger_prefer_quick_meal_threshold", "0.45"),
     ("collect_log_filename", "simulation-mode-collect.log"),
     ("story_log_enabled", "true"),
@@ -71,6 +73,7 @@ KNOWN_DEFAULTS = [
     ("catalog_max_objects", "0"),
     ("catalog_max_affordances_per_object", "0"),
     ("catalog_write_sample", "false"),
+    ("debug_write_object_catalog_sample", "false"),
     ("catalog_collect_sample_objects", "150"),
     ("catalog_collect_sample_affordances_per_object", "60"),
     ("catalog_collect_top_auto_n", "40"),
@@ -196,6 +199,16 @@ def _build_default_template_text():
     )
     lines.append("director_skill_allow_list={}".format(defaults["director_skill_allow_list"]))
     lines.append("director_skill_block_list={}".format(defaults["director_skill_block_list"]))
+    lines.append(
+        "director_skill_cooldown_seconds={}".format(
+            defaults["director_skill_cooldown_seconds"]
+        )
+    )
+    lines.append(
+        "director_affordance_cooldown_seconds={}".format(
+            defaults["director_affordance_cooldown_seconds"]
+        )
+    )
     lines.append("collect_log_filename={}".format(defaults["collect_log_filename"]))
     lines.append("story_log_enabled={}".format(defaults["story_log_enabled"]))
     lines.append("story_log_filename={}".format(defaults["story_log_filename"]))
@@ -268,6 +281,11 @@ def _build_default_template_text():
         )
     )
     lines.append("catalog_write_sample={}".format(defaults["catalog_write_sample"]))
+    lines.append(
+        "debug_write_object_catalog_sample={}".format(
+            defaults["debug_write_object_catalog_sample"]
+        )
+    )
     lines.append("")
     lines.append("# collect-integrated sampling caps (Build 61)")
     lines.append(
@@ -355,6 +373,7 @@ def _append_missing_keys(path):
             "catalog_max_objects",
             "catalog_max_affordances_per_object",
             "catalog_write_sample",
+            "debug_write_object_catalog_sample",
         }
         collect_caps = {
             "catalog_collect_sample_objects",
@@ -460,6 +479,8 @@ class SimulationModeSettings:
         director_idle_override_check_seconds=10,
         director_skill_allow_list=None,
         director_skill_block_list=None,
+        director_skill_cooldown_seconds=7200,
+        director_affordance_cooldown_seconds=1800,
         guardian_hunger_prefer_quick_meal_threshold=0.45,
         collect_log_filename="simulation-mode-collect.log",
         story_log_enabled=True,
@@ -483,6 +504,7 @@ class SimulationModeSettings:
         catalog_max_objects=0,
         catalog_max_affordances_per_object=0,
         catalog_write_sample=False,
+        debug_write_object_catalog_sample=False,
         catalog_collect_sample_objects=150,
         catalog_collect_sample_affordances_per_object=60,
         catalog_collect_top_auto_n=40,
@@ -525,6 +547,8 @@ class SimulationModeSettings:
         self.director_idle_override_check_seconds = director_idle_override_check_seconds
         self.director_skill_allow_list = director_skill_allow_list or []
         self.director_skill_block_list = director_skill_block_list or []
+        self.director_skill_cooldown_seconds = director_skill_cooldown_seconds
+        self.director_affordance_cooldown_seconds = director_affordance_cooldown_seconds
         self.guardian_hunger_prefer_quick_meal_threshold = (
             guardian_hunger_prefer_quick_meal_threshold
         )
@@ -552,6 +576,7 @@ class SimulationModeSettings:
         self.catalog_max_objects = catalog_max_objects
         self.catalog_max_affordances_per_object = catalog_max_affordances_per_object
         self.catalog_write_sample = catalog_write_sample
+        self.debug_write_object_catalog_sample = debug_write_object_catalog_sample
         self.catalog_collect_sample_objects = catalog_collect_sample_objects
         self.catalog_collect_sample_affordances_per_object = (
             catalog_collect_sample_affordances_per_object
@@ -712,6 +737,7 @@ def load_settings(target):
         "include_sim": "catalog_include_sims",
         "include_sims": "catalog_include_sims",
         "include_non_autonomous": "catalog_include_non_autonomous",
+        "catalog_write_sample": "debug_write_object_catalog_sample",
     }
     for key, raw_value in data.items():
         key = aliases.get(key, key)
@@ -886,6 +912,16 @@ def load_settings(target):
                 target.director_skill_allow_list = _parse_list(raw_value)
             elif key == "director_skill_block_list":
                 target.director_skill_block_list = _parse_list(raw_value)
+            elif key == "director_skill_cooldown_seconds":
+                try:
+                    target.director_skill_cooldown_seconds = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_affordance_cooldown_seconds":
+                try:
+                    target.director_affordance_cooldown_seconds = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
             elif key == "guardian_hunger_prefer_quick_meal_threshold":
                 try:
                     target.guardian_hunger_prefer_quick_meal_threshold = max(
@@ -999,6 +1035,11 @@ def load_settings(target):
             elif key == "catalog_write_sample":
                 if isinstance(value, bool):
                     target.catalog_write_sample = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "debug_write_object_catalog_sample":
+                if isinstance(value, bool):
+                    target.debug_write_object_catalog_sample = value
                 else:
                     _log_invalid_value(key, raw_value)
             elif key == "catalog_collect_sample_objects":

@@ -596,7 +596,13 @@ def precheck_affordance(sim, obj, affordance):
 
 
 def push_by_def_and_aff_guid(
-    sim, def_id: int, aff_guid64: int, reason: str, probe_details=None, precheck=False
+    sim,
+    def_id: int,
+    aff_guid64: int,
+    reason: str,
+    probe_details=None,
+    precheck=False,
+    force=False,
 ):
     if sim is None or def_id is None or aff_guid64 is None:
         return False, "invalid_params"
@@ -675,7 +681,7 @@ def push_by_def_and_aff_guid(
     if not sorted_objects:
         return False, "no_world_objects_def_id"
     sorted_objects.sort(key=lambda item: item[0])
-    context, _client_attached = make_interaction_context(sim, force=False)
+    context, _client_attached = make_interaction_context(sim, force=force)
     failure_reason = None
     precheck_failure_detail = None
     had_push_attempt = False

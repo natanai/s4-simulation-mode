@@ -90,6 +90,22 @@ Notes:
 * `death.toggle` is applied on enable and reasserted periodically while Simulation Mode is running.
 * The mod only operates on active household Sims.
 
+## Guardian escalation (opt-in)
+
+Default behavior is unchanged unless `guardian_interrupt_running_noncritical=true` is set. When enabled, the guardian can interrupt long-running, noncritical interactions after repeated strikes to prevent them from blocking care pushes.
+
+Recommended test values:
+
+```
+guardian_interrupt_running_noncritical=true
+guardian_interrupt_noncritical_motive_threshold=-25
+guardian_interrupt_noncritical_strikes=3
+guardian_noncritical_cancel_cooldown_seconds=90
+guardian_force_push_on_noncritical_interrupt=true
+```
+
+Expected story-log flow when escalation triggers: `guardian_noncritical_interrupt_waiting` → `guardian_noncritical_cancel` → `guardian_push` (or `guardian_push_failed`).
+
 ## Testing workflow (for development)
 
 Expected artifacts:

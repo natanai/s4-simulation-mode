@@ -6,7 +6,7 @@ This plan validates that the Simulation Mode kernel loads, responds to console c
 executes guardian/director behavior safely during live gameplay.
 Simulation Mode operates only on active household Sims.
 
-Build 74 note: the README now highlights the primary command examples (`simulation true/false/collect/force_scan/skill_plan_now`).
+Build 76 note: guardian noncritical interrupts default on for new installs, and collect includes wants/aspiration/holiday diagnostics.
 
 ## Preconditions
 
@@ -50,6 +50,12 @@ Build 74 note: the README now highlights the primary command examples (`simulati
    * **Expected:** bypasses cooldown and pushes an action (or reports why it could not).
 5. Optional escalation test: set `guardian_interrupt_running_noncritical=true` with the recommended thresholds, keep a noncritical interaction running, and let the motive dip below the threshold.
    * **Expected:** story events show `guardian_noncritical_interrupt_waiting` strikes, then `guardian_noncritical_cancel`, followed by `guardian_push` or `guardian_push_failed`.
+6. Infinite action while unsafe checklist:
+   1. Enable simulation.
+   2. Let a Sim start an infinite-ish action (singing/mirror/etc).
+   3. Wait until a motive drops below `director_min_safe_motive`.
+   4. Run `simulation collect`.
+   5. Confirm collect shows guardian interrupt thresholds and the story log includes guardian noncritical interrupt events.
 
 ## Life Director
 
@@ -89,6 +95,7 @@ Build 74 note: the README now highlights the primary command examples (`simulati
    * **Expected:** `simulation-mode.log` is written to disk.
 3. Run `simulation collect`.
    * **Expected:** a new `SimulationMode COLLECT` block is appended to the collect log file.
+   * **Expected:** wants/aspiration GUID extraction and holiday/calendar probe-only sections appear (diagnostics only).
 4. Run `simulation probe_wants`, `simulation probe_want 0`, `simulation probe_career`,
    and `simulation probe_aspiration`.
    * **Expected:** each writes diagnostics to the probe log (`simulation-mode-probe.log`).

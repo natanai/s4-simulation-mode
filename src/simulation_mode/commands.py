@@ -2036,6 +2036,161 @@ def _collect_internal_probes(sim_info):
     deep_lines, _tracker, _slots = _probe_active_wants_deep(sim_info)
     lines.append("ACTIVE WANTS / WHIMS (DEEP DUMP)")
     lines.extend(deep_lines)
+    lines.append("WANTS -> AFFORDANCE GUID64 EXTRACTION (DIRECTOR PATH)")
+    try:
+        director = importlib.import_module("simulation_mode.director")
+    except Exception as exc:
+        lines.append(f"director_import_error={exc}")
+        director = None
+    capabilities = None
+    wants_guid64s = []
+    if director is not None:
+        try:
+            wants_guid64s = director._extract_affordance_guid64s_from_wants(sim_info)
+        except Exception as exc:
+            lines.append(f"wants_guid64_extract_error={exc}")
+            wants_guid64s = []
+    lines.append(f"wants_affordance_guid64_count={len(wants_guid64s)}")
+    if wants_guid64s:
+        try:
+            capabilities = importlib.import_module("simulation_mode.capabilities")
+        except Exception as exc:
+            lines.append(f"capabilities_import_error={exc}")
+            capabilities = None
+        caps = None
+        if capabilities is not None:
+            try:
+                caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+            except Exception as exc:
+                lines.append(f"caps_ensure_error={exc}")
+        if caps is None:
+            lines.append("caps_missing=True")
+        else:
+            for guid in wants_guid64s[:10]:
+                candidates = capabilities.get_candidates_for_ad_guid(guid, caps)
+                lines.append(f"guid64={guid} candidates={len(candidates)}")
+                for candidate in candidates[:2]:
+                    obj_def_id = candidate.get("obj_def_id")
+                    aff_guid = candidate.get("aff_guid64")
+                    aff_name = candidate.get("aff_name")
+                    lines.append(
+                        f"  candidate obj_def_id={obj_def_id} aff_guid64={aff_guid} "
+                        f"aff_name={aff_name}"
+                    )
+    lines.append("ASPIRATION -> AFFORDANCE GUID64 EXTRACTION (DIRECTOR PATH)")
+    aspiration_guid64s = []
+    if director is not None:
+        try:
+            aspiration_guid64s = director._extract_affordance_guid64s_from_aspiration(
+                sim_info
+            )
+        except Exception as exc:
+            lines.append(f"aspiration_guid64_extract_error={exc}")
+            aspiration_guid64s = []
+    lines.append(f"aspiration_affordance_guid64_count={len(aspiration_guid64s)}")
+    if aspiration_guid64s:
+        if capabilities is None:
+            try:
+                capabilities = importlib.import_module("simulation_mode.capabilities")
+            except Exception as exc:
+                lines.append(f"capabilities_import_error={exc}")
+                capabilities = None
+        caps = None
+        if capabilities is not None:
+            try:
+                caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+            except Exception as exc:
+                lines.append(f"caps_ensure_error={exc}")
+        if caps is None:
+            lines.append("caps_missing=True")
+        else:
+            for guid in aspiration_guid64s[:10]:
+                candidates = capabilities.get_candidates_for_ad_guid(guid, caps)
+                lines.append(f"guid64={guid} candidates={len(candidates)}")
+                for candidate in candidates[:2]:
+                    obj_def_id = candidate.get("obj_def_id")
+                    aff_guid = candidate.get("aff_guid64")
+                    aff_name = candidate.get("aff_name")
+                    lines.append(
+                        f"  candidate obj_def_id={obj_def_id} aff_guid64={aff_guid} "
+                        f"aff_name={aff_name}"
+                    )
+    lines.append("HOLIDAY/CALENDAR (PROBE-ONLY INTROSPECTION)")
+    try:
+        services_mod = importlib.import_module("services")
+    except Exception as exc:
+        lines.append(f"services_import_error={exc}")
+        services_mod = None
+    calendar_service = None
+    season_service = None
+    if services_mod is not None:
+        calendar_getter = getattr(services_mod, "calendar_service", None)
+        if callable(calendar_getter):
+            try:
+                calendar_service = calendar_getter()
+            except Exception as exc:
+                lines.append(f"calendar_service_error={exc}")
+        season_getter = getattr(services_mod, "season_service", None)
+        if callable(season_getter):
+            try:
+                season_service = season_getter()
+            except Exception as exc:
+                lines.append(f"season_service_error={exc}")
+    for label, service in (
+        ("calendar_service", calendar_service),
+        ("season_service", season_service),
+    ):
+        if service is None:
+            continue
+        lines.append(f"{label}_type={type(service).__name__}")
+        attrs = _filter_names(
+            service, ("holiday", "tradition", "event", "calendar", "fest", "season")
+        )
+        lines.append(f"{label}_attrs_hint={attrs[:15]}")
+        active_items = None
+        for method_name in (
+            "get_active_holidays",
+            "get_current_holidays",
+            "get_running_holidays",
+        ):
+            method = getattr(service, method_name, None)
+            if callable(method):
+                try:
+                    active_items = method()
+                except Exception as exc:
+                    lines.append(f"{label}_{method_name}_error={exc}")
+                    active_items = None
+                if active_items is not None:
+                    break
+        if active_items is None:
+            for attr_name in (
+                "active_holidays",
+                "current_holidays",
+                "running_holidays",
+            ):
+                if hasattr(service, attr_name):
+                    active_items = getattr(service, attr_name, None)
+                    if active_items is not None:
+                        break
+        if active_items is None:
+            lines.append(f"{label}_active_holidays=none")
+            continue
+        try:
+            for idx, entry in enumerate(active_items):
+                if idx >= 5:
+                    break
+                lines.append(f"{label}_entry[{idx}]_type={type(entry).__name__}")
+                guid_set = _collect_affordance_guid64s(entry, max_depth=2)
+                guid_list = sorted(guid_set)
+                lines.append(
+                    f"{label}_entry[{idx}]_guid64s_found_count={len(guid_list)}"
+                )
+                if guid_list:
+                    lines.append(
+                        f"{label}_entry[{idx}]_guid64s={guid_list[:10]}"
+                    )
+        except Exception as exc:
+            lines.append(f"{label}_active_items_error={exc}")
     lines.append("CAREER SUMMARY (PROBE)")
     lines.extend(_collect_career_summary(sim_info))
     lines.append("ASPIRATION SUMMARY (PROBE)")

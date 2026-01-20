@@ -1943,6 +1943,41 @@ def _collect_plan_preview(sim, now):
     )
     lines.append(f"guardian_chosen_motive={chosen_motive}")
     lines.append(f"guardian_running_care_relevant={running_care_relevant}")
+    lines.append(
+        "guardian_interrupt_running_noncritical={}".format(
+            settings.guardian_interrupt_running_noncritical
+        )
+    )
+    lines.append(
+        "guardian_interrupt_noncritical_motive_threshold={}".format(
+            settings.guardian_interrupt_noncritical_motive_threshold
+        )
+    )
+    lines.append(
+        "guardian_interrupt_noncritical_strikes={}".format(
+            settings.guardian_interrupt_noncritical_strikes
+        )
+    )
+    lines.append(
+        "guardian_noncritical_cancel_cooldown_seconds={}".format(
+            settings.guardian_noncritical_cancel_cooldown_seconds
+        )
+    )
+    lines.append(
+        "guardian_force_push_on_noncritical_interrupt={}".format(
+            settings.guardian_force_push_on_noncritical_interrupt
+        )
+    )
+    lines.append(
+        "guardian_noncritical_block_strikes={}".format(
+            guardian.get_noncritical_interrupt_strikes(sim_id)
+        )
+    )
+    lines.append(
+        "guardian_last_noncritical_cancel_ts={}".format(
+            guardian.get_last_noncritical_cancel_timestamp(sim_id)
+        )
+    )
     caps = capabilities.load_capabilities()
     kernel_valid, kernel_reason = capabilities.is_guardian_kernel_valid(caps)
     lines.append(f"kernel_valid={kernel_valid} kernel_reason={kernel_reason}")

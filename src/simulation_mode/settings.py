@@ -26,6 +26,11 @@ KNOWN_DEFAULTS = [
     ("guardian_critical_cancel_cooldown_seconds", "30"),
     ("guardian_max_pushes_per_sim_per_hour", "30"),
     ("guardian_precheck_affordance_tests", "true"),
+    ("guardian_interrupt_running_noncritical", "false"),
+    ("guardian_interrupt_noncritical_motive_threshold", "-25"),
+    ("guardian_interrupt_noncritical_strikes", "3"),
+    ("guardian_noncritical_cancel_cooldown_seconds", "90"),
+    ("guardian_force_push_on_noncritical_interrupt", "true"),
     ("director_enabled", "true"),
     ("director_check_seconds", "30"),
     ("director_min_safe_motive", "-10"),
@@ -124,6 +129,31 @@ def _build_default_template_text():
     lines.append(
         "guardian_precheck_affordance_tests={}".format(
             defaults["guardian_precheck_affordance_tests"]
+        )
+    )
+    lines.append(
+        "guardian_interrupt_running_noncritical={}".format(
+            defaults["guardian_interrupt_running_noncritical"]
+        )
+    )
+    lines.append(
+        "guardian_interrupt_noncritical_motive_threshold={}".format(
+            defaults["guardian_interrupt_noncritical_motive_threshold"]
+        )
+    )
+    lines.append(
+        "guardian_interrupt_noncritical_strikes={}".format(
+            defaults["guardian_interrupt_noncritical_strikes"]
+        )
+    )
+    lines.append(
+        "guardian_noncritical_cancel_cooldown_seconds={}".format(
+            defaults["guardian_noncritical_cancel_cooldown_seconds"]
+        )
+    )
+    lines.append(
+        "guardian_force_push_on_noncritical_interrupt={}".format(
+            defaults["guardian_force_push_on_noncritical_interrupt"]
         )
     )
     lines.append(
@@ -493,6 +523,11 @@ class SimulationModeSettings:
         guardian_critical_cancel_cooldown_seconds=30,
         guardian_max_pushes_per_sim_per_hour=30,
         guardian_precheck_affordance_tests=True,
+        guardian_interrupt_running_noncritical=False,
+        guardian_interrupt_noncritical_motive_threshold=-25,
+        guardian_interrupt_noncritical_strikes=3,
+        guardian_noncritical_cancel_cooldown_seconds=90,
+        guardian_force_push_on_noncritical_interrupt=True,
         director_enabled=True,
         director_check_seconds=30,
         director_min_safe_motive=-10,
@@ -569,6 +604,17 @@ class SimulationModeSettings:
         )
         self.guardian_max_pushes_per_sim_per_hour = guardian_max_pushes_per_sim_per_hour
         self.guardian_precheck_affordance_tests = guardian_precheck_affordance_tests
+        self.guardian_interrupt_running_noncritical = guardian_interrupt_running_noncritical
+        self.guardian_interrupt_noncritical_motive_threshold = (
+            guardian_interrupt_noncritical_motive_threshold
+        )
+        self.guardian_interrupt_noncritical_strikes = guardian_interrupt_noncritical_strikes
+        self.guardian_noncritical_cancel_cooldown_seconds = (
+            guardian_noncritical_cancel_cooldown_seconds
+        )
+        self.guardian_force_push_on_noncritical_interrupt = (
+            guardian_force_push_on_noncritical_interrupt
+        )
         self.director_enabled = director_enabled
         self.director_check_seconds = director_check_seconds
         self.director_min_safe_motive = director_min_safe_motive
@@ -857,6 +903,31 @@ def load_settings(target):
             elif key == "guardian_precheck_affordance_tests":
                 if isinstance(value, bool):
                     target.guardian_precheck_affordance_tests = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "guardian_interrupt_running_noncritical":
+                if isinstance(value, bool):
+                    target.guardian_interrupt_running_noncritical = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "guardian_interrupt_noncritical_motive_threshold":
+                try:
+                    target.guardian_interrupt_noncritical_motive_threshold = int(value)
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "guardian_interrupt_noncritical_strikes":
+                try:
+                    target.guardian_interrupt_noncritical_strikes = max(1, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "guardian_noncritical_cancel_cooldown_seconds":
+                try:
+                    target.guardian_noncritical_cancel_cooldown_seconds = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "guardian_force_push_on_noncritical_interrupt":
+                if isinstance(value, bool):
+                    target.guardian_force_push_on_noncritical_interrupt = value
                 else:
                     _log_invalid_value(key, raw_value)
             elif key == "director_enabled":

@@ -48,6 +48,8 @@ Build 74 note: the README now highlights the primary command examples (`simulati
    * **Expected:** `guardian_now force=False pushed=True` plus detail message.
 4. Run `simulation guardian_now force`.
    * **Expected:** bypasses cooldown and pushes an action (or reports why it could not).
+5. Optional escalation test: set `guardian_interrupt_running_noncritical=true` with the recommended thresholds, keep a noncritical interaction running, and let the motive dip below the threshold.
+   * **Expected:** story events show `guardian_noncritical_interrupt_waiting` strikes, then `guardian_noncritical_cancel`, followed by `guardian_push` or `guardian_push_failed`.
 
 ## Life Director
 

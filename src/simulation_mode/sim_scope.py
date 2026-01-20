@@ -9,24 +9,18 @@ def iter_active_household_sim_infos():
 
     hh = services.active_household()
     if hh is None:
-        return
+        return []
     gen = None
     if hasattr(hh, "sim_info_gen") and callable(hh.sim_info_gen):
         gen = hh.sim_info_gen()
-    elif hasattr(hh, "sim_infos"):
-        gen = getattr(hh, "sim_infos", None)
+    else:
+        try:
+            gen = list(hh)
+        except Exception:
+            gen = None
     if gen is None:
-        return
-    for sim_info in gen:
-        if sim_info is None:
-            continue
-        if hasattr(sim_info, "is_human") and callable(sim_info.is_human):
-            try:
-                if not sim_info.is_human():
-                    continue
-            except Exception:
-                pass
-        yield sim_info
+        return []
+    return [sim_info for sim_info in gen if sim_info is not None]
 
 
 def _sim_info_is_selectable(sim_info):
@@ -54,9 +48,7 @@ def _sim_info_is_selectable(sim_info):
 
 
 def iter_playable_household_sim_infos():
-    for sim_info in iter_active_household_sim_infos() or []:
-        if _sim_info_is_selectable(sim_info):
-            yield sim_info
+    return iter_active_household_sim_infos() or []
 
 
 def is_active_household_sim(sim_info):

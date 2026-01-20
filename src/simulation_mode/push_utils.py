@@ -542,34 +542,41 @@ def _distance(sim, obj):
 
 
 def precheck_affordance(sim, obj, affordance):
-    if sim is None or obj is None or affordance is None:
+    try:
+        if sim is None or obj is None or affordance is None:
+            return None, "precheck_unavailable"
+        resolver = None
+        resolver_spec = importlib.util.find_spec("event_testing.resolver")
+        if resolver_spec is not None:
+            resolver_module = importlib.import_module("event_testing.resolver")
+            resolver_cls = _safe_get(resolver_module, "SingleActorAndObjectResolver")
+            if resolver_cls is not None:
+                try:
+                    resolver = resolver_cls(sim, obj)
+                except Exception:
+                    resolver = None
+        tests = _safe_get(affordance, "tests")
+        if (
+            tests is not None
+            and callable(_safe_get(tests, "run_tests"))
+            and resolver is not None
+        ):
+            ok, result, error = _safe_call(tests, "run_tests", resolver)
+            if ok:
+                passed = bool(result)
+                detail = "tests_run" if passed else "tests_failed"
+                return passed, detail
+            return None, f"tests_error:{error}"
+        if callable(_safe_get(affordance, "test")):
+            ok, result, error = _safe_call(affordance, "test", sim, obj)
+            if ok:
+                passed = bool(result)
+                detail = "test_passed" if passed else "test_failed"
+                return passed, detail
+            return None, f"test_error:{error}"
         return None, "precheck_unavailable"
-    resolver = None
-    resolver_spec = importlib.util.find_spec("event_testing.resolver")
-    if resolver_spec is not None:
-        resolver_module = importlib.import_module("event_testing.resolver")
-        resolver_cls = _safe_get(resolver_module, "SingleActorAndObjectResolver")
-        if resolver_cls is not None:
-            try:
-                resolver = resolver_cls(sim, obj)
-            except Exception:
-                resolver = None
-    tests = _safe_get(affordance, "tests")
-    if tests is not None and callable(_safe_get(tests, "run_tests")) and resolver is not None:
-        ok, result, error = _safe_call(tests, "run_tests", resolver)
-        if ok:
-            passed = bool(result)
-            detail = "tests_run" if passed else "tests_failed"
-            return passed, detail
-        return None, f"tests_error:{error}"
-    if callable(_safe_get(affordance, "test")):
-        ok, result, error = _safe_call(affordance, "test", sim, obj)
-        if ok:
-            passed = bool(result)
-            detail = "test_passed" if passed else "test_failed"
-            return passed, detail
-        return None, f"test_error:{error}"
-    return None, "precheck_unavailable"
+    except Exception as exc:
+        return False, f"precheck_error:{type(exc).__name__}"
 
 
 def push_by_def_and_aff_guid(

@@ -23,7 +23,9 @@ KNOWN_DEFAULTS = [
     ("guardian_min_motive", "-25"),
     ("guardian_red_motive", "-50"),
     ("guardian_per_sim_cooldown_seconds", "60"),
+    ("guardian_critical_cancel_cooldown_seconds", "30"),
     ("guardian_max_pushes_per_sim_per_hour", "30"),
+    ("guardian_precheck_affordance_tests", "true"),
     ("director_enabled", "true"),
     ("director_check_seconds", "30"),
     ("director_min_safe_motive", "-10"),
@@ -37,10 +39,12 @@ KNOWN_DEFAULTS = [
     ("director_aspiration_weight", "0.0"),
     ("director_use_guardian_when_low", "true"),
     ("director_per_sim_cooldown_seconds", "120"),
+    ("director_idle_per_sim_cooldown_seconds", "20"),
     ("director_max_pushes_per_sim_per_hour", "12"),
     ("director_prefer_career_skills", "true"),
     ("director_fallback_to_started_skills", "true"),
     ("director_skill_push_precheck", "true"),
+    ("director_precheck_affordance_tests", "true"),
     ("director_push_fail_strikes_limit", "3"),
     ("director_push_fail_strikes_decay_seconds", "600"),
     ("director_idle_override_enabled", "true"),
@@ -50,6 +54,7 @@ KNOWN_DEFAULTS = [
     ("director_skill_block_list", ""),
     ("director_skill_cooldown_seconds", "7200"),
     ("director_affordance_cooldown_seconds", "1800"),
+    ("plans_precheck_affordance_tests", "true"),
     ("guardian_hunger_prefer_quick_meal_threshold", "0.45"),
     ("collect_log_filename", "simulation-mode-collect.log"),
     ("story_log_enabled", "true"),
@@ -106,8 +111,18 @@ def _build_default_template_text():
         )
     )
     lines.append(
+        "guardian_critical_cancel_cooldown_seconds={}".format(
+            defaults["guardian_critical_cancel_cooldown_seconds"]
+        )
+    )
+    lines.append(
         "guardian_max_pushes_per_sim_per_hour={}".format(
             defaults["guardian_max_pushes_per_sim_per_hour"]
+        )
+    )
+    lines.append(
+        "guardian_precheck_affordance_tests={}".format(
+            defaults["guardian_precheck_affordance_tests"]
         )
     )
     lines.append(
@@ -153,6 +168,11 @@ def _build_default_template_text():
         )
     )
     lines.append(
+        "director_idle_per_sim_cooldown_seconds={}".format(
+            defaults["director_idle_per_sim_cooldown_seconds"]
+        )
+    )
+    lines.append(
         "director_max_pushes_per_sim_per_hour={}".format(
             defaults["director_max_pushes_per_sim_per_hour"]
         )
@@ -170,6 +190,11 @@ def _build_default_template_text():
     lines.append(
         "director_skill_push_precheck={}".format(
             defaults["director_skill_push_precheck"]
+        )
+    )
+    lines.append(
+        "director_precheck_affordance_tests={}".format(
+            defaults["director_precheck_affordance_tests"]
         )
     )
     lines.append(
@@ -207,6 +232,11 @@ def _build_default_template_text():
     lines.append(
         "director_affordance_cooldown_seconds={}".format(
             defaults["director_affordance_cooldown_seconds"]
+        )
+    )
+    lines.append(
+        "plans_precheck_affordance_tests={}".format(
+            defaults["plans_precheck_affordance_tests"]
         )
     )
     lines.append("collect_log_filename={}".format(defaults["collect_log_filename"]))
@@ -454,7 +484,9 @@ class SimulationModeSettings:
         guardian_min_motive=-25,
         guardian_red_motive=-50,
         guardian_per_sim_cooldown_seconds=60,
+        guardian_critical_cancel_cooldown_seconds=30,
         guardian_max_pushes_per_sim_per_hour=30,
+        guardian_precheck_affordance_tests=True,
         director_enabled=True,
         director_check_seconds=30,
         director_min_safe_motive=-10,
@@ -468,10 +500,12 @@ class SimulationModeSettings:
         director_aspiration_weight=0.0,
         director_use_guardian_when_low=True,
         director_per_sim_cooldown_seconds=120,
+        director_idle_per_sim_cooldown_seconds=20,
         director_max_pushes_per_sim_per_hour=12,
         director_prefer_career_skills=True,
         director_fallback_to_started_skills=True,
         director_skill_push_precheck=True,
+        director_precheck_affordance_tests=True,
         director_push_fail_strikes_limit=3,
         director_push_fail_strikes_decay_seconds=600,
         director_idle_override_enabled=True,
@@ -481,6 +515,7 @@ class SimulationModeSettings:
         director_skill_block_list=None,
         director_skill_cooldown_seconds=7200,
         director_affordance_cooldown_seconds=1800,
+        plans_precheck_affordance_tests=True,
         guardian_hunger_prefer_quick_meal_threshold=0.45,
         collect_log_filename="simulation-mode-collect.log",
         story_log_enabled=True,
@@ -522,7 +557,11 @@ class SimulationModeSettings:
         self.guardian_min_motive = guardian_min_motive
         self.guardian_red_motive = guardian_red_motive
         self.guardian_per_sim_cooldown_seconds = guardian_per_sim_cooldown_seconds
+        self.guardian_critical_cancel_cooldown_seconds = (
+            guardian_critical_cancel_cooldown_seconds
+        )
         self.guardian_max_pushes_per_sim_per_hour = guardian_max_pushes_per_sim_per_hour
+        self.guardian_precheck_affordance_tests = guardian_precheck_affordance_tests
         self.director_enabled = director_enabled
         self.director_check_seconds = director_check_seconds
         self.director_min_safe_motive = director_min_safe_motive
@@ -536,10 +575,12 @@ class SimulationModeSettings:
         self.director_aspiration_weight = director_aspiration_weight
         self.director_use_guardian_when_low = director_use_guardian_when_low
         self.director_per_sim_cooldown_seconds = director_per_sim_cooldown_seconds
+        self.director_idle_per_sim_cooldown_seconds = director_idle_per_sim_cooldown_seconds
         self.director_max_pushes_per_sim_per_hour = director_max_pushes_per_sim_per_hour
         self.director_prefer_career_skills = director_prefer_career_skills
         self.director_fallback_to_started_skills = director_fallback_to_started_skills
         self.director_skill_push_precheck = director_skill_push_precheck
+        self.director_precheck_affordance_tests = director_precheck_affordance_tests
         self.director_push_fail_strikes_limit = director_push_fail_strikes_limit
         self.director_push_fail_strikes_decay_seconds = director_push_fail_strikes_decay_seconds
         self.director_idle_override_enabled = director_idle_override_enabled
@@ -549,6 +590,7 @@ class SimulationModeSettings:
         self.director_skill_block_list = director_skill_block_list or []
         self.director_skill_cooldown_seconds = director_skill_cooldown_seconds
         self.director_affordance_cooldown_seconds = director_affordance_cooldown_seconds
+        self.plans_precheck_affordance_tests = plans_precheck_affordance_tests
         self.guardian_hunger_prefer_quick_meal_threshold = (
             guardian_hunger_prefer_quick_meal_threshold
         )
@@ -737,7 +779,6 @@ def load_settings(target):
         "include_sim": "catalog_include_sims",
         "include_sims": "catalog_include_sims",
         "include_non_autonomous": "catalog_include_non_autonomous",
-        "catalog_write_sample": "debug_write_object_catalog_sample",
     }
     for key, raw_value in data.items():
         key = aliases.get(key, key)
@@ -793,10 +834,20 @@ def load_settings(target):
                     target.guardian_per_sim_cooldown_seconds = max(0, int(value))
                 except Exception:
                     _log_invalid_value(key, raw_value)
+            elif key == "guardian_critical_cancel_cooldown_seconds":
+                try:
+                    target.guardian_critical_cancel_cooldown_seconds = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
             elif key == "guardian_max_pushes_per_sim_per_hour":
                 try:
                     target.guardian_max_pushes_per_sim_per_hour = max(0, int(value))
                 except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "guardian_precheck_affordance_tests":
+                if isinstance(value, bool):
+                    target.guardian_precheck_affordance_tests = value
+                else:
                     _log_invalid_value(key, raw_value)
             elif key == "director_enabled":
                 if isinstance(value, bool):
@@ -863,6 +914,11 @@ def load_settings(target):
                     target.director_per_sim_cooldown_seconds = max(0, int(value))
                 except Exception:
                     _log_invalid_value(key, raw_value)
+            elif key == "director_idle_per_sim_cooldown_seconds":
+                try:
+                    target.director_idle_per_sim_cooldown_seconds = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
             elif key == "director_max_pushes_per_sim_per_hour":
                 try:
                     target.director_max_pushes_per_sim_per_hour = max(0, int(value))
@@ -881,6 +937,11 @@ def load_settings(target):
             elif key == "director_skill_push_precheck":
                 if isinstance(value, bool):
                     target.director_skill_push_precheck = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_precheck_affordance_tests":
+                if isinstance(value, bool):
+                    target.director_precheck_affordance_tests = value
                 else:
                     _log_invalid_value(key, raw_value)
             elif key == "director_push_fail_strikes_limit":
@@ -921,6 +982,11 @@ def load_settings(target):
                 try:
                     target.director_affordance_cooldown_seconds = max(0, int(value))
                 except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "plans_precheck_affordance_tests":
+                if isinstance(value, bool):
+                    target.plans_precheck_affordance_tests = value
+                else:
                     _log_invalid_value(key, raw_value)
             elif key == "guardian_hunger_prefer_quick_meal_threshold":
                 try:

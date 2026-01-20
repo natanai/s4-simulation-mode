@@ -23,6 +23,7 @@ from simulation_mode import sim_scope
 from simulation_mode import settings as settings_module
 from simulation_mode import story_log
 from simulation_mode import verified_gain
+from simulation_mode import push_utils
 from simulation_mode.push_utils import (
     affordance_name,
     call_push_super_affordance,
@@ -1766,6 +1767,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         "attempted_skill_guids": [],
         "skills_tried_count": 0,
         "per_skill_attempt_counts": {},
+        "per_skill_candidate_stats": {},
         "reason": "unknown",
     }
     sim = None
@@ -1844,22 +1846,34 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         skill_map = _failed_skill_until.setdefault(sim_id, {})
         skill_map[guid] = now + _SKILL_FAIL_COOLDOWN_SECONDS
 
-    def _cand_count_for_skill(guid):
-        candidates = []
-        if isinstance(by_skill_gain, dict):
-            candidates = list(
-                by_skill_gain.get(str(guid)) or by_skill_gain.get(guid) or []
-            )
-        count = 0
-        for entry in candidates:
+    def _cand_counts_for_skill_on_lot(guid):
+        if not isinstance(by_skill_gain, dict):
+            return (0, 0, 0, 0)
+        raw_candidates = list(by_skill_gain.get(str(guid)) or by_skill_gain.get(guid) or [])
+        raw_total = len(raw_candidates)
+        after_basic = 0
+        on_lot = 0
+        missing_on_lot = 0
+        for entry in raw_candidates:
+            if not isinstance(entry, dict):
+                continue
             if entry.get("safe_push", True) is False:
                 continue
             if entry.get("allow_autonomous", True) is False:
                 continue
             if _on_cooldown(guid, entry):
                 continue
-            count += 1
-        return count
+            after_basic += 1
+            def_id = entry.get("obj_def_id")
+            if def_id in objects_by_def_id and objects_by_def_id.get(def_id):
+                on_lot += 1
+            else:
+                missing_on_lot += 1
+        return (raw_total, after_basic, on_lot, missing_on_lot)
+
+    def _cand_count_for_skill(guid):
+        _, _, on_lot, _ = _cand_counts_for_skill_on_lot(guid)
+        return on_lot
 
     def _candidate_diagnostics(guid):
         if not isinstance(by_skill_gain, dict):
@@ -2058,6 +2072,15 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
             current_level = 0
         if max_level is None:
             max_level = 10
+        raw_total, after_basic, on_lot, missing = _cand_counts_for_skill_on_lot(guid)
+        details["per_skill_candidate_stats"][str(guid)] = {
+            "caps_candidate_total": raw_total,
+            "caps_candidate_after_basic_filters": after_basic,
+            "caps_candidate_on_lot": on_lot,
+            "caps_candidate_missing_on_lot": missing,
+            "observed_in_catalog": _observed_in_catalog(guid),
+            "source": item.get("source"),
+        }
         aff_count = _cand_count_for_skill(guid)
         if aff_count <= 0:
             continue
@@ -2122,6 +2145,14 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
             and entry.get("safe_push") is True
             and not _on_cooldown(chosen_skill_guid, entry)
         ]
+        candidates = [
+            entry
+            for entry in candidates
+            if (
+                entry.get("obj_def_id") in objects_by_def_id
+                and objects_by_def_id.get(entry.get("obj_def_id"))
+            )
+        ]
         verified_path = _get_verified_gain_path()
         verified_data = verified_gain.load(verified_path)
         filtered = []
@@ -2173,6 +2204,28 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
             for obj in list(objects_by_def_id.get(def_id, []))[:10]:
                 test_passed, _test_detail = _aop_test_passes(sim, obj, affordance)
                 if test_passed is False:
+                    details["attempted_pushes"].append(
+                        {
+                            "def_id": def_id,
+                            "obj_def_id": def_id,
+                            "obj_id": getattr(obj, "id", None),
+                            "object_label": push_utils._probe_object_label(obj),
+                            "affordance_label": push_utils._probe_affordance_label(affordance),
+                            "aff_guid64": aff_guid,
+                            "aff_name": aff_name,
+                            "ok": False,
+                            "reason": "aop_test_failed",
+                            "failure_reason": "aop_test_failed",
+                            "target_type": "object",
+                            "affordance_name": affordance_name(affordance),
+                            "affordance_class": getattr(affordance, "__name__", None),
+                            "affordance_is_picker": is_picker_affordance(affordance),
+                            "push_sig_names": None,
+                            "push_reason": None,
+                            "aop_test_passed": test_passed,
+                            "aop_test_detail": _test_detail,
+                        }
+                    )
                     continue
                 context, _client_attached = make_interaction_context(sim, force=False)
                 push_attempts += 1
@@ -2183,6 +2236,10 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                 details["attempted_pushes"].append(
                     {
                         "def_id": def_id,
+                        "obj_def_id": def_id,
+                        "obj_id": getattr(obj, "id", None),
+                        "object_label": push_utils._probe_object_label(obj),
+                        "affordance_label": push_utils._probe_affordance_label(affordance),
                         "aff_guid64": aff_guid,
                         "aff_name": aff_name,
                         "ok": ok,
@@ -2194,6 +2251,8 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                         "affordance_is_picker": is_picker_affordance(affordance),
                         "push_sig_names": sig_names,
                         "push_reason": failure_reason,
+                        "aop_test_passed": test_passed,
+                        "aop_test_detail": _test_detail,
                     }
                 )
                 if ok:
@@ -2262,6 +2321,10 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                 )
                 verified_gain.save_atomic(verified_path, verified_data)
                 _record_push_fail_strike(strike_key, now)
+                attempt = details["attempted_pushes"][-1] if details["attempted_pushes"] else None
+                if attempt is not None:
+                    attempt["invalidated"] = True
+                    attempt["invalidated_reason"] = "push_failed"
                 last_failure_reason = failure_reason or "push_failed"
         _mark_skill_failed(chosen_skill_guid)
     details["skills_tried_count"] = attempted_skills
@@ -3996,11 +4059,21 @@ def _idle_override_check(now: float):
                     pass
             else:
                 try:
+                    cooldown_remaining_seconds = (
+                        max(
+                            0,
+                            settings.director_idle_per_sim_cooldown_seconds
+                            - (now - _per_sim_last_push_time.get(sim_id)),
+                        )
+                        if _per_sim_last_push_time.get(sim_id) is not None
+                        else None
+                    )
                     story_log.append_event(
                         "director_idle_blocked_by_cooldown",
                         sim_info=sim_info,
                         sim_name=_sim_display_name(sim_info),
                         idle_cooldown=settings.director_idle_per_sim_cooldown_seconds,
+                        cooldown_remaining_seconds=cooldown_remaining_seconds,
                         time_since_last_push=(
                             now - _per_sim_last_push_time.get(sim_id)
                         )

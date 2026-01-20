@@ -1,4 +1,4 @@
-# Simulation Mode (The Sims 4) — Settings (Build 72)
+# Simulation Mode (The Sims 4) — Settings
 # Edit this file, then in-game run: simulation reload
 
 enabled=true

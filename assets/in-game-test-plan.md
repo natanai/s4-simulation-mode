@@ -6,7 +6,7 @@ This plan validates that the Simulation Mode kernel loads, responds to console c
 executes guardian/director behavior safely during live gameplay.
 Simulation Mode operates only on active household Sims.
 
-Build 72 note: the README now highlights the primary command examples (`simulation true/false/collect/force_scan/skill_plan_now/wants_plan_now/aspiration_plan_now`).
+Build 74 note: the README now highlights the primary command examples (`simulation true/false/collect/force_scan/skill_plan_now`).
 
 ## Preconditions
 
@@ -63,10 +63,8 @@ Build 72 note: the README now highlights the primary command examples (`simulati
 6. Optional: run `simulation director_takeover <skill_key>` to cancel current interactions and push.
 7. Run `simulation skill_plan_now <sim_firstname>` while the Sim is already performing an unrelated interaction.
    * **Expected:** a result is logged to the collect log file and the console reports success/failure.
-8. Optional: run `simulation wants_plan_now <sim_firstname>` and `simulation aspiration_plan_now <sim_firstname>`.
-   * **Expected:** console reports success/failure plus candidate counts (if affordance GUIDs were found).
-9. After any successful director push, confirm `director_push` events include non-unknown `object_label` and `affordance_label`.
-10. Optional: set `director_idle_override_allow_bypass_cooldown_once=true`, trigger quick idle, and confirm a `director_idle_override_bypass_cooldown_once` story-log event appears.
+8. After any successful director push, confirm `director_push` events include non-unknown `object_label` and `affordance_label`.
+9. Optional: set `director_idle_override_allow_bypass_cooldown_once=true`, trigger quick idle, and confirm a `director_idle_override_bypass_cooldown_once` story-log event appears.
 
 ## Settings reload
 

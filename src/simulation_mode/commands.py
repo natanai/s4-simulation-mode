@@ -11,6 +11,8 @@ import sims4.resources
 from sims4.commands import BOOL_TRUE, CommandType
 
 import simulation_mode.settings as sm_settings
+from simulation_mode import BUILD_NUMBER as MOD_BUILD_NUMBER
+from simulation_mode import __version__ as MOD_VERSION
 from simulation_mode import sim_scope
 from simulation_mode import verified_gain
 from simulation_mode.settings import get_config_path, load_settings, settings
@@ -22,7 +24,6 @@ _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
 # Keep alarm handles alive per-sim so they are not garbage-collected.
 _PENDING_SKILL_PLAN_ALARMS = {}
-BUILD_NUMBER = "72"
 
 
 def _parse_bool(arg: str):
@@ -83,11 +84,7 @@ def _safe_bool_attr(value, default=False):
 
 def _status_lines():
     running, daemon_error, daemon_tick_count = _daemon_snapshot()
-    try:
-        package = importlib.import_module("simulation_mode")
-        version = getattr(package, "__version__", None)
-    except Exception:
-        version = None
+    version = MOD_VERSION
     return [
         f"version={version}" if version else "version=unknown",
         f"enabled={settings.enabled}",
@@ -3369,10 +3366,12 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
             if success:
                 sim_info = _active_sim_info()
                 _safe_story_event(
-                    "daemon_started", sim_info=sim_info, build=BUILD_NUMBER
+                    "daemon_started", sim_info=sim_info, build=MOD_BUILD_NUMBER
                 )
                 _log_scope_household_event(sim_info)
-                output(f"Simulation daemon started successfully (build {BUILD_NUMBER}).")
+                output(
+                    f"Simulation daemon started successfully (build {MOD_BUILD_NUMBER})."
+                )
                 capabilities = importlib.import_module("simulation_mode.capabilities")
                 caps_before = capabilities.load_capabilities()
                 had_existing_caps = bool(caps_before)

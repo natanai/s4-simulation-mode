@@ -51,6 +51,7 @@ _PER_SIM_LAST_CHOSEN_MOTIVE = {}
 _MOTIVE_STATS = {}
 _LAST_CARE_DETAILS = None
 _CARE_LOCKS = {}
+_last_critical_cancel_ts = {}
 
 _CARE_KIND_TO_MOTIVE = {
     "eat": "motive_hunger",
@@ -196,6 +197,45 @@ def _safe_story_event(event_type, **kwargs):
         return True
     except Exception:
         return False
+
+
+def _interaction_addresses_motive(aff_name: str, motive_key: str) -> bool:
+    if not aff_name or not motive_key:
+        return False
+    try:
+        lowered = aff_name.lower()
+    except Exception:
+        return False
+    if motive_key == "motive_hunger":
+        return any(token in lowered for token in ("eat", "cook", "meal", "grab", "quickmeal"))
+    if motive_key == "motive_energy":
+        return any(token in lowered for token in ("sleep", "nap"))
+    if motive_key == "motive_bladder":
+        return "toilet" in lowered
+    if motive_key == "motive_hygiene":
+        return any(token in lowered for token in ("shower", "bath"))
+    return False
+
+
+def _cancel_sim_interactions_safe(sim):
+    if sim is None:
+        return False, "sim_missing"
+    queue = getattr(sim, "queue", None)
+    cancel = getattr(queue, "cancel_all", None) if queue is not None else None
+    if callable(cancel):
+        try:
+            cancel()
+            return True, "queue.cancel_all"
+        except Exception as exc:
+            return False, f"queue.cancel_all_error:{type(exc).__name__}"
+    cancel_all = getattr(sim, "cancel_all_interactions", None)
+    if callable(cancel_all):
+        try:
+            cancel_all()
+            return True, "sim.cancel_all_interactions"
+        except Exception as exc:
+            return False, f"sim.cancel_all_interactions_error:{type(exc).__name__}"
+    return False, "cancel_unavailable"
 
 
 def _is_sim_busy(sim):
@@ -480,6 +520,7 @@ def _attempt_care_push(sim, motive_key, motive_value=None, force=False):
             aff_guid,
             reason=f"guardian_motive_guid64={motive_guid}",
             probe_details=None,
+            precheck=settings.guardian_precheck_affordance_tests,
         )
         if ok:
             global _LAST_CARE_DETAILS
@@ -751,6 +792,7 @@ def _process_sim(sim_info, now):
         return
 
     critical = motive_value <= settings.guardian_red_motive
+    sim_id = _sim_identifier(sim_info)
     running_non_idle, running_interaction = _has_running_non_idle(sim)
     if running_non_idle and not critical:
         running_type, running_aff_name, _running_label = _running_interaction_info(sim)
@@ -771,11 +813,32 @@ def _process_sim(sim_info, now):
         )
         return
 
-    busy_state, _busy_reason = _is_sim_busy(sim)
-    if busy_state:
+    _running_type, running_aff_name, _running_label = _running_interaction_info(sim)
+    if critical and running_aff_name and _interaction_addresses_motive(
+        running_aff_name, motive_key
+    ):
         return
 
-    sim_id = _sim_identifier(sim_info)
+    busy_state, _busy_reason = _is_sim_busy(sim)
+    if busy_state:
+        if not critical:
+            return
+        cooldown = settings.guardian_critical_cancel_cooldown_seconds
+        if cooldown > 0:
+            last_cancel = _last_critical_cancel_ts.get(sim_id)
+            if last_cancel is None or now - last_cancel >= cooldown:
+                cancel_ok, cancel_method = _cancel_sim_interactions_safe(sim)
+                _last_critical_cancel_ts[sim_id] = now
+                _safe_story_event(
+                    "guardian_critical_cancel",
+                    sim_info=sim_info,
+                    motive_key=motive_key,
+                    running_aff_name=running_aff_name,
+                    cancel_ok=cancel_ok,
+                    cancel_method=cancel_method,
+                    critical_value=motive_value,
+                )
+
     _PER_SIM_LAST_CHOSEN_MOTIVE[sim_id] = motive_key
     lock_active, remaining = _care_lock_blocks(sim_id, motive_key, now)
     if lock_active and not critical:

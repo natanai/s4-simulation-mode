@@ -22,7 +22,7 @@ _last_patch_error = None
 _PENDING_SKILL_PLAN_PUSHES = {}
 # Keep alarm handles alive per-sim so they are not garbage-collected.
 _PENDING_SKILL_PLAN_ALARMS = {}
-BUILD_NUMBER = "71"
+BUILD_NUMBER = "72"
 
 
 def _parse_bool(arg: str):
@@ -950,7 +950,10 @@ def _collect_affordance_probe_lines(sim_info):
 
 def _collect_catalog_sample(sim_info):
     object_catalog = importlib.import_module("simulation_mode.object_catalog")
-    if not sm_settings.get_bool("debug_write_object_catalog_sample", False):
+    if not (
+        sm_settings.get_bool("catalog_write_sample", False)
+        or sm_settings.get_bool("debug_write_object_catalog_sample", False)
+    ):
         return ["CATALOG SAMPLE (PROBE)", "catalog_sample=disabled"]
     max_objects = sm_settings.get_int("catalog_collect_sample_objects", 150)
     max_aff = sm_settings.get_int("catalog_collect_sample_affordances_per_object", 60)
@@ -2301,9 +2304,13 @@ def _build_collect_payload():
     lines.append("")
     lines.extend(_collect_skill_plan_now_diagnostics())
     lines.append("")
-    if sm_settings.get_bool("debug_write_object_catalog_sample", False) and sm_settings.get_int(
-        "catalog_collect_sample_objects", 150
-    ) > 0:
+    if (
+        sm_settings.get_int("catalog_collect_sample_objects", 150) > 0
+        and (
+            sm_settings.get_bool("catalog_write_sample", False)
+            or sm_settings.get_bool("debug_write_object_catalog_sample", False)
+        )
+    ):
         lines.extend(_collect_catalog_sample(sim_info))
     else:
         lines.append("CATALOG SAMPLE (PROBE)")
@@ -2544,6 +2551,7 @@ def _attempt_affordance_guid_pushes(sim_info, sim, guid_list, reason_prefix):
                     def_id,
                     aff_guid,
                     reason=f"{reason_prefix} guid64={guid}",
+                    precheck=settings.plans_precheck_affordance_tests,
                 )
             except Exception as exc:
                 ok = False
@@ -3229,18 +3237,22 @@ def _usage_lines():
         "simulation help",
         "keys: auto_unpause, allow_death, allow_pregnancy, tick, guardian_enabled, guardian_check_seconds, "
         "guardian_min_motive, guardian_red_motive, guardian_per_sim_cooldown_seconds, "
-        "guardian_max_pushes_per_sim_per_hour, director_enabled, director_check_seconds, "
+        "guardian_critical_cancel_cooldown_seconds, guardian_max_pushes_per_sim_per_hour, "
+        "guardian_precheck_affordance_tests, director_enabled, director_check_seconds, "
         "director_min_safe_motive, director_per_sim_cooldown_seconds, "
+        "director_idle_per_sim_cooldown_seconds, "
         "director_green_motive_percent, director_green_min_commodities, "
         "director_allow_social_goals, director_allow_social_wants, director_use_guardian_when_low, "
         "director_enable_wants, director_enable_aspirations, director_wants_weight, "
         "director_aspiration_weight, director_max_pushes_per_sim_per_hour, "
         "director_prefer_career_skills, director_fallback_to_started_skills, "
-        "director_skill_push_precheck, director_push_fail_strikes_limit, "
+        "director_skill_push_precheck, director_precheck_affordance_tests, "
+        "director_push_fail_strikes_limit, "
         "director_push_fail_strikes_decay_seconds, director_idle_override_enabled, "
         "director_idle_override_min_seconds_idle, director_idle_override_check_seconds, "
         "director_skill_allow_list, director_skill_block_list, director_skill_cooldown_seconds, "
-        "director_affordance_cooldown_seconds, skill_plan_max_skill_attempts, "
+        "director_affordance_cooldown_seconds, plans_precheck_affordance_tests, "
+        "skill_plan_max_skill_attempts, "
         "guardian_hunger_prefer_quick_meal_threshold, collect_log_filename, "
         "debug_write_object_catalog_sample, catalog_write_sample, "
         "integrate_better_autonomy_trait, better_autonomy_trait_id",
@@ -3259,13 +3271,13 @@ def _handle_set(key, value, _connection, output):
         return False
 
     key = key.strip().lower()
-    if key == "catalog_write_sample":
-        key = "debug_write_object_catalog_sample"
     if key in {"auto_unpause", "allow_death", "allow_pregnancy", "guardian_enabled",
-               "director_allow_social_goals", "director_allow_social_wants",
-               "director_enable_wants", "director_enable_aspirations",
-               "director_use_guardian_when_low", "director_skill_push_precheck",
-               "director_idle_override_enabled", "debug_write_object_catalog_sample",
+               "guardian_precheck_affordance_tests", "director_allow_social_goals",
+               "director_allow_social_wants", "director_enable_wants",
+               "director_enable_aspirations", "director_use_guardian_when_low",
+               "director_skill_push_precheck", "director_precheck_affordance_tests",
+               "plans_precheck_affordance_tests", "director_idle_override_enabled",
+               "catalog_write_sample", "debug_write_object_catalog_sample",
                "integrate_better_autonomy_trait"}:
         parsed = _parse_bool(value)
         if parsed is None:
@@ -3293,9 +3305,11 @@ def _handle_set(key, value, _connection, output):
         return True
 
     if key in {"guardian_check_seconds", "guardian_min_motive", "guardian_red_motive",
-               "guardian_per_sim_cooldown_seconds", "guardian_max_pushes_per_sim_per_hour",
+               "guardian_per_sim_cooldown_seconds", "guardian_critical_cancel_cooldown_seconds",
+               "guardian_max_pushes_per_sim_per_hour",
                "director_check_seconds", "director_min_safe_motive",
-               "director_per_sim_cooldown_seconds", "director_max_pushes_per_sim_per_hour",
+               "director_per_sim_cooldown_seconds", "director_idle_per_sim_cooldown_seconds",
+               "director_max_pushes_per_sim_per_hour",
                "director_green_min_commodities", "skill_plan_max_skill_attempts",
                "director_push_fail_strikes_limit", "director_push_fail_strikes_decay_seconds",
                "director_idle_override_min_seconds_idle", "director_idle_override_check_seconds",

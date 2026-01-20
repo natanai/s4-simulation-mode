@@ -6,7 +6,7 @@ This plan validates that the Simulation Mode kernel loads, responds to console c
 executes guardian/director behavior safely during live gameplay.
 Simulation Mode operates only on active household Sims.
 
-Build 69 note: the README now highlights the primary command examples (`simulation true/false/collect/force_scan/skill_plan_now/wants_plan_now/aspiration_plan_now`).
+Build 72 note: the README now highlights the primary command examples (`simulation true/false/collect/force_scan/skill_plan_now/wants_plan_now/aspiration_plan_now`).
 
 ## Preconditions
 

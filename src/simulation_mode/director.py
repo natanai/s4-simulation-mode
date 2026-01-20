@@ -520,8 +520,12 @@ def _get_instantiated_sims_for_director():
     return out
 
 
-def _can_push_for_sim(sim_id, now):
-    cooldown = settings.director_per_sim_cooldown_seconds
+def _can_push_for_sim(sim_id, now, is_idle_override=False):
+    cooldown = (
+        settings.director_idle_per_sim_cooldown_seconds
+        if is_idle_override
+        else settings.director_per_sim_cooldown_seconds
+    )
     last_push = _per_sim_last_push_time.get(sim_id)
     if last_push is not None and now - last_push < cooldown:
         return False
@@ -1347,13 +1351,76 @@ def build_skill_plan(sim_info):
 
 def run_skill_plan(sim_info, sim, now, force=False, source="director"):
     wants_reason = None
-    want_targets = []
     if not settings.director_enable_wants:
         wants_reason = "disabled_by_setting"
     else:
-        want_targets, _want_reason = _select_want_targets(sim_info)
-        wants_reason = "no_wants" if not want_targets else "not_attempted_in_this_build"
-    _append_debug(f"Director: wants=skipped reason={wants_reason}")
+        want_guid_list = _extract_affordance_guid64s_from_wants(sim_info)
+        if not want_guid_list:
+            wants_reason = "no_guid64"
+            _append_debug("Director: wants_attempt=no_guid64")
+        else:
+            caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+            ok, reason = _attempt_guid64_goal_push(
+                sim_info, sim, want_guid_list, caps, "director_wants"
+            )
+            wants_reason = reason
+            if ok:
+                try:
+                    story_log.append_event(
+                        "director_wants_push",
+                        sim_info=sim_info,
+                        sim_name=_sim_display_name(sim_info),
+                        guid_count=len(want_guid_list),
+                        reason=reason,
+                    )
+                except Exception:
+                    pass
+                return {
+                    "success": True,
+                    "skill_key": "wants",
+                    "skill_reason": "director_wants",
+                    "skill_source": "wants",
+                    "wants_reason": wants_reason,
+                    "career_reason": None,
+                    "started_candidates": [],
+                }
+            _append_debug("Director: wants_attempt=no_pushable_candidates")
+
+    aspiration_reason = None
+    if settings.director_enable_aspirations:
+        aspiration_guid_list = _extract_affordance_guid64s_from_aspiration(sim_info)
+        if not aspiration_guid_list:
+            aspiration_reason = "no_guid64"
+            _append_debug("Director: aspiration_attempt=no_guid64")
+        else:
+            caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+            ok, reason = _attempt_guid64_goal_push(
+                sim_info, sim, aspiration_guid_list, caps, "director_aspiration"
+            )
+            aspiration_reason = reason
+            if ok:
+                try:
+                    story_log.append_event(
+                        "director_aspiration_push",
+                        sim_info=sim_info,
+                        sim_name=_sim_display_name(sim_info),
+                        guid_count=len(aspiration_guid_list),
+                        reason=reason,
+                    )
+                except Exception:
+                    pass
+                return {
+                    "success": True,
+                    "skill_key": "aspiration",
+                    "skill_reason": "director_aspiration",
+                    "skill_source": "aspiration",
+                    "wants_reason": wants_reason,
+                    "career_reason": None,
+                    "started_candidates": [],
+                }
+            _append_debug("Director: aspiration_attempt=no_pushable_candidates")
+    else:
+        aspiration_reason = "disabled_by_setting"
 
     career_candidates = []
     career_reason = "disabled_by_setting"
@@ -2542,6 +2609,175 @@ def get_active_want_targets(sim_info):
     return _get_active_wants(sim_info)
 
 
+def _get_affordance_manager():
+    getter = _safe_get(services, "get_instance_manager")
+    if callable(getter):
+        ok, manager, _error = _safe_call(
+            services, "get_instance_manager", sims4.resources.Types.INTERACTION
+        )
+        if ok:
+            return manager
+    return None
+
+
+def _resolve_affordance_tuning(guid64):
+    if not isinstance(guid64, int):
+        return None
+    manager = _get_affordance_manager()
+    if manager is None:
+        return None
+    ok, tuning, _error = _safe_call(manager, "get", guid64)
+    return tuning if ok else None
+
+
+def _is_affordance_guid64(value):
+    if not isinstance(value, int):
+        return False
+    return _resolve_affordance_tuning(value) is not None
+
+
+def _find_first_attr(obj, attr_names):
+    for attr in attr_names:
+        value = _safe_get(obj, attr)
+        if value is not None:
+            return attr, value
+    return None, None
+
+
+def _collect_affordance_guid64s(obj, seen=None, depth=0, max_depth=2):
+    if obj is None:
+        return set()
+    if seen is None:
+        seen = set()
+    if id(obj) in seen:
+        return set()
+    seen.add(id(obj))
+    found = set()
+    if isinstance(obj, int) and _is_affordance_guid64(obj):
+        found.add(obj)
+        return found
+    guid_value = _safe_get(obj, "guid64")
+    if isinstance(guid_value, int) and _is_affordance_guid64(guid_value):
+        found.add(guid_value)
+    if isinstance(obj, (list, tuple, set)):
+        for entry in obj:
+            found |= _collect_affordance_guid64s(
+                entry, seen=seen, depth=depth, max_depth=max_depth
+            )
+        return found
+    if depth >= max_depth:
+        return found
+    tokens = ("guid", "afford", "interaction", "aff")
+    try:
+        names = dir(obj)
+    except Exception:
+        return found
+    for name in names:
+        if not any(token in name.lower() for token in tokens):
+            continue
+        value = _safe_get(obj, name)
+        if value is None:
+            continue
+        if isinstance(value, int) and _is_affordance_guid64(value):
+            found.add(value)
+            continue
+        if isinstance(value, (list, tuple, set)):
+            for entry in value:
+                found |= _collect_affordance_guid64s(
+                    entry, seen=seen, depth=depth + 1, max_depth=max_depth
+                )
+            continue
+        guid_value = _safe_get(value, "guid64")
+        if isinstance(guid_value, int) and _is_affordance_guid64(guid_value):
+            found.add(guid_value)
+            continue
+        found |= _collect_affordance_guid64s(
+            value, seen=seen, depth=depth + 1, max_depth=max_depth
+        )
+    return found
+
+
+def _extract_affordance_guid64s_from_wants(sim_info):
+    wants = _get_active_wants(sim_info)
+    found = set()
+    for want in wants or []:
+        found |= _collect_affordance_guid64s(want)
+        _goal_attr, goal = _find_first_attr(
+            want, ("goal", "_goal", "objective", "_objective", "whim_goal", "_whim_goal")
+        )
+        if goal is not None:
+            found |= _collect_affordance_guid64s(goal)
+    return sorted(found)
+
+
+def _extract_affordance_guid64s_from_aspiration(sim_info):
+    tracker = _safe_get(sim_info, "aspiration_tracker")
+    if tracker is None:
+        return []
+    active = _safe_get(tracker, "active_aspiration") or _safe_get(
+        tracker, "_active_aspiration"
+    )
+    found = set()
+    if active is not None:
+        found |= _collect_affordance_guid64s(active)
+    _milestone_attr, milestone = _find_first_attr(
+        tracker,
+        (
+            "current_milestone",
+            "_current_milestone",
+            "active_milestone",
+            "milestone",
+            "_milestone",
+            "current_goal",
+        ),
+    )
+    if milestone is None and callable(_safe_get(tracker, "get_current_milestone")):
+        ok, result, _error = _safe_call(tracker, "get_current_milestone")
+        milestone = result if ok else None
+    if milestone is not None:
+        found |= _collect_affordance_guid64s(milestone)
+    return sorted(found)
+
+
+def _attempt_guid64_goal_push(sim_info, sim, guid_list, caps, reason_prefix):
+    if sim_info is None or sim is None:
+        return False, "sim_missing"
+    if not guid_list:
+        return False, "no_guid64"
+    if caps is None:
+        try:
+            caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+        except Exception as exc:
+            return False, f"caps_error:{exc}"
+    if not caps:
+        return False, "caps_missing"
+    had_candidates = False
+    for guid in guid_list:
+        candidates = capabilities.get_candidates_for_ad_guid(guid, caps)
+        candidates = [
+            entry
+            for entry in candidates
+            if entry.get("allow_autonomous") is True and entry.get("safe_push") is True
+        ]
+        if candidates:
+            had_candidates = True
+        for entry in candidates:
+            def_id = entry.get("obj_def_id")
+            aff_guid = entry.get("aff_guid64")
+            ok, _push_reason = push_by_def_and_aff_guid(
+                sim,
+                def_id,
+                aff_guid,
+                reason=f"{reason_prefix} guid64={guid}",
+                precheck=settings.director_precheck_affordance_tests,
+            )
+            if ok:
+                return True, "pushed"
+    if not had_candidates:
+        return False, "no_pushable_candidates"
+    return False, "all_candidates_failed"
+
+
 def _resolve_whim_rule(whim_name: str):
     lowered = (whim_name or "").lower()
     normalized = _norm(whim_name)
@@ -2638,15 +2874,8 @@ def _find_target_sim(sim):
         except Exception:
             pass
 
-    sim_manager = None
     try:
-        sim_manager = services.sim_info_manager()
-    except Exception:
-        sim_manager = None
-    if sim_manager is None:
-        return None
-    try:
-        for other_info in sim_manager.get_all():
+        for other_info in sim_scope.iter_playable_household_sim_infos() or []:
             if other_info is None or other_info is sim_info:
                 continue
             other_sim = other_info.get_sim_instance()
@@ -2959,77 +3188,34 @@ def _try_resolve_wants(sim_info, force=False, now=None):
     sim = sim_info.get_sim_instance()
     if sim is None:
         return False, "WANT unavailable (no active sim)"
-    want_targets, want_reason = _select_want_targets(sim_info)
-    if not want_targets:
-        return False, want_reason or "WANT unavailable (no active wants or wants disabled)"
-    sim_name = _sim_display_name(sim_info)
-    last_message = want_reason
-    for want_key, want_name, _want_obj in want_targets:
-        rule_key = _resolve_whim_rule(want_name)
-        if rule_key is None:
-            continue
-        guid64 = _get_whim_guid64(_want_obj)
-        tuning = _resolve_whim_tuning_by_guid64(guid64)
-        tuning_name = getattr(tuning, "__name__", None) if tuning is not None else None
-        whim_target_sim = _get_want_target_sim_id(_want_obj)
-        _log_probe(
-            "WANT_NOW want_label={} want_guid64={} want_tuning={} whim_target_sim={}".format(
-                want_name, guid64, tuning_name, whim_target_sim
-            )
+    guid_list = _extract_affordance_guid64s_from_wants(sim_info)
+    if not guid_list:
+        _log_probe("WANT_NOW no_guid64")
+        return False, "WANT no affordance guid64 found"
+    caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+    ok, reason = _attempt_guid64_goal_push(sim_info, sim, guid_list, caps, "want_now")
+    _log_probe(
+        "WANT_NOW guid_count={} result={} reason={}".format(
+            len(guid_list), "SUCCESS" if ok else "FAIL", reason
         )
-        pushed, want_message, details = _push_want(
-            sim,
-            rule_key,
-            want_name,
-            want_obj=_want_obj,
-            force=force,
-            return_details=True,
+    )
+    if ok:
+        sim_id = _sim_identifier(sim_info)
+        now = time.time() if now is None else now
+        _record_push(sim_id, now)
+        action = f"{_sim_display_name(sim_info)} -> WANT guid64"
+        _append_action(action)
+        global last_director_time
+        last_director_time = now
+        story_log.append_event(
+            "wants_now",
+            sim_info=sim_info,
+            sim_name=_sim_display_name(sim_info),
+            reason=reason,
+            affordance_guid_count=len(guid_list),
         )
-        resolution_type = details.get("resolution_type", "FAIL")
-        _log_probe(f"WANT_NOW resolution_type={resolution_type}")
-        if "object_scan_count" in details:
-            _log_probe(
-                "WANT_NOW object_scan_count={} object_keywords={}".format(
-                    details.get("object_scan_count"), details.get("object_keywords")
-                )
-            )
-        target_label = details.get("target_label")
-        if target_label:
-            _log_probe(
-                "WANT_NOW target_type={} target={}".format(
-                    details.get("target_type"), target_label
-                )
-            )
-        if details.get("candidate_affordances"):
-            _log_probe(
-                "WANT_NOW candidate_affordances={}".format(
-                    details.get("candidate_affordances")
-                )
-            )
-        for attempt in details.get("push_attempts", []):
-            _log_probe(
-                "WANT_NOW affordance_name={} affordance_class={} is_picker={} push_sig_names={} push_ok={} push_reason={}".format(
-                    attempt.get("affordance_name"),
-                    attempt.get("affordance_class"),
-                    attempt.get("affordance_is_picker"),
-                    attempt.get("push_sig_names"),
-                    attempt.get("push_ok"),
-                    attempt.get("push_reason"),
-                )
-            )
-        if details.get("failure_reason"):
-            _log_probe(f"WANT_NOW failure_reason={details.get('failure_reason')}")
-        last_message = want_message
-        if pushed:
-            sim_id = _sim_identifier(sim_info)
-            now = time.time() if now is None else now
-            _record_push(sim_id, now)
-            action = f"{sim_name} -> WANT {want_name}"
-            _append_action(action)
-            global last_director_time
-            last_director_time = now
-            return True, want_message
-    return False, last_message or "WANT no supported target"
+        return True, "WANT pushed"
+    return False, f"WANT {reason}"
 
 
 def _get_object_label(obj):
@@ -3295,6 +3481,7 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
             aff_guid,
             reason=f"director_skill_guid64={skill_guid64}",
             probe_details=probe_details,
+            precheck=settings.director_precheck_affordance_tests,
         )
         if ok:
             _append_debug(
@@ -3707,7 +3894,18 @@ def _idle_override_check(now: float):
                 green_count += 1
         if green_count < settings.director_green_min_commodities:
             continue
-        if not _can_push_for_sim(sim_id, now):
+        idle_cooldown = settings.director_idle_per_sim_cooldown_seconds
+        last_push = _per_sim_last_push_time.get(sim_id)
+        if last_push is not None and now - last_push < idle_cooldown:
+            story_log.append_event(
+                "director_idle_blocked_by_cooldown",
+                sim_info=sim_info,
+                sim_name=_sim_display_name(sim_info),
+                seconds_since_last_push=round(now - last_push, 2),
+                idle_cooldown_seconds=idle_cooldown,
+            )
+            continue
+        if not _can_push_for_sim(sim_id, now, is_idle_override=True):
             continue
         busy, _busy_reason = _is_sim_busy(sim)
         if busy:

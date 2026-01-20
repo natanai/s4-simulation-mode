@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.5.0, Build 72)
+# Simulation Mode Kernel Mod (v0.5.0, Build 74)
 
 ## What it is
 
@@ -83,8 +83,6 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 | Collect snapshot log | `simulation collect` |
 | Force object scan | `simulation force_scan` |
 | Trigger skill plan | `simulation skill_plan_now <sim_firstname>` |
-| Trigger wants plan | `simulation wants_plan_now <sim_firstname>` |
-| Trigger aspiration plan | `simulation aspiration_plan_now <sim_firstname>` |
 
 Notes:
 

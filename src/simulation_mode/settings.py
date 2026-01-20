@@ -40,8 +40,15 @@ KNOWN_DEFAULTS = [
     ("director_max_pushes_per_sim_per_hour", "12"),
     ("director_prefer_career_skills", "true"),
     ("director_fallback_to_started_skills", "true"),
+    ("director_skill_push_precheck", "true"),
+    ("director_push_fail_strikes_limit", "3"),
+    ("director_push_fail_strikes_decay_seconds", "600"),
+    ("director_idle_override_enabled", "true"),
+    ("director_idle_override_min_seconds_idle", "8"),
+    ("director_idle_override_check_seconds", "10"),
     ("director_skill_allow_list", ""),
     ("director_skill_block_list", ""),
+    ("guardian_hunger_prefer_quick_meal_threshold", "0.45"),
     ("collect_log_filename", "simulation-mode-collect.log"),
     ("story_log_enabled", "true"),
     ("story_log_filename", "simulation-mode-story.log"),
@@ -63,6 +70,7 @@ KNOWN_DEFAULTS = [
     ("catalog_max_records", "0"),
     ("catalog_max_objects", "0"),
     ("catalog_max_affordances_per_object", "0"),
+    ("catalog_write_sample", "false"),
     ("catalog_collect_sample_objects", "150"),
     ("catalog_collect_sample_affordances_per_object", "60"),
     ("catalog_collect_top_auto_n", "40"),
@@ -97,6 +105,11 @@ def _build_default_template_text():
     lines.append(
         "guardian_max_pushes_per_sim_per_hour={}".format(
             defaults["guardian_max_pushes_per_sim_per_hour"]
+        )
+    )
+    lines.append(
+        "guardian_hunger_prefer_quick_meal_threshold={}".format(
+            defaults["guardian_hunger_prefer_quick_meal_threshold"]
         )
     )
     lines.append("")
@@ -149,6 +162,36 @@ def _build_default_template_text():
     lines.append(
         "director_fallback_to_started_skills={}".format(
             defaults["director_fallback_to_started_skills"]
+        )
+    )
+    lines.append(
+        "director_skill_push_precheck={}".format(
+            defaults["director_skill_push_precheck"]
+        )
+    )
+    lines.append(
+        "director_push_fail_strikes_limit={}".format(
+            defaults["director_push_fail_strikes_limit"]
+        )
+    )
+    lines.append(
+        "director_push_fail_strikes_decay_seconds={}".format(
+            defaults["director_push_fail_strikes_decay_seconds"]
+        )
+    )
+    lines.append(
+        "director_idle_override_enabled={}".format(
+            defaults["director_idle_override_enabled"]
+        )
+    )
+    lines.append(
+        "director_idle_override_min_seconds_idle={}".format(
+            defaults["director_idle_override_min_seconds_idle"]
+        )
+    )
+    lines.append(
+        "director_idle_override_check_seconds={}".format(
+            defaults["director_idle_override_check_seconds"]
         )
     )
     lines.append("director_skill_allow_list={}".format(defaults["director_skill_allow_list"]))
@@ -224,6 +267,7 @@ def _build_default_template_text():
             defaults["catalog_max_affordances_per_object"]
         )
     )
+    lines.append("catalog_write_sample={}".format(defaults["catalog_write_sample"]))
     lines.append("")
     lines.append("# collect-integrated sampling caps (Build 61)")
     lines.append(
@@ -310,6 +354,7 @@ def _append_missing_keys(path):
             "catalog_max_records",
             "catalog_max_objects",
             "catalog_max_affordances_per_object",
+            "catalog_write_sample",
         }
         collect_caps = {
             "catalog_collect_sample_objects",
@@ -407,8 +452,15 @@ class SimulationModeSettings:
         director_max_pushes_per_sim_per_hour=12,
         director_prefer_career_skills=True,
         director_fallback_to_started_skills=True,
+        director_skill_push_precheck=True,
+        director_push_fail_strikes_limit=3,
+        director_push_fail_strikes_decay_seconds=600,
+        director_idle_override_enabled=True,
+        director_idle_override_min_seconds_idle=8,
+        director_idle_override_check_seconds=10,
         director_skill_allow_list=None,
         director_skill_block_list=None,
+        guardian_hunger_prefer_quick_meal_threshold=0.45,
         collect_log_filename="simulation-mode-collect.log",
         story_log_enabled=True,
         story_log_filename="simulation-mode-story.log",
@@ -430,6 +482,7 @@ class SimulationModeSettings:
         catalog_max_records=0,
         catalog_max_objects=0,
         catalog_max_affordances_per_object=0,
+        catalog_write_sample=False,
         catalog_collect_sample_objects=150,
         catalog_collect_sample_affordances_per_object=60,
         catalog_collect_top_auto_n=40,
@@ -464,8 +517,17 @@ class SimulationModeSettings:
         self.director_max_pushes_per_sim_per_hour = director_max_pushes_per_sim_per_hour
         self.director_prefer_career_skills = director_prefer_career_skills
         self.director_fallback_to_started_skills = director_fallback_to_started_skills
+        self.director_skill_push_precheck = director_skill_push_precheck
+        self.director_push_fail_strikes_limit = director_push_fail_strikes_limit
+        self.director_push_fail_strikes_decay_seconds = director_push_fail_strikes_decay_seconds
+        self.director_idle_override_enabled = director_idle_override_enabled
+        self.director_idle_override_min_seconds_idle = director_idle_override_min_seconds_idle
+        self.director_idle_override_check_seconds = director_idle_override_check_seconds
         self.director_skill_allow_list = director_skill_allow_list or []
         self.director_skill_block_list = director_skill_block_list or []
+        self.guardian_hunger_prefer_quick_meal_threshold = (
+            guardian_hunger_prefer_quick_meal_threshold
+        )
         self.collect_log_filename = collect_log_filename
         self.story_log_enabled = story_log_enabled
         self.story_log_filename = story_log_filename
@@ -489,6 +551,7 @@ class SimulationModeSettings:
         self.catalog_max_records = catalog_max_records
         self.catalog_max_objects = catalog_max_objects
         self.catalog_max_affordances_per_object = catalog_max_affordances_per_object
+        self.catalog_write_sample = catalog_write_sample
         self.catalog_collect_sample_objects = catalog_collect_sample_objects
         self.catalog_collect_sample_affordances_per_object = (
             catalog_collect_sample_affordances_per_object
@@ -789,10 +852,47 @@ def load_settings(target):
                     target.director_fallback_to_started_skills = value
                 else:
                     _log_invalid_value(key, raw_value)
+            elif key == "director_skill_push_precheck":
+                if isinstance(value, bool):
+                    target.director_skill_push_precheck = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_push_fail_strikes_limit":
+                try:
+                    target.director_push_fail_strikes_limit = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_push_fail_strikes_decay_seconds":
+                try:
+                    target.director_push_fail_strikes_decay_seconds = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_idle_override_enabled":
+                if isinstance(value, bool):
+                    target.director_idle_override_enabled = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_idle_override_min_seconds_idle":
+                try:
+                    target.director_idle_override_min_seconds_idle = max(0, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
+            elif key == "director_idle_override_check_seconds":
+                try:
+                    target.director_idle_override_check_seconds = max(1, int(value))
+                except Exception:
+                    _log_invalid_value(key, raw_value)
             elif key == "director_skill_allow_list":
                 target.director_skill_allow_list = _parse_list(raw_value)
             elif key == "director_skill_block_list":
                 target.director_skill_block_list = _parse_list(raw_value)
+            elif key == "guardian_hunger_prefer_quick_meal_threshold":
+                try:
+                    target.guardian_hunger_prefer_quick_meal_threshold = max(
+                        0.0, min(1.0, float(value))
+                    )
+                except Exception:
+                    _log_invalid_value(key, raw_value)
             elif key == "collect_log_filename":
                 value = str(raw_value).strip()
                 target.collect_log_filename = (
@@ -896,14 +996,21 @@ def load_settings(target):
                     target.catalog_max_affordances_per_object = _non_negative_int(value)
                 except Exception:
                     _log_invalid_value(key, raw_value)
+            elif key == "catalog_write_sample":
+                if isinstance(value, bool):
+                    target.catalog_write_sample = value
+                else:
+                    _log_invalid_value(key, raw_value)
             elif key == "catalog_collect_sample_objects":
                 try:
-                    target.catalog_collect_sample_objects = max(1, int(value))
+                    target.catalog_collect_sample_objects = max(0, int(value))
                 except Exception:
                     _log_invalid_value(key, raw_value)
             elif key == "catalog_collect_sample_affordances_per_object":
                 try:
-                    target.catalog_collect_sample_affordances_per_object = max(1, int(value))
+                    target.catalog_collect_sample_affordances_per_object = max(
+                        0, int(value)
+                    )
                 except Exception:
                     _log_invalid_value(key, raw_value)
             elif key == "catalog_collect_top_auto_n":

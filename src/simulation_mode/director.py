@@ -104,8 +104,9 @@ _RECENT_SKILL_SUCCESS = {}
 _RECENT_SKILL_SUCCESS_LIST = {}
 _LAST_SUCCESS_SKILL = {}
 _failed_skill_until = {}
-_candidate_fail_strikes = {}
-_last_idle_override_ts = 0.0
+_push_fail_strikes = {}
+_idle_start_by_sim = {}
+_last_idle_check_by_sim = {}
 
 _WINDOW_SECONDS = 3600
 _BUSY_BUFFER = 10
@@ -375,7 +376,7 @@ def _safe_min_motive(snapshot):
 
 def _get_instantiated_sims_for_director():
     sims = []
-    for sim_info in sim_scope.iter_active_household_sim_infos() or []:
+    for sim_info in sim_scope.iter_playable_household_sim_infos() or []:
         sim = None
         try:
             get_inst = getattr(sim_info, "get_sim_instance", None)
@@ -427,6 +428,35 @@ def _record_push(sim_id, now):
         _per_sim_push_count_window_start[sim_id] = now
         _per_sim_push_count_in_window[sim_id] = 0
     _per_sim_push_count_in_window[sim_id] = _per_sim_push_count_in_window.get(sim_id, 0) + 1
+
+
+def _get_push_fail_state(strike_key, now):
+    state = _push_fail_strikes.get(strike_key)
+    if not state:
+        return 0, None
+    count = state.get("count", 0)
+    last_ts = state.get("last_ts")
+    decay = settings.director_push_fail_strikes_decay_seconds
+    if last_ts is not None and decay > 0 and now - last_ts > decay:
+        _push_fail_strikes.pop(strike_key, None)
+        return 0, None
+    return count, last_ts
+
+
+def _should_skip_for_push_fail_strikes(strike_key, now):
+    limit = settings.director_push_fail_strikes_limit
+    if limit <= 0:
+        return False, 0
+    count, _last_ts = _get_push_fail_state(strike_key, now)
+    return count >= limit, count
+
+
+def _record_push_fail_strike(strike_key, now):
+    limit = settings.director_push_fail_strikes_limit
+    if limit <= 0:
+        return
+    count, _last_ts = _get_push_fail_state(strike_key, now)
+    _push_fail_strikes[strike_key] = {"count": count + 1, "last_ts": now}
 
 
 def _is_primitive(value):
@@ -1835,9 +1865,11 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
             def_id = entry.get("obj_def_id")
             aff_guid = entry.get("aff_guid64")
             aff_name = entry.get("aff_name")
-            strike_key = (chosen_skill_guid, def_id, aff_guid)
-            strike_count = _candidate_fail_strikes.get(strike_key, 0)
-            if strike_count >= 3:
+            strike_key = (sim_id, def_id, aff_guid)
+            skip_due_to_strikes, strike_count = _should_skip_for_push_fail_strikes(
+                strike_key, now
+            )
+            if skip_due_to_strikes:
                 details["attempted_pushes"].append(
                     {
                         "def_id": def_id,
@@ -1845,6 +1877,8 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                         "aff_name": aff_name,
                         "ok": False,
                         "reason": "skip_fail_strikes",
+                        "failure_reason": "skip_fail_strikes",
+                        "target_type": "object",
                     }
                 )
                 continue
@@ -1853,7 +1887,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                 def_id,
                 aff_guid,
                 reason=f"director_skill_plan_strict_guid64={chosen_skill_guid}",
-                precheck=True,
+                precheck=settings.director_skill_push_precheck,
             )
             normalized_reason = push_reason
             if normalized_reason.startswith("no_object_instances") or normalized_reason.startswith(
@@ -1867,6 +1901,8 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                     "aff_name": aff_name,
                     "ok": ok,
                     "reason": normalized_reason,
+                    "failure_reason": None if ok else push_reason,
+                    "target_type": "object",
                 }
             )
             if ok:
@@ -1925,7 +1961,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                         )
                 _LAST_SKILL_PLAN_STRICT = details
                 return True, details
-            _candidate_fail_strikes[strike_key] = strike_count + 1
+            _record_push_fail_strike(strike_key, now)
             last_failure_reason = normalized_reason or "push_failed"
         _mark_skill_failed(chosen_skill_guid)
     details["reason"] = "all_skills_failed"
@@ -3437,8 +3473,72 @@ def _evaluate(now: float, force: bool = False, reason: str = None):
         _dbg(f"Director ran: {len(sims)} eligible sims")
 
 
+def _idle_override_check(now: float):
+    if not settings.director_idle_override_enabled:
+        return
+    check_seconds = settings.director_idle_override_check_seconds
+    min_idle_seconds = settings.director_idle_override_min_seconds_idle
+    for sim in _get_instantiated_sims_for_director():
+        sim_info = getattr(sim, "sim_info", None)
+        if sim_info is None:
+            continue
+        sim_id = _sim_identifier(sim_info)
+        last_check = _last_idle_check_by_sim.get(sim_id)
+        if last_check is not None and now - last_check < check_seconds:
+            continue
+        _last_idle_check_by_sim[sim_id] = now
+
+        queue_len = _queue_size(sim)
+        interaction, _source = _get_current_interaction(sim)
+        if queue_len is not None and queue_len > 0:
+            _idle_start_by_sim.pop(sim_id, None)
+            continue
+        idle = interaction is None or _interaction_is_idle(interaction)
+        if not idle:
+            _idle_start_by_sim.pop(sim_id, None)
+            continue
+        idle_start = _idle_start_by_sim.get(sim_id)
+        if idle_start is None:
+            _idle_start_by_sim[sim_id] = now
+            continue
+        if min_idle_seconds > 0 and now - idle_start < min_idle_seconds:
+            continue
+
+        snapshot = _get_motive_snapshot(sim_info)
+        if not snapshot:
+            continue
+        min_motive = _safe_min_motive(snapshot)
+        if min_motive is not None and min_motive < settings.director_min_safe_motive:
+            continue
+        green_count = 0
+        for _key, value in snapshot:
+            if guardian.motive_is_green(value, settings.director_green_motive_percent):
+                green_count += 1
+        if green_count < settings.director_green_min_commodities:
+            continue
+        if not _can_push_for_sim(sim_id, now):
+            continue
+        busy, _busy_reason = _is_sim_busy(sim)
+        if busy:
+            continue
+
+        story_log.append_event(
+            "director_idle_override",
+            sim_info=sim_info,
+            sim_name=_sim_display_name(sim_info),
+            reason="idle_queue_empty",
+        )
+        result = run_skill_plan(sim_info, sim, now, force=False, source="director")
+        if result.get("success"):
+            _record_push(sim_id, now)
+            _record_action(sim_info, result.get("skill_key"), result.get("skill_reason"), now)
+        else:
+            _dbg(f"{_sim_display_name(sim_info)}: idle override plan failed")
+        _idle_start_by_sim[sim_id] = now
+
+
 def on_tick(now: float):
-    global _last_check_time, last_director_called_time, last_director_run_time, _last_idle_override_ts
+    global _last_check_time, last_director_called_time, last_director_run_time
     if not settings.enabled or not settings.director_enabled:
         return
     try:
@@ -3447,34 +3547,8 @@ def on_tick(now: float):
     except Exception:
         return
     last_director_called_time = now
+    _idle_override_check(now)
     if now - _last_check_time < settings.director_check_seconds:
-        if now - _last_idle_override_ts < 10:
-            return
-        idle_sim = None
-        for sim in _get_instantiated_sims_for_director():
-            queue_len = _queue_size(sim)
-            interaction, _source = _get_current_interaction(sim)
-            if queue_len is not None and queue_len > 0:
-                continue
-            if interaction is None:
-                idle_sim = sim
-                break
-            if _interaction_is_idle(interaction):
-                idle_sim = sim
-                break
-        if idle_sim is None:
-            return
-        sim_info = getattr(idle_sim, "sim_info", None)
-        story_log.append_event(
-            "director_idle_override",
-            sim_info=sim_info,
-            sim_name=_sim_display_name(sim_info),
-            reason="idle_queue_empty",
-        )
-        _last_idle_override_ts = now
-        _last_check_time = now
-        last_director_run_time = now
-        _evaluate(now, force=False, reason="idle_override")
         return
     _last_check_time = now
     last_director_run_time = now

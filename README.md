@@ -11,11 +11,17 @@ This is a minimal Sims 4 script mod kernel that registers the `simulation` cheat
 
 ## What it is not (v0.5.0 non-goals)
 
-* No action/event logging yet.
+* No full action/event logging; only lightweight story-log events for key actions.
 * No cheating motive values or filling needs.
 * No complex autonomy rewrites beyond light interaction pushes.
 * No attempt to override global game options (aging, etc.).
 * No attempt to handle every modal dialog in the game.
+
+## Known recent issues / logging
+
+* Skill notifications can occur from create-on-read; now logged as story event: `director_skill_stat_fallback_create_on_read`.
+* New opt-in setting: `director_idle_override_allow_bypass_cooldown_once` (default false).
+* `director_push` events now include `push_details` and no longer show unknown labels.
 
 ## Prereqs
 

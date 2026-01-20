@@ -266,6 +266,22 @@ def affordance_name(aff):
     ).lower()
 
 
+def _probe_object_label(obj):
+    if obj is None:
+        return "unknown"
+    cls = getattr(getattr(obj, "__class__", None), "__name__", None) or "Object"
+    definition = getattr(obj, "definition", None)
+    def_name = getattr(definition, "name", None) if definition is not None else None
+    return "{} {} {}".format(cls, def_name or "undef", str(obj)).lower()
+
+
+def _probe_affordance_label(aff):
+    if aff is None:
+        return "unknown"
+    name = getattr(aff, "__name__", None) or affordance_name(aff) or str(aff)
+    return "{} {}".format(name, str(aff)).lower()
+
+
 def _required_kwonly_args(aff):
     init = getattr(aff, "__init__", None)
     if init is None:
@@ -584,23 +600,67 @@ def push_by_def_and_aff_guid(
 ):
     if sim is None or def_id is None or aff_guid64 is None:
         return False, "invalid_params"
-    objects = find_objects_by_definition_id(def_id)
-    if not objects:
-        if probe_details is not None:
+    try:
+        from simulation_mode import sim_scope
+
+        sim_info = getattr(sim, "sim_info", None)
+        if sim_info is not None and not sim_scope.is_active_household_sim(sim_info):
+            if isinstance(probe_details, dict):
+                probe_details.setdefault("push_attempts", []).append(
+                    {
+                        "ok": False,
+                        "reason": "not_active_household",
+                        "def_id": def_id,
+                        "aff_guid64": aff_guid64,
+                    }
+                )
+            return False, "not_active_household"
+    except Exception:
+        if isinstance(probe_details, dict):
             probe_details.setdefault("push_attempts", []).append(
                 {
-                    "obj_def_id": def_id,
+                    "ok": False,
+                    "reason": "not_active_household_guard_error",
+                    "def_id": def_id,
                     "aff_guid64": aff_guid64,
-                    "result": "no_objects",
-                    "reason": "no_object_instances_def_id",
                 }
+            )
+        return False, "not_active_household_guard_error"
+
+    def _mk_attempt(**kw):
+        attempt = {
+            "ok": bool(kw.get("ok", False)),
+            "reason": kw.get("reason"),
+            "def_id": kw.get("def_id"),
+            "aff_guid64": kw.get("aff_guid64"),
+            "obj_def_id": kw.get("obj_def_id"),
+            "obj_def_name": kw.get("obj_def_name"),
+            "obj_class": kw.get("obj_class"),
+            "object_label": kw.get("object_label"),
+            "aff_name": kw.get("aff_name"),
+            "aff_class": kw.get("aff_class"),
+            "affordance_label": kw.get("affordance_label"),
+            "affordance_is_picker": kw.get("affordance_is_picker"),
+            "precheck_requested": kw.get("precheck_requested"),
+            "precheck_passed": kw.get("precheck_passed"),
+            "precheck_failure_reason": kw.get("precheck_failure_reason"),
+            "push_sig_names": kw.get("push_sig_names"),
+            "failure_reason": kw.get("failure_reason"),
+        }
+        return attempt
+
+    objects = find_objects_by_definition_id(def_id)
+    if not objects:
+        if isinstance(probe_details, dict):
+            probe_details.setdefault("push_attempts", []).append(
+                _mk_attempt(ok=False, reason="no_object", def_id=def_id, aff_guid64=aff_guid64)
             )
         return False, "no_object_instances_def_id"
     sorted_objects = []
     for obj in objects:
         ok, filter_reason = _is_world_interactable_object(obj)
         if not ok:
-            if probe_details is not None:
+            if isinstance(probe_details, dict):
                 probe_details.setdefault("push_attempts", []).append(
                     {
                         "obj_def_id": def_id,
@@ -622,44 +682,70 @@ def push_by_def_and_aff_guid(
     for _distance_value, obj in sorted_objects:
         aff = resolve_affordance_by_guid(obj, aff_guid64)
         if aff is None:
-            if probe_details is not None:
+            if isinstance(probe_details, dict):
                 probe_details.setdefault("push_attempts", []).append(
-                    {
-                        "obj_def_id": def_id,
-                        "aff_guid64": aff_guid64,
-                        "result": "aff_not_found",
-                        "reason": "no_affordance_tuning",
-                    }
+                    _mk_attempt(
+                        ok=False, reason="no_affordance", def_id=def_id, aff_guid64=aff_guid64
+                    )
                 )
             continue
         if precheck:
             passed, detail = precheck_affordance(sim, obj, aff)
             if passed is False:
                 precheck_failure_detail = detail
-                if probe_details is not None:
+                if isinstance(probe_details, dict):
+                    obj_def_id = getattr(getattr(obj, "definition", None), "id", None)
+                    obj_def_name = getattr(getattr(obj, "definition", None), "name", None)
                     probe_details.setdefault("push_attempts", []).append(
-                        {
-                            "obj_def_id": def_id,
-                            "aff_guid64": aff_guid64,
-                            "result": "precheck_failed",
-                            "reason": f"precheck_failed:{detail}",
-                        }
-                )
+                        _mk_attempt(
+                            ok=False,
+                            reason="precheck_failed",
+                            def_id=def_id,
+                            aff_guid64=aff_guid64,
+                            obj_def_id=obj_def_id,
+                            obj_def_name=str(obj_def_name)
+                            if obj_def_name is not None
+                            else None,
+                            obj_class=getattr(getattr(obj, "__class__", None), "__name__", None),
+                            object_label=_probe_object_label(obj),
+                            aff_name=affordance_name(aff),
+                            aff_class=getattr(aff, "__name__", None),
+                            affordance_label=_probe_affordance_label(aff),
+                            affordance_is_picker=is_picker_affordance(aff),
+                            precheck_requested=True,
+                            precheck_passed=False,
+                            precheck_failure_reason=str(detail),
+                        )
+                    )
                 continue
         had_push_attempt = True
         ok, failure_reason, _sig_names = call_push_super_affordance(
             sim, aff, obj, context
         )
-        if probe_details is not None:
-            probe_details.setdefault("push_attempts", []).append(
-                {
-                    "obj_def_id": def_id,
-                    "aff_guid64": aff_guid64,
-                    "result": "ok" if ok else "push_failed",
-                    "failure_reason": failure_reason,
-                    "reason": reason,
-                }
-            )
+        obj_def_id = getattr(getattr(obj, "definition", None), "id", None)
+        obj_def_name = getattr(getattr(obj, "definition", None), "name", None)
+        attempt = _mk_attempt(
+            ok=bool(ok),
+            reason="pushed" if ok else "push_failed",
+            def_id=def_id,
+            aff_guid64=aff_guid64,
+            obj_def_id=obj_def_id,
+            obj_def_name=str(obj_def_name) if obj_def_name is not None else None,
+            obj_class=getattr(getattr(obj, "__class__", None), "__name__", None),
+            object_label=_probe_object_label(obj),
+            aff_name=affordance_name(aff),
+            aff_class=getattr(aff, "__name__", None),
+            affordance_label=_probe_affordance_label(aff),
+            affordance_is_picker=is_picker_affordance(aff),
+            precheck_requested=bool(precheck),
+            precheck_passed=True if not precheck else True,
+            push_sig_names=list(_sig_names) if isinstance(_sig_names, (list, tuple)) else _sig_names,
+            failure_reason=str(failure_reason) if failure_reason is not None else None,
+        )
+        if isinstance(probe_details, dict):
+            probe_details.setdefault("push_attempts", []).append(attempt)
+            if ok:
+                probe_details["last_success"] = attempt
         if ok:
             return True, "pushed"
     if not had_push_attempt and precheck_failure_detail:

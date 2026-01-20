@@ -96,6 +96,9 @@ last_director_debug = []
 _LAST_ACTION_DETAILS = None
 _LAST_WANT_DETAILS = None
 _LAST_SKILL_PLAN_STRICT = None
+_LAST_PUSH_SUCCESS = None
+_IDLE_OVERRIDE_BYPASS_USED_BY_SIM = {}
+_SKILL_STAT_FALLBACK_LOGGED = {}
 
 _last_motive_snapshot_by_sim = {}
 _LAST_CAREER_PROBE = []
@@ -520,15 +523,16 @@ def _get_instantiated_sims_for_director():
     return out
 
 
-def _can_push_for_sim(sim_id, now, is_idle_override=False):
+def _can_push_for_sim(sim_id, now, is_idle_override=False, ignore_cooldown=False):
     cooldown = (
         settings.director_idle_per_sim_cooldown_seconds
         if is_idle_override
         else settings.director_per_sim_cooldown_seconds
     )
     last_push = _per_sim_last_push_time.get(sim_id)
-    if last_push is not None and now - last_push < cooldown:
-        return False
+    if not ignore_cooldown:
+        if last_push is not None and now - last_push < cooldown:
+            return False
 
     window_start = _per_sim_push_count_window_start.get(sim_id)
     if window_start is None or now - window_start >= _WINDOW_SECONDS:
@@ -911,12 +915,34 @@ def _skill_level_and_max_for_guid(sim_info, guid64):
     tuning = stat_mgr.get(guid64) if stat_mgr is not None else None
     if tuning is not None and tracker is not None:
         ok, stat, _err = _safe_call(tracker, "get_statistic", tuning, add=False)
+        used_fallback = False
         if not ok:
             ok, stat, _err = _safe_call(tracker, "get_statistic", tuning)
+            used_fallback = True
         if stat is not None:
             level = _skill_level_from_skill(stat)
             max_level = _skill_max_from_skill(stat)
             if level is not None or max_level is not None:
+                if used_fallback and settings.story_log_enabled:
+                    sim_id = _sim_identifier(sim_info)
+                    seen = _SKILL_STAT_FALLBACK_LOGGED.setdefault(sim_id, set())
+                    if guid64 not in seen:
+                        seen.add(guid64)
+                        label = None
+                        try:
+                            label = _skill_label(stat) if stat is not None else None
+                        except Exception:
+                            label = None
+                        try:
+                            story_log.append_event(
+                                "director_skill_stat_fallback_create_on_read",
+                                sim_info=sim_info,
+                                sim_name=_sim_display_name(sim_info),
+                                skill_guid64=guid64,
+                                skill_label=label,
+                            )
+                        except Exception:
+                            pass
                 return level, max_level
     return None, None
 
@@ -1444,11 +1470,24 @@ def run_skill_plan(sim_info, sim, now, force=False, source="director"):
         started_candidates = _get_started_skill_candidates(sim_info)
     _log_started_skill_order(started_candidates)
 
+    caps_for_skills = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+
+    def _has_skill_candidates(skill_guid64):
+        try:
+            c = capabilities.get_candidates_for_skill_gain_guid(
+                skill_guid64, caps_for_skills
+            )
+            return bool(c)
+        except Exception:
+            return True
+
     for guid in career_candidates:
+        if guid is not None and not _has_skill_candidates(guid):
+            _append_debug(f"Director: career_skill_skipped=no_cap_candidates guid64={guid}")
+            continue
         level, _max_level = _skill_level_and_max_for_guid(sim_info, guid)
-        attempt_ok = try_push_skill_interaction(
-            sim, guid, force=force, probe_details=None
-        )
+        probe = {}
+        attempt_ok = try_push_skill_interaction(sim, guid, force=force, probe_details=probe)
         if attempt_ok:
             _append_debug(
                 f"Director: skill_result=success skill_guid64={guid} source=career"
@@ -1476,8 +1515,12 @@ def run_skill_plan(sim_info, sim, now, force=False, source="director"):
         attempted += 1
         guid = _skill_guid64(skill_obj)
         level = _skill_level_from_skill(skill_obj)
+        if guid is not None and not _has_skill_candidates(guid):
+            _append_debug(f"Director: started_skill_skipped=no_cap_candidates guid64={guid}")
+            continue
+        probe = {}
         attempt_ok = try_push_skill_interaction(
-            sim, skill_obj, force=force, probe_details=None
+            sim, skill_obj, force=force, probe_details=probe
         )
         if attempt_ok:
             _append_debug(
@@ -2764,14 +2807,25 @@ def _attempt_guid64_goal_push(sim_info, sim, guid_list, caps, reason_prefix):
         for entry in candidates:
             def_id = entry.get("obj_def_id")
             aff_guid = entry.get("aff_guid64")
+            probe = {}
             ok, _push_reason = push_by_def_and_aff_guid(
                 sim,
                 def_id,
                 aff_guid,
                 reason=f"{reason_prefix} guid64={guid}",
+                probe_details=probe,
                 precheck=settings.director_precheck_affordance_tests,
             )
             if ok:
+                global _LAST_PUSH_SUCCESS
+                global _LAST_ACTION_DETAILS
+                last = probe.get("last_success")
+                if isinstance(last, dict):
+                    _LAST_PUSH_SUCCESS = last
+                    obj_label = last.get("object_label")
+                    aff_label = last.get("affordance_label")
+                    if obj_label and aff_label:
+                        _LAST_ACTION_DETAILS = (obj_label, aff_label)
                 return True, "pushed"
     if not had_candidates:
         return False, "no_pushable_candidates"
@@ -3475,15 +3529,26 @@ def try_push_skill_interaction(sim, skill_key, force=False, probe_details=None):
     for entry in candidates:
         def_id = entry.get("obj_def_id")
         aff_guid = entry.get("aff_guid64")
+        local_probe = probe_details if isinstance(probe_details, dict) else None
         ok, _push_reason = push_by_def_and_aff_guid(
             sim,
             def_id,
             aff_guid,
             reason=f"director_skill_guid64={skill_guid64}",
-            probe_details=probe_details,
+            probe_details=local_probe,
             precheck=settings.director_precheck_affordance_tests,
         )
         if ok:
+            global _LAST_ACTION_DETAILS
+            global _LAST_PUSH_SUCCESS
+            if isinstance(local_probe, dict):
+                last = local_probe.get("last_success")
+                if isinstance(last, dict):
+                    _LAST_PUSH_SUCCESS = last
+                    obj_label = last.get("object_label")
+                    aff_label = last.get("affordance_label")
+                    if obj_label and aff_label:
+                        _LAST_ACTION_DETAILS = (obj_label, aff_label)
             _append_debug(
                 f"{sim_name}: SUCCESS push skill_guid64={skill_guid64} def_id={def_id} aff_guid={aff_guid}"
             )
@@ -3663,6 +3728,10 @@ def _record_action(sim_info, skill_key, reason, now):
     action = f"{sim_name} -> {skill_key} ({reason}) via {object_label}:{affordance_label}"
     _append_action(action)
     from simulation_mode import story_log
+    details = {}
+    global _LAST_PUSH_SUCCESS
+    if isinstance(_LAST_PUSH_SUCCESS, dict):
+        details["push_details"] = dict(_LAST_PUSH_SUCCESS)
     story_log.append_event(
         "director_push",
         sim_info=sim_info,
@@ -3671,6 +3740,7 @@ def _record_action(sim_info, skill_key, reason, now):
         object_label=object_label,
         affordance_label=affordance_label,
         action=action,
+        **details,
     )
     last_director_time = now
 
@@ -3861,6 +3931,9 @@ def _idle_override_check(now: float):
         if sim_info is None:
             continue
         sim_id = _sim_identifier(sim_info)
+        busy, _busy_reason = _is_sim_busy(sim)
+        if busy:
+            _IDLE_OVERRIDE_BYPASS_USED_BY_SIM.pop(sim_id, None)
         last_check = _last_idle_check_by_sim.get(sim_id)
         if last_check is not None and now - last_check < check_seconds:
             continue
@@ -3870,10 +3943,12 @@ def _idle_override_check(now: float):
         interaction, _source = _get_current_interaction(sim)
         if queue_len is not None and queue_len > 0:
             _idle_start_by_sim.pop(sim_id, None)
+            _IDLE_OVERRIDE_BYPASS_USED_BY_SIM.pop(sim_id, None)
             continue
         idle = interaction is None or _interaction_is_idle(interaction)
         if not idle:
             _idle_start_by_sim.pop(sim_id, None)
+            _IDLE_OVERRIDE_BYPASS_USED_BY_SIM.pop(sim_id, None)
             continue
         idle_start = _idle_start_by_sim.get(sim_id)
         if idle_start is None:
@@ -3894,20 +3969,47 @@ def _idle_override_check(now: float):
                 green_count += 1
         if green_count < settings.director_green_min_commodities:
             continue
-        idle_cooldown = settings.director_idle_per_sim_cooldown_seconds
-        last_push = _per_sim_last_push_time.get(sim_id)
-        if last_push is not None and now - last_push < idle_cooldown:
-            story_log.append_event(
-                "director_idle_blocked_by_cooldown",
-                sim_info=sim_info,
-                sim_name=_sim_display_name(sim_info),
-                seconds_since_last_push=round(now - last_push, 2),
-                idle_cooldown_seconds=idle_cooldown,
-            )
-            continue
-        if not _can_push_for_sim(sim_id, now, is_idle_override=True):
-            continue
-        busy, _busy_reason = _is_sim_busy(sim)
+        cooldown_ok = _can_push_for_sim(sim_id, now, is_idle_override=True)
+        if not cooldown_ok:
+            used = _IDLE_OVERRIDE_BYPASS_USED_BY_SIM.get(sim_id)
+            if (
+                settings.director_idle_override_allow_bypass_cooldown_once
+                and not used
+                and _can_push_for_sim(
+                    sim_id, now, is_idle_override=True, ignore_cooldown=True
+                )
+            ):
+                _IDLE_OVERRIDE_BYPASS_USED_BY_SIM[sim_id] = True
+                try:
+                    story_log.append_event(
+                        "director_idle_override_bypass_cooldown_once",
+                        sim_info=sim_info,
+                        sim_name=_sim_display_name(sim_info),
+                        idle_cooldown=settings.director_idle_per_sim_cooldown_seconds,
+                        time_since_last_push=(
+                            now - _per_sim_last_push_time.get(sim_id)
+                        )
+                        if _per_sim_last_push_time.get(sim_id) is not None
+                        else None,
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    story_log.append_event(
+                        "director_idle_blocked_by_cooldown",
+                        sim_info=sim_info,
+                        sim_name=_sim_display_name(sim_info),
+                        idle_cooldown=settings.director_idle_per_sim_cooldown_seconds,
+                        time_since_last_push=(
+                            now - _per_sim_last_push_time.get(sim_id)
+                        )
+                        if _per_sim_last_push_time.get(sim_id) is not None
+                        else None,
+                    )
+                except Exception:
+                    pass
+                continue
         if busy:
             continue
 

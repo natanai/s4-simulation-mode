@@ -65,6 +65,8 @@ Build 72 note: the README now highlights the primary command examples (`simulati
    * **Expected:** a result is logged to the collect log file and the console reports success/failure.
 8. Optional: run `simulation wants_plan_now <sim_firstname>` and `simulation aspiration_plan_now <sim_firstname>`.
    * **Expected:** console reports success/failure plus candidate counts (if affordance GUIDs were found).
+9. After any successful director push, confirm `director_push` events include non-unknown `object_label` and `affordance_label`.
+10. Optional: set `director_idle_override_allow_bypass_cooldown_once=true`, trigger quick idle, and confirm a `director_idle_override_bypass_cooldown_once` story-log event appears.
 
 ## Settings reload
 

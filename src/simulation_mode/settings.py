@@ -50,6 +50,7 @@ KNOWN_DEFAULTS = [
     ("director_idle_override_enabled", "true"),
     ("director_idle_override_min_seconds_idle", "8"),
     ("director_idle_override_check_seconds", "10"),
+    ("director_idle_override_allow_bypass_cooldown_once", "false"),
     ("director_skill_allow_list", ""),
     ("director_skill_block_list", ""),
     ("director_skill_cooldown_seconds", "7200"),
@@ -220,6 +221,11 @@ def _build_default_template_text():
     lines.append(
         "director_idle_override_check_seconds={}".format(
             defaults["director_idle_override_check_seconds"]
+        )
+    )
+    lines.append(
+        "director_idle_override_allow_bypass_cooldown_once={}".format(
+            defaults["director_idle_override_allow_bypass_cooldown_once"]
         )
     )
     lines.append("director_skill_allow_list={}".format(defaults["director_skill_allow_list"]))
@@ -511,6 +517,7 @@ class SimulationModeSettings:
         director_idle_override_enabled=True,
         director_idle_override_min_seconds_idle=8,
         director_idle_override_check_seconds=10,
+        director_idle_override_allow_bypass_cooldown_once=False,
         director_skill_allow_list=None,
         director_skill_block_list=None,
         director_skill_cooldown_seconds=7200,
@@ -586,6 +593,9 @@ class SimulationModeSettings:
         self.director_idle_override_enabled = director_idle_override_enabled
         self.director_idle_override_min_seconds_idle = director_idle_override_min_seconds_idle
         self.director_idle_override_check_seconds = director_idle_override_check_seconds
+        self.director_idle_override_allow_bypass_cooldown_once = (
+            director_idle_override_allow_bypass_cooldown_once
+        )
         self.director_skill_allow_list = director_skill_allow_list or []
         self.director_skill_block_list = director_skill_block_list or []
         self.director_skill_cooldown_seconds = director_skill_cooldown_seconds
@@ -969,6 +979,10 @@ def load_settings(target):
                     target.director_idle_override_check_seconds = max(1, int(value))
                 except Exception:
                     _log_invalid_value(key, raw_value)
+            elif key == "director_idle_override_allow_bypass_cooldown_once":
+                target.director_idle_override_allow_bypass_cooldown_once = _parse_bool(
+                    value, False
+                )
             elif key == "director_skill_allow_list":
                 target.director_skill_allow_list = _parse_list(raw_value)
             elif key == "director_skill_block_list":

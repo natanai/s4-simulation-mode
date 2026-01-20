@@ -5,7 +5,9 @@ import os
 import time
 import traceback
 
+import services
 import sims4.commands
+import sims4.resources
 from sims4.commands import BOOL_TRUE, CommandType
 
 import simulation_mode.settings as sm_settings
@@ -115,9 +117,16 @@ def _status_lines():
         f"director_max_pushes_per_sim_per_hour={settings.director_max_pushes_per_sim_per_hour}",
         f"director_prefer_career_skills={settings.director_prefer_career_skills}",
         f"director_fallback_to_started_skills={settings.director_fallback_to_started_skills}",
+        f"director_skill_push_precheck={settings.director_skill_push_precheck}",
+        f"director_push_fail_strikes_limit={settings.director_push_fail_strikes_limit}",
+        f"director_push_fail_strikes_decay_seconds={settings.director_push_fail_strikes_decay_seconds}",
+        f"director_idle_override_enabled={settings.director_idle_override_enabled}",
+        f"director_idle_override_min_seconds_idle={settings.director_idle_override_min_seconds_idle}",
+        f"director_idle_override_check_seconds={settings.director_idle_override_check_seconds}",
         f"skill_plan_max_skill_attempts={settings.skill_plan_max_skill_attempts}",
         f"director_skill_allow_list={settings.director_skill_allow_list}",
         f"director_skill_block_list={settings.director_skill_block_list}",
+        f"guardian_hunger_prefer_quick_meal_threshold={settings.guardian_hunger_prefer_quick_meal_threshold}",
         f"collect_log_filename={settings.collect_log_filename}",
         f"story_log_enabled={settings.story_log_enabled}",
         f"story_log_filename={settings.story_log_filename}",
@@ -138,6 +147,7 @@ def _status_lines():
         f"catalog_max_records={settings.catalog_max_records}",
         f"catalog_max_objects={settings.catalog_max_objects}",
         f"catalog_max_affordances_per_object={settings.catalog_max_affordances_per_object}",
+        f"catalog_write_sample={settings.catalog_write_sample}",
         f"catalog_collect_sample_objects={settings.catalog_collect_sample_objects}",
         f"catalog_collect_sample_affordances_per_object={settings.catalog_collect_sample_affordances_per_object}",
         f"catalog_collect_top_auto_n={settings.catalog_collect_top_auto_n}",
@@ -937,8 +947,16 @@ def _collect_affordance_probe_lines(sim_info):
 
 def _collect_catalog_sample(sim_info):
     object_catalog = importlib.import_module("simulation_mode.object_catalog")
+    if not sm_settings.get_bool("catalog_write_sample", False):
+        return ["CATALOG SAMPLE (PROBE)", "catalog_sample=disabled"]
     max_objects = sm_settings.get_int("catalog_collect_sample_objects", 150)
     max_aff = sm_settings.get_int("catalog_collect_sample_affordances_per_object", 60)
+    if max_objects <= 0:
+        return [
+            "CATALOG SAMPLE (PROBE)",
+            "catalog_sample=disabled",
+            f"catalog_collect_sample_objects={max_objects}",
+        ]
     result = object_catalog.scan_zone_catalog(
         sim_info,
         max_objects=max_objects,
@@ -1573,6 +1591,226 @@ def _get_wants_list(sim_info):
     return [], "no_wants_method"
 
 
+def _tuning_guid64(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    guid = _safe_get(value, "guid64")
+    if guid is None or isinstance(guid, bool):
+        return None
+    try:
+        return int(guid)
+    except Exception:
+        return None
+
+
+def _walk_for_guid64s(value, max_nodes=200, max_depth=3):
+    seen = set()
+    found = set()
+    stack = [(value, 0)]
+    nodes = 0
+    while stack and nodes < max_nodes:
+        current, depth = stack.pop()
+        if current is None:
+            continue
+        obj_id = id(current)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        nodes += 1
+        guid = _tuning_guid64(current)
+        if guid is not None:
+            found.add(guid)
+        if depth >= max_depth:
+            continue
+        if isinstance(current, dict):
+            for key, val in current.items():
+                stack.append((key, depth + 1))
+                stack.append((val, depth + 1))
+            continue
+        if isinstance(current, (list, tuple, set)):
+            for item in current:
+                stack.append((item, depth + 1))
+            continue
+        attrs = getattr(current, "__dict__", None)
+        if isinstance(attrs, dict):
+            for val in attrs.values():
+                stack.append((val, depth + 1))
+        else:
+            try:
+                names = [name for name in dir(current) if not name.startswith("__")]
+            except Exception:
+                names = []
+            for name in names[:40]:
+                if name.startswith("_"):
+                    continue
+                value = _safe_get(current, name)
+                if callable(value):
+                    continue
+                stack.append((value, depth + 1))
+    return sorted(found)
+
+
+def _resolve_interaction_guid64s(candidates):
+    fail_reasons = []
+    if not candidates:
+        return [], ["no_guid64_candidates"]
+    try:
+        Types = sims4.resources.Types
+        manager = services.get_instance_manager(Types.INTERACTION)
+    except Exception as exc:
+        return [], [f"interaction_manager_error:{exc}"]
+    if manager is None:
+        return [], ["interaction_manager_missing"]
+    resolved = []
+    for guid in candidates:
+        try:
+            tuning = manager.get(guid)
+        except Exception:
+            tuning = None
+        if tuning is not None:
+            resolved.append(int(guid))
+    if not resolved:
+        fail_reasons.append("no_resolved_interactions")
+    return sorted(set(resolved)), fail_reasons
+
+
+def _extract_tuning_guid64s(obj):
+    candidates = set()
+    if obj is None:
+        return []
+    guid = _tuning_guid64(obj)
+    if guid is not None:
+        candidates.add(guid)
+    for attr in ("guid64", "whim_guid64", "tuning_id", "instance_id"):
+        value = _safe_get(obj, attr)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            candidates.add(int(value))
+        except Exception:
+            continue
+    for guid in _walk_for_guid64s(obj):
+        candidates.add(guid)
+    return sorted(candidates)
+
+
+def _probe_wants_for_interactions(sim_info):
+    from simulation_mode import story_log
+
+    wants, want_source = _get_wants_list(sim_info)
+    fail_reasons = []
+    if not wants:
+        fail_reasons.append(f"no_wants:{want_source}")
+    details = []
+    all_resolved = set()
+    for want in wants or []:
+        want_guid = _tuning_guid64(want)
+        candidates = _extract_tuning_guid64s(want)
+        resolved, resolve_failures = _resolve_interaction_guid64s(candidates)
+        all_resolved.update(resolved)
+        details.append(
+            {
+                "want_guid64": want_guid,
+                "want_type": type(want).__name__,
+                "resolved_interaction_guid64s": resolved,
+                "candidate_guid64s": candidates[:30],
+                "extraction_fail_reasons": resolve_failures,
+            }
+        )
+        fail_reasons.extend(resolve_failures)
+    story_log.append_event(
+        "wants_probe_now",
+        sim_info=sim_info,
+        want_count=len(wants or []),
+        resolved_interaction_guid64=sorted(all_resolved),
+        extraction_fail_reasons=fail_reasons,
+        wants=details,
+    )
+    return details, fail_reasons, sorted(all_resolved)
+
+
+def _get_aspiration_objectives_for_probe(sim_info):
+    tracker = _safe_get(sim_info, "aspiration_tracker")
+    if tracker is None:
+        return [], ["aspiration_tracker_missing"]
+    active = _safe_get(tracker, "active_aspiration") or _safe_get(
+        tracker, "_active_aspiration"
+    )
+    providers = [tracker]
+    objective_tracker = _safe_get(tracker, "objective_tracker") or _safe_get(
+        tracker, "_objective_tracker"
+    )
+    if objective_tracker is not None:
+        providers.append(objective_tracker)
+    if active is not None:
+        active_tracker = _safe_get(active, "objective_tracker") or _safe_get(
+            active, "_objective_tracker"
+        )
+        if active_tracker is not None:
+            providers.append(active_tracker)
+    objectives = None
+    for provider in providers:
+        getter = _safe_get(provider, "get_objectives")
+        if callable(getter):
+            ok, result, _error = _safe_call(provider, "get_objectives")
+            if ok and result is not None:
+                objectives = result
+                break
+        direct = _safe_get(provider, "objectives") or _safe_get(provider, "_objectives")
+        if direct:
+            objectives = direct
+            break
+    if objectives is None:
+        return [], ["objectives_missing"]
+    try:
+        return list(objectives), []
+    except Exception:
+        return [], ["objectives_unreadable"]
+
+
+def _probe_aspirations_for_interactions(sim_info):
+    from simulation_mode import story_log
+
+    objectives, objective_failures = _get_aspiration_objectives_for_probe(sim_info)
+    fail_reasons = list(objective_failures)
+    details = []
+    all_resolved = set()
+    active = None
+    tracker = _safe_get(sim_info, "aspiration_tracker")
+    if tracker is not None:
+        active = _safe_get(tracker, "active_aspiration") or _safe_get(
+            tracker, "_active_aspiration"
+        )
+    active_guid = _tuning_guid64(active)
+    for obj in objectives or []:
+        obj_guid = _tuning_guid64(obj)
+        candidates = _extract_tuning_guid64s(obj)
+        resolved, resolve_failures = _resolve_interaction_guid64s(candidates)
+        all_resolved.update(resolved)
+        details.append(
+            {
+                "objective_guid64": obj_guid,
+                "objective_type": type(obj).__name__,
+                "resolved_interaction_guid64s": resolved,
+                "candidate_guid64s": candidates[:30],
+                "extraction_fail_reasons": resolve_failures,
+            }
+        )
+        fail_reasons.extend(resolve_failures)
+    story_log.append_event(
+        "aspirations_probe_now",
+        sim_info=sim_info,
+        aspiration_guid64=active_guid,
+        objective_count=len(objectives or []),
+        resolved_interaction_guid64=sorted(all_resolved),
+        extraction_fail_reasons=fail_reasons,
+        objectives=details,
+    )
+    return details, fail_reasons, sorted(all_resolved)
+
+
 def _collect_aspiration_probe_lines_for_sim(sim_info):
     lines = ["ASPIRATION (PROBE)"]
     lines.extend(_collect_aspiration_summary(sim_info))
@@ -2062,7 +2300,13 @@ def _build_collect_payload():
     lines.append("")
     lines.extend(_collect_skill_plan_now_diagnostics())
     lines.append("")
-    lines.extend(_collect_catalog_sample(sim_info))
+    if sm_settings.get_bool("catalog_write_sample", False) and sm_settings.get_int(
+        "catalog_collect_sample_objects", 150
+    ) > 0:
+        lines.extend(_collect_catalog_sample(sim_info))
+    else:
+        lines.append("CATALOG SAMPLE (PROBE)")
+        lines.append("catalog_sample=disabled")
     lines.append("")
     lines.extend(_collect_catalog_top_auto(sim_info))
     lines.append("")
@@ -2346,6 +2590,34 @@ def _probe_active_wants_deep(sim_info):
                 if hasattr(want, attr):
                     lines.append(f"  {attr}={_safe_get(want, attr)!r}")
     return lines, None, None
+
+
+def _wants_probe_now(output):
+    sim_info = _active_sim_info()
+    if sim_info is None:
+        output("No active sim found.")
+        return True
+    details, fail_reasons, resolved = _probe_wants_for_interactions(sim_info)
+    output("wants_probe_now OK")
+    output(f"wants_count={len(details)}")
+    output(f"resolved_interaction_guid64_count={len(resolved)}")
+    if fail_reasons:
+        output(f"extraction_fail_reasons={fail_reasons[:6]}")
+    return True
+
+
+def _aspirations_probe_now(output):
+    sim_info = _active_sim_info()
+    if sim_info is None:
+        output("No active sim found.")
+        return True
+    details, fail_reasons, resolved = _probe_aspirations_for_interactions(sim_info)
+    output("aspirations_probe_now OK")
+    output(f"objective_count={len(details)}")
+    output(f"resolved_interaction_guid64_count={len(resolved)}")
+    if fail_reasons:
+        output(f"extraction_fail_reasons={fail_reasons[:6]}")
+    return True
 
 
 def _probe_specific_want_slot(sim_info, index):
@@ -2944,6 +3216,8 @@ def _usage_lines():
         "simulation skill_plan_now <sim_firstname>",
         "simulation wants_plan_now <sim_firstname>",
         "simulation aspiration_plan_now <sim_firstname>",
+        "simulation wants_probe_now",
+        "simulation aspirations_probe_now",
         "simulation configpath",
         "simulation dump_log",
         "simulation probe_all",
@@ -2961,8 +3235,11 @@ def _usage_lines():
         "director_enable_wants, director_enable_aspirations, director_wants_weight, "
         "director_aspiration_weight, director_max_pushes_per_sim_per_hour, "
         "director_prefer_career_skills, director_fallback_to_started_skills, "
+        "director_skill_push_precheck, director_push_fail_strikes_limit, "
+        "director_push_fail_strikes_decay_seconds, director_idle_override_enabled, "
+        "director_idle_override_min_seconds_idle, director_idle_override_check_seconds, "
         "director_skill_allow_list, director_skill_block_list, skill_plan_max_skill_attempts, "
-        "collect_log_filename, "
+        "guardian_hunger_prefer_quick_meal_threshold, collect_log_filename, catalog_write_sample, "
         "integrate_better_autonomy_trait, better_autonomy_trait_id",
     ]
 
@@ -2982,7 +3259,8 @@ def _handle_set(key, value, _connection, output):
     if key in {"auto_unpause", "allow_death", "allow_pregnancy", "guardian_enabled",
                "director_allow_social_goals", "director_allow_social_wants",
                "director_enable_wants", "director_enable_aspirations",
-               "director_use_guardian_when_low",
+               "director_use_guardian_when_low", "director_skill_push_precheck",
+               "director_idle_override_enabled", "catalog_write_sample",
                "integrate_better_autonomy_trait"}:
         parsed = _parse_bool(value)
         if parsed is None:
@@ -3014,6 +3292,8 @@ def _handle_set(key, value, _connection, output):
                "director_check_seconds", "director_min_safe_motive",
                "director_per_sim_cooldown_seconds", "director_max_pushes_per_sim_per_hour",
                "director_green_min_commodities", "skill_plan_max_skill_attempts",
+               "director_push_fail_strikes_limit", "director_push_fail_strikes_decay_seconds",
+               "director_idle_override_min_seconds_idle", "director_idle_override_check_seconds",
                "better_autonomy_trait_id"}:
         try:
             parsed = int(value)
@@ -3024,7 +3304,8 @@ def _handle_set(key, value, _connection, output):
         output(f"Updated {key} to {parsed}. To persist, edit simulation-mode.txt")
         return True
 
-    if key in {"director_green_motive_percent", "director_wants_weight", "director_aspiration_weight"}:
+    if key in {"director_green_motive_percent", "director_wants_weight",
+               "director_aspiration_weight", "guardian_hunger_prefer_quick_meal_threshold"}:
         try:
             parsed = float(value)
         except Exception:
@@ -3682,6 +3963,12 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "probe_wants":
         return _probe_wants(output)
+
+    if action_key == "wants_probe_now":
+        return _wants_probe_now(output)
+
+    if action_key == "aspirations_probe_now":
+        return _aspirations_probe_now(output)
 
     if action_key == "probe_want":
         return _probe_want(output, key)

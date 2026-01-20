@@ -425,7 +425,7 @@ def pick_care_goal(sim_info, snapshot: dict, green_percent: float):
     return lowest_key, lowest_value, care_kind
 
 
-def _attempt_care_push(sim, motive_key, force=False):
+def _attempt_care_push(sim, motive_key, motive_value=None, force=False):
     motive_guid = _motive_guid64_from_key(motive_key)
     if not motive_guid:
         if _maybe_run_autonomy(sim):
@@ -447,6 +447,29 @@ def _attempt_care_push(sim, motive_key, force=False):
         if _maybe_run_autonomy(sim):
             return False, f"motive={motive_key} no candidates; autonomy refresh attempted"
         return False, f"motive={motive_key} no candidates; autonomy refresh unavailable"
+
+    if motive_key == "motive_hunger" and motive_value is not None:
+        hunger_percent = motive_percent(motive_value)
+        if hunger_percent <= settings.guardian_hunger_prefer_quick_meal_threshold:
+            prefer_keywords = [
+                "grabserving",
+                "grab a serving",
+                "getleftovers",
+                "quickmeal",
+                "eat",
+            ]
+            deprioritize_keywords = ["cook", "createtray", "prep", "baking"]
+
+            def _score(entry):
+                name = (entry.get("aff_name") or "").lower()
+                score = 0
+                if any(token in name for token in prefer_keywords):
+                    score += 10
+                if any(token in name for token in deprioritize_keywords):
+                    score -= 5
+                return score
+
+            candidates = sorted(candidates, key=_score, reverse=True)
 
     for entry in candidates:
         def_id = entry.get("obj_def_id")
@@ -566,7 +589,7 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
                 )
                 continue
             force = value is not None and value <= settings.guardian_red_motive
-            pushed, message = _attempt_care_push(sim, key, force=force)
+            pushed, message = _attempt_care_push(sim, key, motive_value=value, force=force)
             if pushed:
                 _record_push(sim_id, now)
                 _set_care_lock(sim_id, key, now, "pushed_care")
@@ -594,7 +617,7 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
             )
             return False, "guardian care lock"
         force = value is not None and value <= settings.guardian_red_motive
-        pushed, message = _attempt_care_push(sim, lowest_key, force=force)
+        pushed, message = _attempt_care_push(sim, lowest_key, motive_value=value, force=force)
         if pushed:
             _record_push(sim_id, now)
             _set_care_lock(sim_id, lowest_key, now, "pushed_care")
@@ -629,7 +652,9 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
                 )
                 return False, "guardian care lock"
             force = value is not None and value <= settings.guardian_red_motive
-            pushed, message = _attempt_care_push(sim, "motive_social", force=force)
+            pushed, message = _attempt_care_push(
+                sim, "motive_social", motive_value=value, force=force
+            )
             if pushed:
                 _record_push(sim_id, now)
                 _set_care_lock(sim_id, "motive_social", now, "pushed_care")
@@ -767,7 +792,7 @@ def _process_sim(sim_info, now):
         return
 
     force = motive_value <= settings.guardian_red_motive
-    pushed, message = _attempt_care_push(sim, motive_key, force=force)
+    pushed, message = _attempt_care_push(sim, motive_key, motive_value=motive_value, force=force)
     if pushed:
         _record_push(sim_id, now)
         _set_care_lock(sim_id, motive_key, now, "pushed_care")
@@ -840,7 +865,7 @@ def run_guardian():
         logger.warn(f"Pause detection failed: {exc}")
         return
 
-    sim_infos = list(sim_scope.iter_active_household_sim_infos() or [])
+    sim_infos = list(sim_scope.iter_playable_household_sim_infos() or [])
     if not sim_infos:
         return
 

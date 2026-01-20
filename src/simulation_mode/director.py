@@ -11,6 +11,7 @@ from interactions.context import (
     InteractionContext,
     InteractionSource,
 )
+import interactions.priority as priority
 import services
 import sims4.resources
 
@@ -30,7 +31,9 @@ from simulation_mode.push_utils import (
     iter_objects,
     iter_super_affordances,
     make_interaction_context,
+    precheck_affordance,
     push_by_def_and_aff_guid,
+    _is_world_interactable_object,
 )
 from simulation_mode.settings import settings
 
@@ -103,6 +106,8 @@ _VERIFY_ALARM_HANDLES = {}
 _RECENT_SKILL_SUCCESS = {}
 _RECENT_SKILL_SUCCESS_LIST = {}
 _LAST_SUCCESS_SKILL = {}
+_RECENT_VERIFIED_SKILL_SUCCESS = {}
+_RECENT_VERIFIED_AFFORDANCE_SUCCESS = {}
 _failed_skill_until = {}
 _push_fail_strikes = {}
 _idle_start_by_sim = {}
@@ -153,6 +158,117 @@ def _get_verified_gain_path():
     cfg = settings_module.get_config_path()
     folder = os.path.dirname(os.path.abspath(cfg))
     return os.path.join(folder, filename)
+
+
+def _make_script_context(sim):
+    source = getattr(InteractionContext, "SOURCE_SCRIPT", None)
+    if source is None:
+        source = getattr(InteractionSource, "SCRIPT", None)
+    if source is None:
+        source = getattr(InteractionContext, "SOURCE_AUTONOMY", None)
+    return InteractionContext(sim, source, priority.Priority.High)
+
+
+def _resolve_affordance_tuning(guid64):
+    if not isinstance(guid64, int):
+        return None
+    try:
+        manager = services.get_instance_manager(sims4.resources.Types.INTERACTION)
+    except Exception:
+        manager = None
+    if manager is None:
+        return None
+    try:
+        return manager.get(guid64)
+    except Exception:
+        return None
+
+
+def _build_objects_by_def_id():
+    objects_by_def_id = {}
+    for obj in iter_objects():
+        if getattr(obj, "is_sim", False):
+            continue
+        ok, _reason = _is_world_interactable_object(obj)
+        if not ok:
+            continue
+        definition = getattr(obj, "definition", None)
+        def_id = getattr(definition, "id", None) if definition is not None else None
+        if def_id is None:
+            continue
+        objects_by_def_id.setdefault(def_id, []).append(obj)
+    return objects_by_def_id
+
+
+def _record_verified_skill_success(sim_id, skill_guid, def_id, aff_guid64, ts):
+    if sim_id is None:
+        return
+    skill_map = _RECENT_VERIFIED_SKILL_SUCCESS.setdefault(sim_id, {})
+    skill_map[int(skill_guid)] = ts
+    affordance_map = _RECENT_VERIFIED_AFFORDANCE_SUCCESS.setdefault(sim_id, {})
+    affordance_map[(int(skill_guid), int(def_id), int(aff_guid64))] = ts
+
+
+def _prune_recent_verified_success(sim_id, now):
+    if sim_id is None:
+        return
+    skill_window = max(0, int(settings.director_skill_cooldown_seconds))
+    aff_window = max(0, int(settings.director_affordance_cooldown_seconds))
+    skill_map = _RECENT_VERIFIED_SKILL_SUCCESS.get(sim_id)
+    if skill_map:
+        for guid, ts in list(skill_map.items()):
+            if now - ts > skill_window:
+                skill_map.pop(guid, None)
+        if not skill_map:
+            _RECENT_VERIFIED_SKILL_SUCCESS.pop(sim_id, None)
+    aff_map = _RECENT_VERIFIED_AFFORDANCE_SUCCESS.get(sim_id)
+    if aff_map:
+        for key, ts in list(aff_map.items()):
+            if now - ts > aff_window:
+                aff_map.pop(key, None)
+        if not aff_map:
+            _RECENT_VERIFIED_AFFORDANCE_SUCCESS.pop(sim_id, None)
+
+
+def _build_aop(affordance, obj, context):
+    try:
+        from interactions.aop import AffordanceObjectPair
+    except Exception as exc:
+        return None, f"aop_unavailable:{exc}"
+    candidates = [
+        (affordance, obj, affordance, None, context),
+        (affordance, obj, context),
+        (affordance, obj, None, context),
+    ]
+    last_error = None
+    for args in candidates:
+        try:
+            return AffordanceObjectPair(*args), None
+        except Exception as exc:
+            last_error = exc
+    return None, f"aop_init_failed:{last_error}"
+
+
+def _aop_test_passes(sim, obj, affordance):
+    if sim is None or obj is None or affordance is None:
+        return None, "missing_params"
+    try:
+        context = _make_script_context(sim)
+    except Exception as exc:
+        return None, f"context_error:{exc}"
+    aop, error = _build_aop(affordance, obj, context)
+    if aop is None:
+        passed, detail = precheck_affordance(sim, obj, affordance)
+        if passed is not None:
+            return passed, f"precheck:{detail}"
+        return None, error or detail
+    tester = getattr(aop, "test", None)
+    if callable(tester):
+        ok, result, test_error = _safe_call(aop, "test", context)
+        if ok:
+            return bool(result), "aop_test"
+        return None, f"aop_test_error:{test_error}"
+    return None, "aop_test_unavailable"
 
 
 def _get_current_interaction(sim):
@@ -1490,6 +1606,9 @@ def _schedule_skill_plan_verification(
                     time.time(),
                 )
                 verified_gain.save_atomic(path, data)
+                _record_verified_skill_success(
+                    _sim_id, chosen_skill_guid, obj_def_id, interaction_aff_guid64, time.time()
+                )
                 return
             if (
                 _check_index == settings.verify_skill_gain_recheck_count
@@ -1535,6 +1654,8 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         "candidate_affordance_count": 0,
         "attempted_pushes": [],
         "attempted_skill_guids": [],
+        "skills_tried_count": 0,
+        "per_skill_attempt_counts": {},
         "reason": "unknown",
     }
     sim = None
@@ -1548,10 +1669,13 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         _LAST_SKILL_PLAN_STRICT = details
         return False, details
 
-    by_skill = caps.get("by_skill_gain_guid") if isinstance(caps, dict) else {}
+    by_skill_gain = caps.get("by_skill_gain_guid") if isinstance(caps, dict) else {}
+    by_skill = caps.get("by_skill_guid") if isinstance(caps, dict) else {}
     sim_id = _sim_identifier(sim_info)
     now = time.time()
-    max_skill_attempts = getattr(settings, "skill_plan_max_skill_attempts", 5) or 5
+    max_skill_attempts = getattr(settings, "skill_plan_max_skill_attempts", 6) or 6
+    max_push_attempts = 12
+    objects_by_def_id = _build_objects_by_def_id()
     if _recent_skill_plans:
         for key, ts in list(_recent_skill_plans.items()):
             if now - ts > (_SKILL_PLAN_COOLDOWN_SECONDS * 4):
@@ -1563,6 +1687,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                 fail_map.pop(guid, None)
         if not fail_map:
             _failed_skill_until.pop(sim_id, None)
+    _prune_recent_verified_success(sim_id, now)
 
     def _cooldown_key(guid, entry):
         return (
@@ -1586,14 +1711,35 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
             return False
         return now < until
 
+    def _skill_on_verified_cooldown(guid):
+        skill_map = _RECENT_VERIFIED_SKILL_SUCCESS.get(sim_id, {})
+        ts = skill_map.get(int(guid)) if isinstance(skill_map, dict) else None
+        if ts is None:
+            return False
+        return (now - ts) < max(0, int(settings.director_skill_cooldown_seconds))
+
+    def _affordance_on_verified_cooldown(guid, entry):
+        aff_map = _RECENT_VERIFIED_AFFORDANCE_SUCCESS.get(sim_id, {})
+        def_id = entry.get("obj_def_id")
+        aff_guid = entry.get("aff_guid64")
+        if def_id is None or aff_guid is None:
+            return False
+        key = (int(guid), int(def_id), int(aff_guid))
+        ts = aff_map.get(key) if isinstance(aff_map, dict) else None
+        if ts is None:
+            return False
+        return (now - ts) < max(0, int(settings.director_affordance_cooldown_seconds))
+
     def _mark_skill_failed(guid):
         skill_map = _failed_skill_until.setdefault(sim_id, {})
         skill_map[guid] = now + _SKILL_FAIL_COOLDOWN_SECONDS
 
     def _cand_count_for_skill(guid):
         candidates = []
-        if isinstance(by_skill, dict):
-            candidates = list(by_skill.get(str(guid)) or by_skill.get(guid) or [])
+        if isinstance(by_skill_gain, dict):
+            candidates = list(
+                by_skill_gain.get(str(guid)) or by_skill_gain.get(guid) or []
+            )
         count = 0
         for entry in candidates:
             if entry.get("safe_push", True) is False:
@@ -1606,7 +1752,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         return count
 
     def _candidate_diagnostics(guid):
-        if not isinstance(by_skill, dict):
+        if not isinstance(by_skill_gain, dict):
             return {
                 "skill_guid_present_in_caps": False,
                 "caps_candidate_total": 0,
@@ -1618,8 +1764,8 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                 },
             }
         key = str(guid)
-        present = key in by_skill or guid in by_skill
-        raw_candidates = list(by_skill.get(key) or by_skill.get(guid) or [])
+        present = key in by_skill_gain or guid in by_skill_gain
+        raw_candidates = list(by_skill_gain.get(key) or by_skill_gain.get(guid) or [])
         breakdown = {
             "safe_push_false": 0,
             "allow_autonomous_false": 0,
@@ -1678,9 +1824,32 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                         "source": "started",
                     }
                 )
+    if isinstance(by_skill, dict):
+        candidate_skills = [
+            item
+            for item in candidate_skills
+            if len(by_skill.get(str(item["guid"])) or by_skill.get(item["guid"]) or []) > 0
+        ]
     candidate_skills = [
         item for item in candidate_skills if not _skill_on_fail_cooldown(item["guid"])
     ]
+    recent_verified_skills = {
+        item["guid"]
+        for item in candidate_skills
+        if _skill_on_verified_cooldown(item["guid"])
+    }
+    if recent_verified_skills:
+        has_alternative = any(
+            item["guid"] not in recent_verified_skills
+            and _cand_count_for_skill(item["guid"]) > 0
+            for item in candidate_skills
+        )
+        if has_alternative:
+            candidate_skills = [
+                item
+                for item in candidate_skills
+                if item["guid"] not in recent_verified_skills
+            ]
     skill_cycle_entries = _RECENT_SKILL_SUCCESS.get(sim_id, [])
     if skill_cycle_entries:
         window_seconds = settings.skill_cycle_window_sim_minutes * 60
@@ -1731,7 +1900,9 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
     ]
     covered = [(guid, count, index) for guid, count, index in covered if count > 0]
     if not covered:
-        by_skill_keys_count = len(by_skill) if isinstance(by_skill, dict) else 0
+        by_skill_keys_count = (
+            len(by_skill_gain) if isinstance(by_skill_gain, dict) else 0
+        )
         top_zero = []
         for item in candidate_skills[:10]:
             guid = item["guid"]
@@ -1806,6 +1977,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
         score += random.random()
         return score
 
+    random.shuffle(skill_meta)
     ordered_skills = sorted(skill_meta, key=_score, reverse=True)
     last_success_skill = _LAST_SUCCESS_SKILL.get(sim_id)
     if last_success_skill is not None and len(ordered_skills) > 1:
@@ -1827,6 +1999,7 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                 break
         attempted_skills += 1
         details["attempted_skill_guids"].append(chosen_skill_guid)
+        details["per_skill_attempt_counts"].setdefault(str(chosen_skill_guid), 0)
         baseline = _read_skill_progress_for_guid(sim_info, chosen_skill_guid)
 
         candidates = capabilities.get_candidates_for_skill_gain_guid(
@@ -1861,89 +2034,81 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
             last_failure_reason = "no_affordance_candidates_for_skill_guid"
             continue
 
+        cooled_candidates = [
+            entry
+            for entry in candidates
+            if not _affordance_on_verified_cooldown(chosen_skill_guid, entry)
+        ]
+        if cooled_candidates:
+            candidates = cooled_candidates
+
+        push_attempts = 0
         for entry in candidates:
+            if push_attempts >= max_push_attempts:
+                break
             def_id = entry.get("obj_def_id")
             aff_guid = entry.get("aff_guid64")
             aff_name = entry.get("aff_name")
+            if def_id not in objects_by_def_id or not objects_by_def_id[def_id]:
+                continue
+            affordance = _resolve_affordance_tuning(aff_guid)
+            if affordance is None:
+                continue
             strike_key = (sim_id, def_id, aff_guid)
-            skip_due_to_strikes, strike_count = _should_skip_for_push_fail_strikes(
+            skip_due_to_strikes, _strike_count = _should_skip_for_push_fail_strikes(
                 strike_key, now
             )
             if skip_due_to_strikes:
+                continue
+            for obj in list(objects_by_def_id.get(def_id, []))[:10]:
+                test_passed, _test_detail = _aop_test_passes(sim, obj, affordance)
+                if test_passed is False:
+                    continue
+                context, _client_attached = make_interaction_context(sim, force=False)
+                push_attempts += 1
+                details["per_skill_attempt_counts"][str(chosen_skill_guid)] = push_attempts
+                ok, failure_reason, sig_names = call_push_super_affordance(
+                    sim, affordance, obj, context
+                )
                 details["attempted_pushes"].append(
                     {
                         "def_id": def_id,
                         "aff_guid64": aff_guid,
                         "aff_name": aff_name,
-                        "ok": False,
-                        "reason": "skip_fail_strikes",
-                        "failure_reason": "skip_fail_strikes",
+                        "ok": ok,
+                        "reason": "pushed" if ok else "push_failed",
+                        "failure_reason": None if ok else failure_reason,
                         "target_type": "object",
+                        "affordance_name": affordance_name(affordance),
+                        "affordance_class": getattr(affordance, "__name__", None),
+                        "affordance_is_picker": is_picker_affordance(affordance),
+                        "push_sig_names": sig_names,
+                        "push_reason": failure_reason,
                     }
                 )
-                continue
-            ok, push_reason = push_by_def_and_aff_guid(
-                sim,
-                def_id,
-                aff_guid,
-                reason=f"director_skill_plan_strict_guid64={chosen_skill_guid}",
-                precheck=settings.director_skill_push_precheck,
-            )
-            normalized_reason = push_reason
-            if normalized_reason.startswith("no_object_instances") or normalized_reason.startswith(
-                "no_world_objects"
-            ):
-                normalized_reason = "skip_no_object"
-            details["attempted_pushes"].append(
-                {
-                    "def_id": def_id,
-                    "aff_guid64": aff_guid,
-                    "aff_name": aff_name,
-                    "ok": ok,
-                    "reason": normalized_reason,
-                    "failure_reason": None if ok else push_reason,
-                    "target_type": "object",
-                }
-            )
-            if ok:
-                details["reason"] = "ok"
-                details["chosen_skill_guid"] = chosen_skill_guid
-                details["chosen_skill_label"] = chosen_skill_label
-                _recent_skill_plans[_cooldown_key(chosen_skill_guid, entry)] = time.time()
-                if sim_id is not None:
-                    history = _RECENT_SKILL_SUCCESS.get(sim_id, [])
-                    window_seconds = settings.skill_cycle_window_sim_minutes * 60
-                    history = [
-                        (guid, ts)
-                        for guid, ts in history
-                        if (time.time() - ts) <= window_seconds
-                    ]
-                    history.append((chosen_skill_guid, time.time()))
-                    _RECENT_SKILL_SUCCESS[sim_id] = history
-                    _LAST_SUCCESS_SKILL[sim_id] = chosen_skill_guid
-                    recent_list = _RECENT_SKILL_SUCCESS_LIST.get(sim_id, deque(maxlen=5))
-                    if not isinstance(recent_list, deque):
-                        recent_list = deque(recent_list, maxlen=5)
-                    recent_list.append(chosen_skill_guid)
-                    _RECENT_SKILL_SUCCESS_LIST[sim_id] = recent_list
-                if settings.verify_skill_gain_enabled:
-                    started_ts = time.time()
-                    _schedule_skill_plan_verification(
-                        sim_info,
-                        chosen_skill_guid,
-                        chosen_skill_label,
-                        baseline,
-                        def_id,
-                        aff_guid,
-                        aff_name,
-                        1,
-                        settings.verify_skill_gain_delay_sim_minutes,
-                        expected_def_id=def_id,
-                        expected_aff_guid64=aff_guid,
-                        started_ts=started_ts,
-                        max_wait_sim_minutes=120,
-                    )
-                    if settings.verify_skill_gain_recheck_count > 1:
+                if ok:
+                    details["reason"] = "ok"
+                    details["chosen_skill_guid"] = chosen_skill_guid
+                    details["chosen_skill_label"] = chosen_skill_label
+                    _recent_skill_plans[_cooldown_key(chosen_skill_guid, entry)] = time.time()
+                    if sim_id is not None:
+                        history = _RECENT_SKILL_SUCCESS.get(sim_id, [])
+                        window_seconds = settings.skill_cycle_window_sim_minutes * 60
+                        history = [
+                            (guid, ts)
+                            for guid, ts in history
+                            if (time.time() - ts) <= window_seconds
+                        ]
+                        history.append((chosen_skill_guid, time.time()))
+                        _RECENT_SKILL_SUCCESS[sim_id] = history
+                        _LAST_SUCCESS_SKILL[sim_id] = chosen_skill_guid
+                        recent_list = _RECENT_SKILL_SUCCESS_LIST.get(sim_id, deque(maxlen=5))
+                        if not isinstance(recent_list, deque):
+                            recent_list = deque(recent_list, maxlen=5)
+                        recent_list.append(chosen_skill_guid)
+                        _RECENT_SKILL_SUCCESS_LIST[sim_id] = recent_list
+                    if settings.verify_skill_gain_enabled:
+                        started_ts = time.time()
                         _schedule_skill_plan_verification(
                             sim_info,
                             chosen_skill_guid,
@@ -1952,19 +2117,45 @@ def try_push_skill_plan_strict(sim_info, caps: dict):
                             def_id,
                             aff_guid,
                             aff_name,
-                            2,
-                            settings.verify_skill_gain_recheck_sim_minutes,
+                            1,
+                            settings.verify_skill_gain_delay_sim_minutes,
                             expected_def_id=def_id,
                             expected_aff_guid64=aff_guid,
                             started_ts=started_ts,
                             max_wait_sim_minutes=120,
                         )
-                _LAST_SKILL_PLAN_STRICT = details
-                return True, details
-            _record_push_fail_strike(strike_key, now)
-            last_failure_reason = normalized_reason or "push_failed"
+                        if settings.verify_skill_gain_recheck_count > 1:
+                            _schedule_skill_plan_verification(
+                                sim_info,
+                                chosen_skill_guid,
+                                chosen_skill_label,
+                                baseline,
+                                def_id,
+                                aff_guid,
+                                aff_name,
+                                2,
+                                settings.verify_skill_gain_recheck_sim_minutes,
+                                expected_def_id=def_id,
+                                expected_aff_guid64=aff_guid,
+                                started_ts=started_ts,
+                                max_wait_sim_minutes=120,
+                            )
+                    details["skills_tried_count"] = attempted_skills
+                    _LAST_SKILL_PLAN_STRICT = details
+                    return True, details
+                verified_gain.mark_invalid(
+                    verified_data,
+                    chosen_skill_guid,
+                    def_id,
+                    aff_guid,
+                    time.time(),
+                )
+                verified_gain.save_atomic(verified_path, verified_data)
+                _record_push_fail_strike(strike_key, now)
+                last_failure_reason = failure_reason or "push_failed"
         _mark_skill_failed(chosen_skill_guid)
-    details["reason"] = "all_skills_failed"
+    details["skills_tried_count"] = attempted_skills
+    details["reason"] = "no_pushable_candidates_across_skills"
     details["last_failure_reason"] = last_failure_reason
     _LAST_SKILL_PLAN_STRICT = details
     return False, details

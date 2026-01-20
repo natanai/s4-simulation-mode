@@ -277,18 +277,29 @@ def _maybe_interrupt_running_noncritical(
     motive_value,
     running_type,
     running_aff_name,
-    *,
-    bypass_cooldown,
+    bypass_cooldown: bool = False,
+    unsafe_threshold_override=None,
 ):
     if not settings.guardian_interrupt_running_noncritical:
         return False, "disabled"
     if motive_value is None:
         return False, "no_motive_value"
-    if motive_value > settings.guardian_interrupt_noncritical_motive_threshold:
-        return False, "above_threshold"
+    unsafe_threshold = (
+        unsafe_threshold_override
+        if unsafe_threshold_override is not None
+        else settings.guardian_min_motive
+    )
+    effective_interrupt_threshold = max(
+        settings.guardian_interrupt_noncritical_motive_threshold, unsafe_threshold
+    )
+    if motive_value > effective_interrupt_threshold:
+        return (
+            False,
+            f"above_threshold(value={motive_value} thr={effective_interrupt_threshold})",
+        )
     if not _can_push_for_sim(sim_id, now):
         return False, "max_pushes"
-    motive_unsafe = motive_value < settings.guardian_min_motive
+    motive_unsafe = motive_value < unsafe_threshold
     if not _cooldown_allows_push(
         sim, sim_id, now, motive_key, motive_unsafe, bypass_cooldown=bypass_cooldown
     ):
@@ -311,6 +322,8 @@ def _maybe_interrupt_running_noncritical(
             running_type=running_type,
             strikes=strikes,
             strikes_needed=strikes_needed,
+            threshold=effective_interrupt_threshold,
+            unsafe_threshold=unsafe_threshold,
         )
         return False, "waiting"
     cancel_ok, cancel_method = _cancel_sim_interactions_safe(sim)
@@ -676,7 +689,13 @@ def _attempt_care_push(sim, motive_key, motive_value=None, force=False):
     return False, message, None
 
 
-def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: bool = False):
+def push_self_care(
+    sim_info,
+    now: float,
+    green_percent: float,
+    bypass_cooldown: bool = False,
+    unsafe_threshold_override=None,
+):
     sim = sim_info.get_sim_instance() if sim_info else None
     if sim is None:
         return False, "no sim instance"
@@ -696,7 +715,12 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
 
     sim_id = _sim_identifier(sim_info)
     _PER_SIM_LAST_CHOSEN_MOTIVE[sim_id] = motive_key
-    motive_unsafe = motive_value is not None and motive_value < settings.guardian_min_motive
+    unsafe_threshold = (
+        unsafe_threshold_override
+        if unsafe_threshold_override is not None
+        else settings.guardian_min_motive
+    )
+    motive_unsafe = motive_value is not None and motive_value < unsafe_threshold
     if motive_unsafe and _is_running_care_for_motive(sim, motive_key):
         running_type, running_aff_name, _running_label = _running_interaction_info(sim)
         from simulation_mode import story_log
@@ -731,6 +755,7 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
             running_type,
             running_aff_name,
             bypass_cooldown=bypass_cooldown,
+            unsafe_threshold_override=unsafe_threshold,
         )
         if not did_interrupt:
             sim_name = getattr(sim, "full_name", None)
@@ -749,13 +774,27 @@ def push_self_care(sim_info, now: float, green_percent: float, bypass_cooldown: 
                 sim_name=sim_name,
                 motive_value=motive_value,
                 threshold=settings.guardian_interrupt_noncritical_motive_threshold,
+                threshold_used=max(
+                    settings.guardian_interrupt_noncritical_motive_threshold,
+                    unsafe_threshold,
+                ),
+                unsafe_threshold=unsafe_threshold,
                 decision_reason=decision_reason,
                 strikes=get_noncritical_interrupt_strikes(sim_id),
             )
             return False, "running_noncritical"
         interrupted_noncritical = True
+    if interrupted_noncritical and settings.guardian_force_push_on_noncritical_interrupt:
+        bypass_cooldown_local = True
+    else:
+        bypass_cooldown_local = bypass_cooldown
     if not _cooldown_allows_push(
-        sim, sim_id, now, motive_key, motive_unsafe, bypass_cooldown=bypass_cooldown
+        sim,
+        sim_id,
+        now,
+        motive_key,
+        motive_unsafe,
+        bypass_cooldown=bypass_cooldown_local,
     ):
         return False, "guardian cooldown"
     if not _can_push_for_sim(sim_id, now):

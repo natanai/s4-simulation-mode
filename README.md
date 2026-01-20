@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.5.0, Build 74)
+# Simulation Mode Kernel Mod (v0.5.0, Build 76)
 
 ## What it is
 
@@ -92,7 +92,10 @@ Notes:
 
 ## Guardian escalation (opt-in)
 
-Default behavior is unchanged unless `guardian_interrupt_running_noncritical=true` is set. When enabled, the guardian can interrupt long-running, noncritical interactions after repeated strikes to prevent them from blocking care pushes.
+Default behavior is unchanged unless `guardian_interrupt_running_noncritical=true` is set (now the default for new installs). When enabled, the guardian can interrupt long-running, noncritical interactions after repeated strikes to prevent them from blocking care pushes. Two thresholds are involved:
+
+* `director_min_safe_motive`: unsafe gate that triggers Director → Guardian assist.
+* `guardian_interrupt_noncritical_motive_threshold`: noncritical interruption gate (defaults to `-10` for new installs).
 
 Recommended test values:
 
@@ -105,6 +108,18 @@ guardian_force_push_on_noncritical_interrupt=true
 ```
 
 Expected story-log flow when escalation triggers: `guardian_noncritical_interrupt_waiting` → `guardian_noncritical_cancel` → `guardian_push` (or `guardian_push_failed`).
+
+### Test: infinite action while unsafe
+
+1. Enable simulation.
+2. Let a Sim start an infinite-ish action (singing/mirror/etc).
+3. Wait until a motive drops below `director_min_safe_motive`.
+4. Run `simulation collect`.
+5. Confirm collect shows guardian interrupt thresholds and the story log includes guardian noncritical interrupt events.
+
+## Readiness diagnostics (wants/aspirations/holidays)
+
+Wants, aspirations, and holiday processing remain disabled by default. The collect command now includes diagnostics sections for affordance GUID extraction and calendar introspection, but no keyword mapping is used.
 
 ## Testing workflow (for development)
 

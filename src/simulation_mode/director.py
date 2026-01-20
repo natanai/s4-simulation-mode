@@ -3919,7 +3919,11 @@ def _evaluate(now: float, force: bool = False, reason: str = None):
                 if motive_unsafe:
                     if settings.director_use_guardian_when_low and settings.guardian_enabled:
                         success, debug_message = guardian.push_self_care(
-                            sim_info, now, settings.director_green_motive_percent
+                            sim_info,
+                            now,
+                            settings.director_green_motive_percent,
+                            bypass_cooldown=False,
+                            unsafe_threshold_override=settings.director_min_safe_motive,
                         )
                         if success:
                             care_details = guardian.last_care_details() or ("unknown", "unknown")

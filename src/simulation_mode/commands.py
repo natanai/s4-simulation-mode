@@ -123,6 +123,7 @@ def _status_lines():
         f"director_idle_override_enabled={settings.director_idle_override_enabled}",
         f"director_idle_override_min_seconds_idle={settings.director_idle_override_min_seconds_idle}",
         f"director_idle_override_check_seconds={settings.director_idle_override_check_seconds}",
+        f"director_idle_override_allow_bypass_cooldown_once={settings.director_idle_override_allow_bypass_cooldown_once}",
         f"skill_plan_max_skill_attempts={settings.skill_plan_max_skill_attempts}",
         f"director_skill_allow_list={settings.director_skill_allow_list}",
         f"director_skill_block_list={settings.director_skill_block_list}",

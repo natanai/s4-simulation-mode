@@ -238,6 +238,10 @@ def _active_sim_info():
     return getattr(sim, "sim_info", None)
 
 
+def _get_active_sim_info(output):
+    return _active_sim_info()
+
+
 def _get_active_sim(services):
     getter = getattr(services, "active_sim", None)
     if callable(getter):
@@ -2648,6 +2652,20 @@ def _resolve_sim_info_by_first_name(first_name):
     return None
 
 
+def _resolve_sim_info_optional_first_name(optional_first_name, output):
+    active = _get_active_sim_info(output)
+    if not optional_first_name:
+        return active
+    try:
+        name_l = optional_first_name.strip().lower()
+        for si in sim_scope.iter_active_household_sim_infos():
+            if (si is not None) and (si.first_name or "").strip().lower() == name_l:
+                return si
+    except Exception:
+        pass
+    return active
+
+
 def _probe_active_wants_deep(sim_info):
     director = importlib.import_module("simulation_mode.director")
     lines = []
@@ -3301,9 +3319,9 @@ def _usage_lines():
         "simulation collect",
         "simulation force_scan",
         "simulation skill_plan_now <sim_firstname>",
-        "simulation wants_plan_now <sim_firstname>",
-        "simulation aspiration_plan_now <sim_firstname>",
-        "simulation holiday_plan_now <sim_firstname>",
+        "simulation wants_plan_now",
+        "simulation aspiration_plan_now",
+        "simulation holiday_plan_now",
         "simulation wants_probe_now",
         "simulation aspirations_probe_now",
         "simulation popup_probe",
@@ -3966,13 +3984,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         return True
 
     if action_key == "wants_plan_now":
-        if not key:
-            output("Missing sim_firstname. Usage: simulation wants_plan_now <sim_firstname>")
-            return True
-        sim_info = _resolve_sim_info_by_first_name(key)
-        if sim_info is None:
-            output(f"No active household sim found named '{key}'.")
-            return True
+        sim_info = _resolve_sim_info_optional_first_name(key, output)
         ok, sim, _error = _safe_call(sim_info, "get_sim_instance")
         sim = sim if ok else None
         if sim is None:
@@ -4005,13 +4017,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         return True
 
     if action_key == "aspiration_plan_now":
-        if not key:
-            output("Missing sim_firstname. Usage: simulation aspiration_plan_now <sim_firstname>")
-            return True
-        sim_info = _resolve_sim_info_by_first_name(key)
-        if sim_info is None:
-            output(f"No active household sim found named '{key}'.")
-            return True
+        sim_info = _resolve_sim_info_optional_first_name(key, output)
         ok, sim, _error = _safe_call(sim_info, "get_sim_instance")
         sim = sim if ok else None
         if sim is None:
@@ -4044,13 +4050,7 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         return True
 
     if action_key == "holiday_plan_now":
-        if not key:
-            output("Missing sim_firstname. Usage: simulation holiday_plan_now <sim_firstname>")
-            return True
-        sim_info = _resolve_sim_info_by_first_name(key)
-        if sim_info is None:
-            output(f"No active household sim found named '{key}'.")
-            return True
+        sim_info = _resolve_sim_info_optional_first_name(key, output)
         ok, sim, _error = _safe_call(sim_info, "get_sim_instance")
         sim = sim if ok else None
         if sim is None:

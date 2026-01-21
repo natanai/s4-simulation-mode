@@ -55,6 +55,8 @@ _last_critical_cancel_ts = {}
 _NONCRITICAL_INTERRUPT_STATE = {}
 _last_noncritical_cancel_ts = {}
 _last_noncritical_force_push_ts_by_sim = {}
+_LAST_NONCRITICAL_CANCEL_AFF_GUID_BY_SIM = {}
+_NONCRITICAL_REPEAT_CANCEL_COUNT_BY_SIM = {}
 
 _CARE_KIND_TO_MOTIVE = {
     "eat": "motive_hunger",
@@ -379,6 +381,37 @@ def _maybe_interrupt_running_noncritical(
     cancel_cd = settings.guardian_noncritical_cancel_cooldown_seconds
     last_cancel = _last_noncritical_cancel_ts.get(sim_id)
     if cancel_cd > 0 and last_cancel is not None and now - last_cancel < cancel_cd:
+        running_type = None
+        resolved_type, resolved_aff_name, _running_label, resolved_guid = _running_interaction_info(sim)
+        running_type = resolved_type
+        if not running_aff_name:
+            running_aff_name = resolved_aff_name
+        if not running_aff_guid64:
+            running_aff_guid64 = resolved_guid
+        last_aff = _LAST_NONCRITICAL_CANCEL_AFF_GUID_BY_SIM.get(sim_id)
+        repeat_count = _NONCRITICAL_REPEAT_CANCEL_COUNT_BY_SIM.get(sim_id, 0)
+        if (
+            last_aff is not None
+            and running_aff_guid64 == last_aff
+            and motive_value <= unsafe_threshold
+            and repeat_count < 2
+        ):
+            cancel_ok, cancel_method = _cancel_sim_interactions_safe(sim)
+            if cancel_ok:
+                _NONCRITICAL_REPEAT_CANCEL_COUNT_BY_SIM[sim_id] = repeat_count + 1
+                _safe_story_event(
+                    "guardian_noncritical_repeat_cancel",
+                    sim_info=sim_info,
+                    motive_key=motive_key,
+                    motive_value=motive_value,
+                    running_aff_name=running_aff_name,
+                    running_aff_guid64=running_aff_guid64,
+                    running_type=running_type,
+                    cancel_ok=cancel_ok,
+                    cancel_method=cancel_method,
+                    repeat_count=repeat_count + 1,
+                )
+                return True, "repeat_cancel"
         if settings.guardian_noncritical_force_push_during_cancel_cooldown:
             last_force = _last_noncritical_force_push_ts_by_sim.get(sim_id)
             force_cd = settings.guardian_noncritical_force_push_cooldown_seconds
@@ -421,6 +454,9 @@ def _maybe_interrupt_running_noncritical(
         cancel_method=cancel_method,
         strikes=strikes,
     )
+    if cancel_ok:
+        _LAST_NONCRITICAL_CANCEL_AFF_GUID_BY_SIM[sim_id] = running_aff_guid64
+        _NONCRITICAL_REPEAT_CANCEL_COUNT_BY_SIM[sim_id] = 0
     state = _NONCRITICAL_INTERRUPT_STATE.setdefault(
         sim_id,
         {"count": 0, "last_ts": 0.0, "motive_key": None},

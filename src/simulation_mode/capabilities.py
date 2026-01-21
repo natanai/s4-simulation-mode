@@ -3,6 +3,7 @@ import os
 import time
 
 from simulation_mode import settings as sm_settings
+from simulation_mode import version as sm_version
 
 
 _CAP_CACHE = None
@@ -133,7 +134,12 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
                 }
                 for guid in record.get("autonomy_ad_guids") or []:
                     _add_to_index(data["by_ad_guid"], guid, entry)
-                for guid in record.get("loot_ref_guids") or []:
+                loot_guids = (
+                    record.get("loot_action_guids")
+                    or record.get("loot_ref_guids")
+                    or []
+                )
+                for guid in loot_guids:
                     _add_to_index(data["by_loot_guid"], guid, entry)
                 for guid in record.get("skill_guids") or []:
                     _add_to_index(data["by_skill_guid"], guid, entry)
@@ -163,6 +169,8 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
         meta["by_skill_gain_guid_keys"] = 0
         meta["by_skill_gain_guid_entries_total"] = 0
     meta["skill_guid_observed_counts"] = observed_counts
+    meta["build_number"] = sm_version.BUILD_NUMBER
+    meta["version"] = sm_version.__version__
     data["meta"] = meta
     return data
 
@@ -238,7 +246,11 @@ def ensure_capabilities(sim_info=None, force_rebuild=False):
         meta = caps.get("meta") if isinstance(caps, dict) else None
         if meta is not None:
             zone_id = meta.get("zone_id")
-            if zone_id is None or zone_id == _current_zone_id():
+            build_number = meta.get("build_number")
+            if (
+                (zone_id is None or zone_id == _current_zone_id())
+                and build_number == sm_version.BUILD_NUMBER
+            ):
                 return caps
         elif caps:
             return caps
@@ -271,11 +283,16 @@ def ensure_capabilities(sim_info=None, force_rebuild=False):
 def ensure_full_capabilities(sim_info=None, force_rebuild=False):
     caps = load_capabilities()
     meta = caps.get("meta") if isinstance(caps, dict) else None
+    meta = meta or {}
     current_zone = _current_zone_id()
     meta_zone = meta.get("zone_id") if meta else None
     meta_truncated = meta.get("truncated") if meta else None
     if not force_rebuild and caps is not None:
-        if meta_zone == current_zone and meta_truncated is False:
+        if (
+            meta_zone == current_zone
+            and meta_truncated is False
+            and meta.get("build_number") == sm_version.BUILD_NUMBER
+        ):
             return caps
     ensure_capabilities(sim_info, force_rebuild=True)
     return load_capabilities()

@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.5.0, Build 76)
+# Simulation Mode Kernel Mod (v0.5.0, Build 77)
 
 ## What it is
 
@@ -108,6 +108,11 @@ guardian_force_push_on_noncritical_interrupt=true
 ```
 
 Expected story-log flow when escalation triggers: `guardian_noncritical_interrupt_waiting` → `guardian_noncritical_cancel` → `guardian_push` (or `guardian_push_failed`).
+
+During the noncritical cancel cooldown window, guardian may attempt controlled forced pushes without repeated canceling. New settings:
+
+* `guardian_noncritical_force_push_during_cancel_cooldown`: allow force-push attempts during the cancel cooldown window.
+* `guardian_noncritical_force_push_cooldown_seconds`: minimum seconds between those force-push attempts.
 
 ### Test: infinite action while unsafe
 

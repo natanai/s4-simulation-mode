@@ -1969,6 +1969,16 @@ def _collect_plan_preview(sim, now):
         )
     )
     lines.append(
+        "guardian_noncritical_force_push_during_cancel_cooldown={}".format(
+            settings.guardian_noncritical_force_push_during_cancel_cooldown
+        )
+    )
+    lines.append(
+        "guardian_noncritical_force_push_cooldown_seconds={}".format(
+            settings.guardian_noncritical_force_push_cooldown_seconds
+        )
+    )
+    lines.append(
         "guardian_noncritical_block_strikes={}".format(
             guardian.get_noncritical_interrupt_strikes(sim_id)
         )
@@ -1976,6 +1986,11 @@ def _collect_plan_preview(sim, now):
     lines.append(
         "guardian_last_noncritical_cancel_ts={}".format(
             guardian.get_last_noncritical_cancel_timestamp(sim_id)
+        )
+    )
+    lines.append(
+        "guardian_last_noncritical_force_push_ts={}".format(
+            guardian.get_last_noncritical_force_push_timestamp(sim_id)
         )
     )
     caps = capabilities.load_capabilities()

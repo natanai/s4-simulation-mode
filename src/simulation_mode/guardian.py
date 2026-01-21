@@ -54,6 +54,7 @@ _CARE_LOCKS = {}
 _last_critical_cancel_ts = {}
 _NONCRITICAL_INTERRUPT_STATE = {}
 _last_noncritical_cancel_ts = {}
+_last_noncritical_force_push_ts_by_sim = {}
 
 _CARE_KIND_TO_MOTIVE = {
     "eat": "motive_hunger",
@@ -219,6 +220,21 @@ def _interaction_addresses_motive(aff_name: str, motive_key: str) -> bool:
     return False
 
 
+def _running_affordance_matches_motive_candidates(
+    sim_info, running_aff_guid64, motive_key
+) -> bool:
+    if not running_aff_guid64:
+        return False
+    motive_guid = _motive_guid64_from_key(motive_key)
+    if not motive_guid:
+        return False
+    caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+    if not caps:
+        return False
+    candidates = capabilities.get_candidates_for_ad_guid(motive_guid, caps) or []
+    return any(entry.get("aff_guid64") == running_aff_guid64 for entry in candidates)
+
+
 def _cancel_sim_interactions_safe(sim):
     if sim is None:
         return False, "sim_missing"
@@ -240,6 +256,14 @@ def _cancel_sim_interactions_safe(sim):
     return False, "cancel_unavailable"
 
 
+def _can_cancel_for_sim(sim_id, now):
+    cooldown = settings.guardian_critical_cancel_cooldown_seconds
+    if cooldown <= 0:
+        return True
+    last_cancel = _last_critical_cancel_ts.get(sim_id)
+    return last_cancel is None or now - last_cancel >= cooldown
+
+
 def get_noncritical_interrupt_strikes(sim_id):
     state = _NONCRITICAL_INTERRUPT_STATE.get(sim_id)
     if not state:
@@ -251,19 +275,22 @@ def get_last_noncritical_cancel_timestamp(sim_id):
     return _last_noncritical_cancel_ts.get(sim_id)
 
 
-def _update_noncritical_interrupt_strikes(sim_id, now, motive_key, running_aff_name):
+def get_last_noncritical_force_push_timestamp(sim_id):
+    return _last_noncritical_force_push_ts_by_sim.get(sim_id)
+
+
+def _update_noncritical_interrupt_strikes(sim_id, now, motive_key):
     state = _NONCRITICAL_INTERRUPT_STATE.setdefault(
         sim_id,
-        {"count": 0, "last_ts": 0.0, "running_aff_name": None, "motive_key": None},
+        {"count": 0, "last_ts": 0.0, "motive_key": None},
     )
-    if state.get("running_aff_name") != running_aff_name or state.get("motive_key") != motive_key:
+    if state.get("motive_key") != motive_key:
         state["count"] = 0
     last_ts = state.get("last_ts") or 0.0
     if last_ts and now - last_ts > settings.guardian_check_seconds * 2:
         state["count"] = 0
     state["count"] = int(state.get("count", 0)) + 1
     state["last_ts"] = now
-    state["running_aff_name"] = running_aff_name
     state["motive_key"] = motive_key
     return state["count"]
 
@@ -275,8 +302,9 @@ def _maybe_interrupt_running_noncritical(
     now,
     motive_key,
     motive_value,
-    running_type,
     running_aff_name,
+    running_aff_guid64,
+    snapshot_dict,
     bypass_cooldown: bool = False,
     unsafe_threshold_override=None,
 ):
@@ -284,11 +312,55 @@ def _maybe_interrupt_running_noncritical(
         return False, "disabled"
     if motive_value is None:
         return False, "no_motive_value"
+    running_type = None
+    resolved_type, resolved_aff_name, _running_label, resolved_guid = _running_interaction_info(sim)
+    running_type = resolved_type
+    if not running_aff_name:
+        running_aff_name = resolved_aff_name
+    if not running_aff_guid64:
+        running_aff_guid64 = resolved_guid
     unsafe_threshold = (
         unsafe_threshold_override
         if unsafe_threshold_override is not None
         else settings.guardian_min_motive
     )
+    if snapshot_dict and (running_aff_guid64 or running_aff_name):
+        for other_key, other_val in snapshot_dict.items():
+            if other_key == motive_key:
+                continue
+            if other_val is None:
+                continue
+            if other_val < unsafe_threshold:
+                if _running_affordance_matches_motive_candidates(
+                    sim_info, running_aff_guid64, other_key
+                ):
+                    _safe_story_event(
+                        "guardian_noncritical_interrupt_blocked",
+                        sim_info=sim_info,
+                        sim_id=sim_id,
+                        motive_key=motive_key,
+                        motive_value=motive_value,
+                        running_aff_name=running_aff_name,
+                        running_aff_guid64=running_aff_guid64,
+                        blocked_by_key=other_key,
+                        blocked_by_value=other_val,
+                    )
+                    return False, "blocked_by_running_care"
+                if running_aff_name and _interaction_addresses_motive(
+                    running_aff_name, other_key
+                ):
+                    _safe_story_event(
+                        "guardian_noncritical_interrupt_blocked",
+                        sim_info=sim_info,
+                        sim_id=sim_id,
+                        motive_key=motive_key,
+                        motive_value=motive_value,
+                        running_aff_name=running_aff_name,
+                        running_aff_guid64=running_aff_guid64,
+                        blocked_by_key=other_key,
+                        blocked_by_value=other_val,
+                    )
+                    return False, "blocked_by_running_care"
     effective_interrupt_threshold = max(
         settings.guardian_interrupt_noncritical_motive_threshold, unsafe_threshold
     )
@@ -307,10 +379,18 @@ def _maybe_interrupt_running_noncritical(
     cancel_cd = settings.guardian_noncritical_cancel_cooldown_seconds
     last_cancel = _last_noncritical_cancel_ts.get(sim_id)
     if cancel_cd > 0 and last_cancel is not None and now - last_cancel < cancel_cd:
+        if settings.guardian_noncritical_force_push_during_cancel_cooldown:
+            last_force = _last_noncritical_force_push_ts_by_sim.get(sim_id)
+            force_cd = settings.guardian_noncritical_force_push_cooldown_seconds
+            if (
+                force_cd <= 0
+                or last_force is None
+                or (now - last_force) >= force_cd
+            ):
+                _last_noncritical_force_push_ts_by_sim[sim_id] = now
+                return False, "cancel_cooldown_force_push"
         return False, "cancel_cooldown"
-    strikes = _update_noncritical_interrupt_strikes(
-        sim_id, now, motive_key, running_aff_name
-    )
+    strikes = _update_noncritical_interrupt_strikes(sim_id, now, motive_key)
     strikes_needed = settings.guardian_interrupt_noncritical_strikes
     if strikes < strikes_needed:
         _safe_story_event(
@@ -319,6 +399,7 @@ def _maybe_interrupt_running_noncritical(
             motive_key=motive_key,
             motive_value=motive_value,
             running_aff_name=running_aff_name,
+            running_aff_guid64=running_aff_guid64,
             running_type=running_type,
             strikes=strikes,
             strikes_needed=strikes_needed,
@@ -334,6 +415,7 @@ def _maybe_interrupt_running_noncritical(
         motive_key=motive_key,
         motive_value=motive_value,
         running_aff_name=running_aff_name,
+        running_aff_guid64=running_aff_guid64,
         running_type=running_type,
         cancel_ok=cancel_ok,
         cancel_method=cancel_method,
@@ -341,11 +423,10 @@ def _maybe_interrupt_running_noncritical(
     )
     state = _NONCRITICAL_INTERRUPT_STATE.setdefault(
         sim_id,
-        {"count": 0, "last_ts": 0.0, "running_aff_name": None, "motive_key": None},
+        {"count": 0, "last_ts": 0.0, "motive_key": None},
     )
     state["count"] = 0
     state["last_ts"] = now
-    state["running_aff_name"] = running_aff_name
     state["motive_key"] = motive_key
     return True, "canceled"
 
@@ -446,10 +527,10 @@ def _motive_snapshot(sim_info):
 def _running_interaction_info(sim):
     queue = getattr(sim, "queue", None)
     if queue is None:
-        return None, None, None
+        return None, None, None, None
     running = getattr(queue, "running", None)
     if running is None:
-        return None, None, None
+        return None, None, None, None
     running_type = None
     try:
         running_type = str(running)
@@ -460,6 +541,12 @@ def _running_interaction_info(sim):
     affordance = getattr(running, "affordance", None)
     if affordance is None:
         affordance = getattr(running, "super_affordance", None)
+    affordance_guid64 = None
+    if affordance is not None and hasattr(affordance, "guid64"):
+        try:
+            affordance_guid64 = int(affordance.guid64)
+        except Exception:
+            affordance_guid64 = None
     affordance_name = None
     if affordance is not None:
         affordance_name = getattr(affordance, "__name__", None)
@@ -469,7 +556,7 @@ def _running_interaction_info(sim):
             except Exception:
                 affordance_name = None
     running_label = affordance_name or running_type
-    return running_type, affordance_name, running_label
+    return running_type, affordance_name, running_label, affordance_guid64
 
 
 def _interaction_is_idle(interaction):
@@ -538,7 +625,7 @@ def _is_running_care_for_motive(sim, motive_key: str) -> bool:
     running = getattr(queue, "running", None)
     if running is None:
         return False
-    running_type, affordance_name, _running_label = _running_interaction_info(sim)
+    running_type, affordance_name, _running_label, _aff_guid64 = _running_interaction_info(sim)
     running_type = (running_type or "").lower()
     affordance_name = (affordance_name or "").lower()
     keywords = _RUNNING_CARE_KEYWORDS.get(motive_key, [])
@@ -720,9 +807,13 @@ def push_self_care(
         if unsafe_threshold_override is not None
         else settings.guardian_min_motive
     )
+    if not bypass_cooldown and motive_value is not None and motive_value >= unsafe_threshold:
+        return False, "motive safe"
     motive_unsafe = motive_value is not None and motive_value < unsafe_threshold
     if motive_unsafe and _is_running_care_for_motive(sim, motive_key):
-        running_type, running_aff_name, _running_label = _running_interaction_info(sim)
+        running_type, running_aff_name, _running_label, _running_aff_guid64 = (
+            _running_interaction_info(sim)
+        )
         from simulation_mode import story_log
         sim_name = getattr(sim, "full_name", None)
         if callable(sim_name):
@@ -742,9 +833,14 @@ def push_self_care(
         return False, "already_running_care"
     critical = motive_value is not None and motive_value <= settings.guardian_red_motive
     running_non_idle, running_interaction = _has_running_non_idle(sim)
+    (
+        running_type,
+        running_aff_name,
+        _running_label,
+        running_aff_guid64,
+    ) = _running_interaction_info(sim)
     interrupted_noncritical = False
     if running_non_idle and not critical:
-        running_type, running_aff_name, _running_label = _running_interaction_info(sim)
         did_interrupt, decision_reason = _maybe_interrupt_running_noncritical(
             sim_info,
             sim,
@@ -752,12 +848,30 @@ def push_self_care(
             now,
             motive_key,
             motive_value,
-            running_type,
             running_aff_name,
+            running_aff_guid64,
+            snapshot_dict,
             bypass_cooldown=bypass_cooldown,
             unsafe_threshold_override=unsafe_threshold,
         )
-        if not did_interrupt:
+        if did_interrupt:
+            interrupted_noncritical = True
+        elif decision_reason == "cancel_cooldown_force_push":
+            interrupted_noncritical = True
+            _safe_story_event(
+                "guardian_noncritical_force_push_window",
+                sim_info=sim_info,
+                sim_id=sim_id,
+                motive_key=motive_key,
+                motive_value=motive_value,
+                running_aff_name=running_aff_name,
+                running_aff_guid64=running_aff_guid64,
+                last_noncritical_cancel_ts=_last_noncritical_cancel_ts.get(sim_id),
+                last_noncritical_force_push_ts=_last_noncritical_force_push_ts_by_sim.get(
+                    sim_id
+                ),
+            )
+        else:
             sim_name = getattr(sim, "full_name", None)
             if callable(sim_name):
                 try:
@@ -770,6 +884,7 @@ def push_self_care(
                 sim_info=sim_info,
                 motive_key=motive_key,
                 running_aff_name=running_aff_name,
+                running_aff_guid64=running_aff_guid64,
                 running_type=running_type,
                 sim_name=sim_name,
                 motive_value=motive_value,
@@ -783,7 +898,6 @@ def push_self_care(
                 strikes=get_noncritical_interrupt_strikes(sim_id),
             )
             return False, "running_noncritical"
-        interrupted_noncritical = True
     if interrupted_noncritical and settings.guardian_force_push_on_noncritical_interrupt:
         bypass_cooldown_local = True
     else:
@@ -801,7 +915,33 @@ def push_self_care(
         return False, "guardian max pushes"
 
     busy_state, _busy_reason = _is_sim_busy(sim)
-    if busy_state:
+    if critical and busy_state and running_non_idle:
+        red_threshold = settings.guardian_red_motive
+        critical_motive_keys = [
+            key
+            for key, value in snapshot_dict.items()
+            if value is not None and value <= red_threshold
+        ]
+        if running_aff_name and any(
+            _interaction_addresses_motive(running_aff_name, key)
+            for key in critical_motive_keys
+        ):
+            return False, "critical_running_addresses_motive"
+        if not _can_cancel_for_sim(sim_id, now):
+            return False, "critical_cancel_cooldown"
+        cancel_ok, cancel_method = _cancel_sim_interactions_safe(sim)
+        _last_critical_cancel_ts[sim_id] = now
+        _safe_story_event(
+            "guardian_critical_cancel",
+            sim_info=sim_info,
+            sim_id=sim_id,
+            running_aff_name=running_aff_name,
+            running_aff_guid64=running_aff_guid64,
+            cancel_ok=cancel_ok,
+            cancel_method=cancel_method,
+            critical_motive_keys=critical_motive_keys,
+        )
+    if busy_state and not (critical or interrupted_noncritical):
         return False, "sim busy"
 
     ordered = sorted(snapshot, key=lambda item: motive_percent(item[1]))
@@ -976,7 +1116,7 @@ def _cooldown_allows_push(sim, sim_id, now, motive_key, motive_unsafe, bypass_co
     if secs_since_last >= cooldown:
         return True
 
-    _running_type, _affordance_name, running_label = _running_interaction_info(sim)
+    _running_type, _affordance_name, running_label, _aff_guid64 = _running_interaction_info(sim)
     running_label = running_label or "none"
     care_relevant = False
     if motive_unsafe:
@@ -1012,160 +1152,14 @@ def _record_push(sim_id, now):
 
 
 def _process_sim(sim_info, now):
-    sim = sim_info.get_sim_instance()
-    if sim is None:
-        return
-    if getattr(sim_info, "is_npc", False):
-        return
-    if getattr(sim_info, "is_human", True) is False:
-        return
-
-    _maybe_apply_better_autonomy_trait(sim_info)
-
-    snapshot = _motive_snapshot(sim_info)
-    if not snapshot:
-        _log_once_per_hour("No motive stats available to evaluate.", "_LAST_NO_MOTIVE_LOG")
-        return
-
-    motive_key, motive_value = _select_lowest_motive(snapshot)
-    if motive_key is None or motive_value is None:
-        return
-    if motive_value >= settings.guardian_min_motive:
-        return
-
-    critical = motive_value <= settings.guardian_red_motive
-    sim_id = _sim_identifier(sim_info)
-    running_non_idle, running_interaction = _has_running_non_idle(sim)
-    interrupted_noncritical = False
-    if running_non_idle and not critical:
-        running_type, running_aff_name, _running_label = _running_interaction_info(sim)
-        did_interrupt, decision_reason = _maybe_interrupt_running_noncritical(
-            sim_info,
-            sim,
-            sim_id,
-            now,
-            motive_key,
-            motive_value,
-            running_type,
-            running_aff_name,
-            bypass_cooldown=False,
-        )
-        if not did_interrupt:
-            sim_name = getattr(sim, "full_name", None)
-            if callable(sim_name):
-                try:
-                    sim_name = sim_name()
-                except Exception:
-                    sim_name = None
-            sim_name = sim_name or getattr(sim, "first_name", None)
-            _safe_story_event(
-                "guardian_skip_running_noncritical",
-                sim_info=sim_info,
-                motive_key=motive_key,
-                running_aff_name=running_aff_name,
-                running_type=running_type,
-                sim_name=sim_name,
-                motive_value=motive_value,
-                threshold=settings.guardian_interrupt_noncritical_motive_threshold,
-                decision_reason=decision_reason,
-                strikes=get_noncritical_interrupt_strikes(sim_id),
-            )
-            return
-        interrupted_noncritical = True
-
-    _running_type, running_aff_name, _running_label = _running_interaction_info(sim)
-    if critical and running_aff_name and _interaction_addresses_motive(
-        running_aff_name, motive_key
-    ):
-        return
-
-    busy_state, _busy_reason = _is_sim_busy(sim)
-    if busy_state:
-        if not critical:
-            return
-        cooldown = settings.guardian_critical_cancel_cooldown_seconds
-        if cooldown > 0:
-            last_cancel = _last_critical_cancel_ts.get(sim_id)
-            if last_cancel is None or now - last_cancel >= cooldown:
-                cancel_ok, cancel_method = _cancel_sim_interactions_safe(sim)
-                _last_critical_cancel_ts[sim_id] = now
-                _safe_story_event(
-                    "guardian_critical_cancel",
-                    sim_info=sim_info,
-                    motive_key=motive_key,
-                    running_aff_name=running_aff_name,
-                    cancel_ok=cancel_ok,
-                    cancel_method=cancel_method,
-                    critical_value=motive_value,
-                )
-
-    _PER_SIM_LAST_CHOSEN_MOTIVE[sim_id] = motive_key
-    lock_active, remaining = _care_lock_blocks(sim_id, motive_key, now)
-    if lock_active and not critical:
-        _safe_story_event(
-            "guardian_care_lock_skip",
-            sim_info=sim_info,
-            motive_key=motive_key,
-            seconds_remaining=round(remaining, 2),
-        )
-        return
-    if not _cooldown_allows_push(sim, sim_id, now, motive_key, True, bypass_cooldown=False):
-        return
-    if not _can_push_for_sim(sim_id, now):
-        return
-
-    base_force = motive_value <= settings.guardian_red_motive
-    force = (
-        True
-        if interrupted_noncritical and settings.guardian_force_push_on_noncritical_interrupt
-        else base_force
+    # legacy wrapper used by daemon
+    push_self_care(
+        sim_info,
+        now=now,
+        green_percent=settings.director_green_motive_percent,
+        bypass_cooldown=False,
+        unsafe_threshold_override=None,
     )
-    pushed, message, push_details = _attempt_care_push(
-        sim, motive_key, motive_value=motive_value, force=force
-    )
-    if pushed:
-        _record_push(sim_id, now)
-        _set_care_lock(sim_id, motive_key, now, "pushed_care")
-        _safe_story_event(
-            "guardian_push",
-            sim_info=sim_info,
-            message=message,
-            motive_key=motive_key,
-            force=force,
-            push_details=push_details,
-        )
-    else:
-        _safe_story_event(
-            "guardian_push_failed",
-            sim_info=sim_info,
-            motive_key=motive_key,
-            message=message,
-            force=force,
-        )
-        if "obj=none" in message:
-            if "autonomy refresh attempted" in message:
-                _log_once_per_hour(
-                    "No guardian object found; autonomy refresh attempted.",
-                    "_LAST_AUTONOMY_LOG",
-                )
-            else:
-                _log_once_per_hour(
-                    "No guardian object found; autonomy refresh unavailable.",
-                    "_LAST_NO_OBJECT_LOG",
-                )
-        elif "no affordance candidates" in message or "no keywords" in message:
-            if "autonomy refresh attempted" in message:
-                _log_once_per_hour(
-                    "No guardian affordance found; autonomy refresh attempted.",
-                    "_LAST_AUTONOMY_LOG",
-                )
-            else:
-                _log_once_per_hour(
-                    "No guardian affordance found; autonomy refresh unavailable.",
-                    "_LAST_NO_OBJECT_LOG",
-                )
-        else:
-            logger.warn(f"Guardian push failed: {message}")
 
 
 def get_last_push_timestamp(sim_id):
@@ -1184,7 +1178,7 @@ def get_guardian_cooldown_debug(sim_info, now):
     last_push = _PER_SIM_LAST_PUSH.get(sim_id)
     secs_since_last = None if last_push is None else now - last_push
     motive_key = _PER_SIM_LAST_CHOSEN_MOTIVE.get(sim_id)
-    _running_type, _affordance_name, running_label = _running_interaction_info(sim)
+    _running_type, _affordance_name, running_label, _aff_guid64 = _running_interaction_info(sim)
     running_label = running_label or "none"
     care_relevant = False
     if motive_key is not None:

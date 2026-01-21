@@ -31,6 +31,8 @@ KNOWN_DEFAULTS = [
     ("guardian_interrupt_noncritical_strikes", "3"),
     ("guardian_noncritical_cancel_cooldown_seconds", "90"),
     ("guardian_force_push_on_noncritical_interrupt", "true"),
+    ("guardian_noncritical_force_push_during_cancel_cooldown", "true"),
+    ("guardian_noncritical_force_push_cooldown_seconds", "15"),
     ("director_enabled", "true"),
     ("director_check_seconds", "30"),
     ("director_min_safe_motive", "-10"),
@@ -154,6 +156,16 @@ def _build_default_template_text():
     lines.append(
         "guardian_force_push_on_noncritical_interrupt={}".format(
             defaults["guardian_force_push_on_noncritical_interrupt"]
+        )
+    )
+    lines.append(
+        "guardian_noncritical_force_push_during_cancel_cooldown={}".format(
+            defaults["guardian_noncritical_force_push_during_cancel_cooldown"]
+        )
+    )
+    lines.append(
+        "guardian_noncritical_force_push_cooldown_seconds={}".format(
+            defaults["guardian_noncritical_force_push_cooldown_seconds"]
         )
     )
     lines.append(
@@ -528,6 +540,8 @@ class SimulationModeSettings:
         guardian_interrupt_noncritical_strikes=3,
         guardian_noncritical_cancel_cooldown_seconds=90,
         guardian_force_push_on_noncritical_interrupt=True,
+        guardian_noncritical_force_push_during_cancel_cooldown=True,
+        guardian_noncritical_force_push_cooldown_seconds=15,
         director_enabled=True,
         director_check_seconds=30,
         director_min_safe_motive=-10,
@@ -614,6 +628,12 @@ class SimulationModeSettings:
         )
         self.guardian_force_push_on_noncritical_interrupt = (
             guardian_force_push_on_noncritical_interrupt
+        )
+        self.guardian_noncritical_force_push_during_cancel_cooldown = (
+            guardian_noncritical_force_push_during_cancel_cooldown
+        )
+        self.guardian_noncritical_force_push_cooldown_seconds = (
+            guardian_noncritical_force_push_cooldown_seconds
         )
         self.director_enabled = director_enabled
         self.director_check_seconds = director_check_seconds
@@ -929,6 +949,18 @@ def load_settings(target):
                 if isinstance(value, bool):
                     target.guardian_force_push_on_noncritical_interrupt = value
                 else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "guardian_noncritical_force_push_during_cancel_cooldown":
+                if isinstance(value, bool):
+                    target.guardian_noncritical_force_push_during_cancel_cooldown = value
+                else:
+                    _log_invalid_value(key, raw_value)
+            elif key == "guardian_noncritical_force_push_cooldown_seconds":
+                try:
+                    target.guardian_noncritical_force_push_cooldown_seconds = max(
+                        0, int(value)
+                    )
+                except Exception:
                     _log_invalid_value(key, raw_value)
             elif key == "director_enabled":
                 if isinstance(value, bool):

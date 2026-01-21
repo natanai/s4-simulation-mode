@@ -1,4 +1,4 @@
-BUILD_NUMBER = "76"
-__version__ = f"0.5.0+build{BUILD_NUMBER}"
+from .version import BUILD_NUMBER, __version__
+
 # Import commands module for side-effects (console command registration).
 from . import commands  # noqa: F401

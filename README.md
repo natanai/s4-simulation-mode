@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.5.0, Build 77)
+# Simulation Mode Kernel Mod (v0.5.0, Build: see VERSION.txt)
 
 ## What it is
 
@@ -34,7 +34,8 @@ python tools/build_ts4script.py
 ```
 
 The build always outputs `dist/simulation-mode.ts4script`. Versioning is tracked in
-`VERSION.txt` (and optionally git tags), not in the filename. The artifact name is always
+`VERSION.txt` (synced from `src/simulation_mode/version.py` via `tools/sync_version_files.py`,
+and optionally git tags), not in the filename. The artifact name is always
 `simulation-mode.ts4script`.
 
 ### Packaging rules

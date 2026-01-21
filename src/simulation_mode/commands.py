@@ -11,8 +11,8 @@ import sims4.resources
 from sims4.commands import BOOL_TRUE, CommandType
 
 import simulation_mode.settings as sm_settings
-from simulation_mode import BUILD_NUMBER as MOD_BUILD_NUMBER
-from simulation_mode import __version__ as MOD_VERSION
+from simulation_mode.version import BUILD_NUMBER as MOD_BUILD_NUMBER
+from simulation_mode.version import __version__ as MOD_VERSION
 from simulation_mode import sim_scope
 from simulation_mode import verified_gain
 from simulation_mode.settings import get_config_path, load_settings, settings

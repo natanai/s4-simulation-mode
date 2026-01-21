@@ -965,7 +965,7 @@ def push_self_care(
                     seconds_remaining=round(remaining, 2),
                 )
                 continue
-            base_force = value is not None and value <= settings.guardian_red_motive
+            base_force = value is not None and value <= settings.guardian_min_motive
             force = (
                 True
                 if interrupted_noncritical
@@ -1009,7 +1009,7 @@ def push_self_care(
                 seconds_remaining=round(remaining, 2),
             )
             return False, "guardian care lock"
-        base_force = value is not None and value <= settings.guardian_red_motive
+        base_force = value is not None and value <= settings.guardian_min_motive
         force = (
             True
             if interrupted_noncritical
@@ -1060,7 +1060,7 @@ def push_self_care(
                     seconds_remaining=round(remaining, 2),
                 )
                 return False, "guardian care lock"
-            base_force = value is not None and value <= settings.guardian_red_motive
+            base_force = value is not None and value <= settings.guardian_min_motive
             force = (
                 True
                 if interrupted_noncritical

@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.5.0, Build: see VERSION.txt)
+# Simulation Mode Kernel Mod (v0.5.0, Build 78 — see VERSION.txt)
 
 ## What it is
 
@@ -84,6 +84,10 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 | Collect snapshot log | `simulation collect` |
 | Force object scan | `simulation force_scan` |
 | Trigger skill plan | `simulation skill_plan_now <sim_firstname>` |
+| Trigger wants plan | `simulation wants_plan_now <sim_firstname>` |
+| Trigger aspiration plan | `simulation aspiration_plan_now <sim_firstname>` |
+| Trigger holiday plan | `simulation holiday_plan_now <sim_firstname>` |
+| Popup probe (observability) | `simulation popup_probe` |
 
 Notes:
 
@@ -123,9 +127,23 @@ During the noncritical cancel cooldown window, guardian may attempt controlled f
 4. Run `simulation collect`.
 5. Confirm collect shows guardian interrupt thresholds and the story log includes guardian noncritical interrupt events.
 
+## Wants/Aspirations/Holidays (Bedrock)
+
+Goal GUIDs are extracted by matching int/guid64 values inside wants, aspirations, and holidays
+against the capability keyspaces: `by_ad_guid`, `by_loot_guid`, `by_skill_gain_guid`, and
+`by_skill_guid`. This keeps all planning grounded in the kernel index instead of affordance
+tuning lookups.
+
+Commands:
+
+* `simulation wants_plan_now <Sim>`
+* `simulation aspiration_plan_now <Sim>`
+* `simulation holiday_plan_now <Sim>`
+* `simulation popup_probe`
+
 ## Readiness diagnostics (wants/aspirations/holidays)
 
-Wants, aspirations, and holiday processing remain disabled by default. The collect command now includes diagnostics sections for affordance GUID extraction and calendar introspection, but no keyword mapping is used.
+Wants, aspirations, and holiday processing remain disabled by default. The collect command now includes diagnostics sections for goal GUID bundle extraction (ad/loot/skill_gain/skill) and calendar introspection, but no keyword mapping is used.
 
 ## Testing workflow (for development)
 

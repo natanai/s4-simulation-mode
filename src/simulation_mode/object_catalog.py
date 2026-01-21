@@ -547,6 +547,11 @@ def scan_zone_catalog(
 
     skill_guid_filter_no_instance_managers = False
     skill_guids_all_filtered_out = False
+    try:
+        Types = sims4.resources.Types
+        action_mgr = services.get_instance_manager(Types.ACTION)
+    except Exception:
+        action_mgr = None
 
     def _filter_skill_guids(guids):
         nonlocal skill_guid_filter_no_instance_managers
@@ -743,7 +748,7 @@ def scan_zone_catalog(
                         {guid for guid in (_tuning_guid64(item) for item in flags_list) if guid is not None}
                     )
 
-                loot_ref_guid_candidates = set()
+                loot_action_guid_candidates = set()
                 skill_guid_candidates = set()
                 skill_gain_guid_candidates = set()
                 skill_gain_evidence = []
@@ -768,14 +773,12 @@ def scan_zone_catalog(
                     if not ok_call and err:
                         skill_loot_err = err[:180]
                     if ok_call:
-                        loot_ref_guid_candidates.update(_walk_for_guid64s(loot_result))
-                        skill_guid_candidates.update(loot_ref_guid_candidates)
+                        skill_guid_candidates.update(_walk_for_guid64s(loot_result))
                 getter = _safe_get(aff, "get_skill_loot_data")
                 if callable(getter):
                     ok_call, loot_result, err = _safe_call_with_sim_guess(getter, sim)
                     if ok_call:
                         skill_guid_candidates.update(_walk_for_guid64s(loot_result))
-                        loot_ref_guid_candidates.update(_walk_for_guid64s(loot_result))
                     elif err:
                         if skill_loot_err:
                             skill_loot_err = f"{skill_loot_err}; get_skill_loot_data={err[:180]}"
@@ -785,26 +788,27 @@ def scan_zone_catalog(
                     if hasattr(aff, attr_name):
                         value = _safe_get(aff, attr_name)
                         _add_skill_guids(value)
-                        loot_ref_guid_candidates.update(_walk_for_guid64s(value))
+                        maybe_guids = _walk_for_guid64s(value)
+                        if action_mgr is not None:
+                            for guid in maybe_guids:
+                                try:
+                                    if action_mgr.get(guid) is not None:
+                                        loot_action_guid_candidates.add(guid)
+                                except Exception:
+                                    pass
                 gain_candidates, gain_evidence = _extract_skill_gain_guid_candidates(aff)
                 if gain_candidates:
                     skill_gain_guid_candidates.update(gain_candidates)
                 if gain_evidence:
                     skill_gain_evidence.extend(gain_evidence)
-                loot_ref_guids = sorted(loot_ref_guid_candidates)
-                try:
-                    Types = sims4.resources.Types
-                    action_mgr = services.get_instance_manager(getattr(Types, "ACTION"))
-                except Exception:
-                    action_mgr = None
-                if action_mgr is not None:
-                    for loot_guid in loot_ref_guids:
-                        try:
-                            tuning = action_mgr.get(loot_guid)
-                        except Exception:
-                            tuning = None
-                        if tuning is not None:
-                            skill_guid_candidates.update(_walk_for_guid64s(tuning))
+                loot_action_guids = sorted(loot_action_guid_candidates)
+                for loot_guid in loot_action_guids:
+                    if action_mgr is None:
+                        break
+                    action_tuning = action_mgr.get(loot_guid)
+                    if action_tuning is None:
+                        continue
+                    _add_skill_guids(_walk_for_guid64s(action_tuning))
 
                 if is_cheat or is_debug or is_picker_like or is_staging_like:
                     filtered_flags += 1
@@ -845,7 +849,8 @@ def scan_zone_catalog(
                     "advertisement_hint": _advertisement_hint(aff),
                     "autonomy_ad_guids": autonomy_ad_guids,
                     "commodity_flag_guids": commodity_flag_guids,
-                    "loot_ref_guids": loot_ref_guids,
+                    "loot_action_guids": loot_action_guids,
+                    "loot_ref_guids": loot_action_guids,
                     "skill_guids": skill_guids,
                     "skill_gain_guids": skill_gain_guids,
                     "skill_gain_evidence": skill_gain_evidence,
@@ -865,7 +870,7 @@ def scan_zone_catalog(
                         write_failed = True
                         notes.append(f"write_error err={write_error}")
                         break
-                if loot_ref_guids:
+                if loot_action_guids:
                     records_with_loot_ref_guids += 1
                 if skill_guids:
                     records_with_skill_guids += 1

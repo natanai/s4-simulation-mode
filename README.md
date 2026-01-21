@@ -84,9 +84,9 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 | Collect snapshot log | `simulation collect` |
 | Force object scan | `simulation force_scan` |
 | Trigger skill plan | `simulation skill_plan_now <sim_firstname>` |
-| Trigger wants plan | `simulation wants_plan_now <sim_firstname>` |
-| Trigger aspiration plan | `simulation aspiration_plan_now <sim_firstname>` |
-| Trigger holiday plan | `simulation holiday_plan_now <sim_firstname>` |
+| Trigger wants plan | `simulation wants_plan_now [SimFirstName]` |
+| Trigger aspiration plan | `simulation aspiration_plan_now [SimFirstName]` |
+| Trigger holiday plan | `simulation holiday_plan_now [SimFirstName]` |
 | Popup probe (observability) | `simulation popup_probe` |
 
 Notes:
@@ -134,12 +134,14 @@ against the capability keyspaces: `by_ad_guid`, `by_loot_guid`, `by_skill_gain_g
 `by_skill_guid`. This keeps all planning grounded in the kernel index instead of affordance
 tuning lookups.
 
-Commands:
+Commands (default to the selected Sim when no name is provided):
 
-* `simulation wants_plan_now <Sim>`
-* `simulation aspiration_plan_now <Sim>`
-* `simulation holiday_plan_now <Sim>`
+* `simulation wants_plan_now [SimFirstName]`
+* `simulation aspiration_plan_now [SimFirstName]`
+* `simulation holiday_plan_now [SimFirstName]`
 * `simulation popup_probe`
+
+These probes depend on capabilities.by_loot_guid containing real ACTION (loot action) GUIDs; run `simulation force_scan` after updating to rebuild the catalog/capabilities.
 
 ## Readiness diagnostics (wants/aspirations/holidays)
 

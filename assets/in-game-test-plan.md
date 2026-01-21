@@ -6,7 +6,7 @@ This plan validates that the Simulation Mode kernel loads, responds to console c
 executes guardian/director behavior safely during live gameplay.
 Simulation Mode operates only on active household Sims.
 
-Build 77 note: guardian noncritical interrupts default on for new installs, and collect includes wants/aspiration/holiday diagnostics.
+Build note (see VERSION.txt): guardian noncritical interrupts default on for new installs, and collect includes wants/aspiration/holiday diagnostics.
 
 ## Preconditions
 

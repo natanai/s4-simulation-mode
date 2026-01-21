@@ -82,6 +82,16 @@ def _safe_bool_attr(value, default=False):
         return default
 
 
+def _bundle_counts(bundle):
+    bundle = bundle or {}
+    return {
+        "ad": len(bundle.get("ad", []) or []),
+        "loot": len(bundle.get("loot", []) or []),
+        "skill_gain": len(bundle.get("skill_gain", []) or []),
+        "skill": len(bundle.get("skill", []) or []),
+    }
+
+
 def _status_lines():
     running, daemon_error, daemon_tick_count = _daemon_snapshot()
     version = MOD_VERSION
@@ -1593,6 +1603,27 @@ def _get_wants_list(sim_info):
     return [], "no_wants_method"
 
 
+def _get_active_holiday_entries():
+    entries = []
+    for svc in (services.calendar_service(), services.season_service()):
+        if svc is None:
+            continue
+        active = _safe_get(svc, "active_holidays") or _safe_get(svc, "_active_holidays")
+        if active is None and callable(_safe_get(svc, "get_active_holidays")):
+            ok, result, _err = _safe_call(svc, "get_active_holidays")
+            active = result if ok else None
+        if active is None:
+            continue
+        if isinstance(active, dict):
+            active = list(active.values())
+        if not isinstance(active, (list, tuple, set)):
+            active = [active]
+        for x in active:
+            if x is not None:
+                entries.append(x)
+    return entries
+
+
 def _tuning_guid64(value):
     if value is None or isinstance(value, bool):
         return None
@@ -2051,39 +2082,48 @@ def _collect_internal_probes(sim_info):
     deep_lines, _tracker, _slots = _probe_active_wants_deep(sim_info)
     lines.append("ACTIVE WANTS / WHIMS (DEEP DUMP)")
     lines.extend(deep_lines)
-    lines.append("WANTS -> AFFORDANCE GUID64 EXTRACTION (DIRECTOR PATH)")
+    lines.append("WANTS -> GOAL GUID64 EXTRACTION (AD/LOOT/SKILL_GAIN/SKILL)")
     try:
         director = importlib.import_module("simulation_mode.director")
     except Exception as exc:
         lines.append(f"director_import_error={exc}")
         director = None
     capabilities = None
-    wants_guid64s = []
+    wants_bundle = {"ad": [], "loot": [], "skill_gain": [], "skill": []}
     if director is not None:
         try:
-            wants_guid64s = director._extract_affordance_guid64s_from_wants(sim_info)
+            capabilities = importlib.import_module("simulation_mode.capabilities")
+            caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+            wants_bundle = director.extract_goal_guid_bundle_from_wants(sim_info, caps)
         except Exception as exc:
             lines.append(f"wants_guid64_extract_error={exc}")
-            wants_guid64s = []
-    lines.append(f"wants_affordance_guid64_count={len(wants_guid64s)}")
-    if wants_guid64s:
-        try:
-            capabilities = importlib.import_module("simulation_mode.capabilities")
-        except Exception as exc:
-            lines.append(f"capabilities_import_error={exc}")
-            capabilities = None
+            wants_bundle = {"ad": [], "loot": [], "skill_gain": [], "skill": []}
+            caps = None
+    else:
         caps = None
-        if capabilities is not None:
-            try:
-                caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
-            except Exception as exc:
-                lines.append(f"caps_ensure_error={exc}")
-        if caps is None:
-            lines.append("caps_missing=True")
-        else:
-            for guid in wants_guid64s[:10]:
-                candidates = capabilities.get_candidates_for_ad_guid(guid, caps)
-                lines.append(f"guid64={guid} candidates={len(candidates)}")
+    lines.append(
+        "wants_goal_guid64_counts ad={ad} loot={loot} skill_gain={skill_gain} skill={skill}".format(
+            ad=len(wants_bundle.get("ad", [])),
+            loot=len(wants_bundle.get("loot", [])),
+            skill_gain=len(wants_bundle.get("skill_gain", [])),
+            skill=len(wants_bundle.get("skill", [])),
+        )
+    )
+    if caps is None and director is not None and capabilities is not None:
+        lines.append("caps_missing=True")
+    if caps is not None and capabilities is not None:
+        kind_to_candidates = {
+            "ad": capabilities.get_candidates_for_ad_guid,
+            "loot": capabilities.get_candidates_for_loot_guid,
+            "skill_gain": capabilities.get_candidates_for_skill_gain_guid,
+            "skill": capabilities.get_candidates_for_skill_guid,
+        }
+        for kind, guid_list in wants_bundle.items():
+            if not guid_list:
+                continue
+            for guid in guid_list[:10]:
+                candidates = kind_to_candidates[kind](guid, caps)
+                lines.append(f"wants_guid64={guid} kind={kind} candidates={len(candidates)}")
                 for candidate in candidates[:2]:
                     obj_def_id = candidate.get("obj_def_id")
                     aff_guid = candidate.get("aff_guid64")
@@ -2092,36 +2132,45 @@ def _collect_internal_probes(sim_info):
                         f"  candidate obj_def_id={obj_def_id} aff_guid64={aff_guid} "
                         f"aff_name={aff_name}"
                     )
-    lines.append("ASPIRATION -> AFFORDANCE GUID64 EXTRACTION (DIRECTOR PATH)")
-    aspiration_guid64s = []
+    lines.append("ASPIRATION -> GOAL GUID64 EXTRACTION (AD/LOOT/SKILL_GAIN/SKILL)")
+    aspiration_bundle = {"ad": [], "loot": [], "skill_gain": [], "skill": []}
     if director is not None:
         try:
-            aspiration_guid64s = director._extract_affordance_guid64s_from_aspiration(
-                sim_info
+            if capabilities is None:
+                capabilities = importlib.import_module("simulation_mode.capabilities")
+            if caps is None and capabilities is not None:
+                caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+            aspiration_bundle = director.extract_goal_guid_bundle_from_aspiration(
+                sim_info, caps
             )
         except Exception as exc:
             lines.append(f"aspiration_guid64_extract_error={exc}")
-            aspiration_guid64s = []
-    lines.append(f"aspiration_affordance_guid64_count={len(aspiration_guid64s)}")
-    if aspiration_guid64s:
-        if capabilities is None:
-            try:
-                capabilities = importlib.import_module("simulation_mode.capabilities")
-            except Exception as exc:
-                lines.append(f"capabilities_import_error={exc}")
-                capabilities = None
-        caps = None
-        if capabilities is not None:
-            try:
-                caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
-            except Exception as exc:
-                lines.append(f"caps_ensure_error={exc}")
-        if caps is None:
-            lines.append("caps_missing=True")
-        else:
-            for guid in aspiration_guid64s[:10]:
-                candidates = capabilities.get_candidates_for_ad_guid(guid, caps)
-                lines.append(f"guid64={guid} candidates={len(candidates)}")
+            aspiration_bundle = {"ad": [], "loot": [], "skill_gain": [], "skill": []}
+    lines.append(
+        "aspiration_goal_guid64_counts ad={ad} loot={loot} skill_gain={skill_gain} skill={skill}".format(
+            ad=len(aspiration_bundle.get("ad", [])),
+            loot=len(aspiration_bundle.get("loot", [])),
+            skill_gain=len(aspiration_bundle.get("skill_gain", [])),
+            skill=len(aspiration_bundle.get("skill", [])),
+        )
+    )
+    if caps is None and director is not None and capabilities is not None:
+        lines.append("caps_missing=True")
+    if caps is not None and capabilities is not None:
+        kind_to_candidates = {
+            "ad": capabilities.get_candidates_for_ad_guid,
+            "loot": capabilities.get_candidates_for_loot_guid,
+            "skill_gain": capabilities.get_candidates_for_skill_gain_guid,
+            "skill": capabilities.get_candidates_for_skill_guid,
+        }
+        for kind, guid_list in aspiration_bundle.items():
+            if not guid_list:
+                continue
+            for guid in guid_list[:10]:
+                candidates = kind_to_candidates[kind](guid, caps)
+                lines.append(
+                    f"aspiration_guid64={guid} kind={kind} candidates={len(candidates)}"
+                )
                 for candidate in candidates[:2]:
                     obj_def_id = candidate.get("obj_def_id")
                     aff_guid = candidate.get("aff_guid64")
@@ -2195,14 +2244,14 @@ def _collect_internal_probes(sim_info):
                 if idx >= 5:
                     break
                 lines.append(f"{label}_entry[{idx}]_type={type(entry).__name__}")
-                guid_set = _collect_affordance_guid64s(entry, max_depth=2)
-                guid_list = sorted(guid_set)
-                lines.append(
-                    f"{label}_entry[{idx}]_guid64s_found_count={len(guid_list)}"
-                )
-                if guid_list:
+                if director is not None and caps is not None:
+                    bundle = director.collect_goal_guid_bundle(entry, caps, max_depth=4)
                     lines.append(
-                        f"{label}_entry[{idx}]_guid64s={guid_list[:10]}"
+                        f"{label}_entry[{idx}]_bundle_counts "
+                        f"ad={len(bundle.get('ad', []))} "
+                        f"loot={len(bundle.get('loot', []))} "
+                        f"skill_gain={len(bundle.get('skill_gain', []))} "
+                        f"skill={len(bundle.get('skill', []))}"
                     )
         except Exception as exc:
             lines.append(f"{label}_active_items_error={exc}")
@@ -2597,180 +2646,6 @@ def _resolve_sim_info_by_first_name(first_name):
         if name and str(name).strip().lower() == target:
             return sim_info
     return None
-
-
-def _get_affordance_manager():
-    services = importlib.import_module("services")
-    sims4_resources = importlib.import_module("sims4.resources")
-    getter = _safe_get(services, "get_instance_manager")
-    if callable(getter):
-        ok, manager, _error = _safe_call(
-            services, "get_instance_manager", sims4_resources.Types.INTERACTION
-        )
-        if ok:
-            return manager
-    return None
-
-
-def _resolve_affordance_tuning(guid64):
-    if not isinstance(guid64, int):
-        return None
-    manager = _get_affordance_manager()
-    if manager is None:
-        return None
-    ok, tuning, _error = _safe_call(manager, "get", guid64)
-    return tuning if ok else None
-
-
-def _is_affordance_guid64(value):
-    if not isinstance(value, int):
-        return False
-    tuning = _resolve_affordance_tuning(value)
-    return tuning is not None
-
-
-def _collect_affordance_guid64s(obj, seen=None, depth=0, max_depth=2):
-    if obj is None:
-        return set()
-    if seen is None:
-        seen = set()
-    if id(obj) in seen:
-        return set()
-    seen.add(id(obj))
-    found = set()
-    if isinstance(obj, int) and _is_affordance_guid64(obj):
-        found.add(obj)
-        return found
-    guid_value = _safe_get(obj, "guid64")
-    if isinstance(guid_value, int) and _is_affordance_guid64(guid_value):
-        found.add(guid_value)
-    if isinstance(obj, (list, tuple, set)):
-        for entry in obj:
-            found |= _collect_affordance_guid64s(entry, seen=seen, depth=depth, max_depth=max_depth)
-        return found
-    if depth >= max_depth:
-        return found
-    tokens = ("guid", "afford", "interaction", "aff")
-    try:
-        names = dir(obj)
-    except Exception:
-        return found
-    for name in names:
-        if not any(token in name.lower() for token in tokens):
-            continue
-        value = _safe_get(obj, name)
-        if value is None:
-            continue
-        if isinstance(value, int) and _is_affordance_guid64(value):
-            found.add(value)
-            continue
-        if isinstance(value, (list, tuple, set)):
-            for entry in value:
-                found |= _collect_affordance_guid64s(
-                    entry, seen=seen, depth=depth + 1, max_depth=max_depth
-                )
-            continue
-        guid_value = _safe_get(value, "guid64")
-        if isinstance(guid_value, int) and _is_affordance_guid64(guid_value):
-            found.add(guid_value)
-            continue
-        found |= _collect_affordance_guid64s(
-            value, seen=seen, depth=depth + 1, max_depth=max_depth
-        )
-    return found
-
-
-def _collect_want_affordance_guids(wants):
-    found = set()
-    for want in wants or []:
-        found |= _collect_affordance_guid64s(want)
-        goal_attr, goal = _find_first_attr(
-            want, ("goal", "_goal", "objective", "_objective", "whim_goal", "_whim_goal")
-        )
-        if goal is not None:
-            found |= _collect_affordance_guid64s(goal)
-    return found
-
-
-def _collect_aspiration_affordance_guids(sim_info):
-    tracker = _safe_get(sim_info, "aspiration_tracker")
-    if tracker is None:
-        return set()
-    active = _safe_get(tracker, "active_aspiration") or _safe_get(
-        tracker, "_active_aspiration"
-    )
-    found = set()
-    if active is not None:
-        found |= _collect_affordance_guid64s(active)
-    milestone_attr, milestone = _find_first_attr(
-        tracker,
-        (
-            "current_milestone",
-            "_current_milestone",
-            "active_milestone",
-            "milestone",
-            "_milestone",
-            "current_goal",
-        ),
-    )
-    if milestone is None and callable(_safe_get(tracker, "get_current_milestone")):
-        ok, result, _error = _safe_call(tracker, "get_current_milestone")
-        milestone = result if ok else None
-    if milestone is not None:
-        found |= _collect_affordance_guid64s(milestone)
-    return found
-
-
-def _attempt_affordance_guid_pushes(sim_info, sim, guid_list, reason_prefix):
-    capabilities = importlib.import_module("simulation_mode.capabilities")
-    push_utils = importlib.import_module("simulation_mode.push_utils")
-    lines = []
-    attempts = []
-    if sim_info is None or sim is None:
-        return False, "sim_missing", lines, attempts
-    try:
-        caps = capabilities.ensure_full_capabilities(sim_info, force_rebuild=False)
-    except Exception as exc:
-        return False, f"caps_error:{exc}", lines, attempts
-    if not caps:
-        return False, "caps_missing", lines, attempts
-    for guid in guid_list:
-        candidates = capabilities.get_candidates_for_ad_guid(guid, caps)
-        candidates = [
-            entry
-            for entry in candidates
-            if entry.get("allow_autonomous") is True and entry.get("safe_push") is True
-        ]
-        lines.append(
-            f"aff_guid64={guid} candidate_count={len(candidates)}"
-        )
-        for entry in candidates:
-            def_id = entry.get("obj_def_id")
-            aff_guid = entry.get("aff_guid64")
-            aff_name = entry.get("aff_name")
-            try:
-                ok, push_reason = push_utils.push_by_def_and_aff_guid(
-                    sim,
-                    def_id,
-                    aff_guid,
-                    reason=f"{reason_prefix} guid64={guid}",
-                    precheck=settings.plans_precheck_affordance_tests,
-                )
-            except Exception as exc:
-                ok = False
-                push_reason = f"push_error:{exc}"
-            attempts.append(
-                {
-                    "def_id": def_id,
-                    "aff_guid64": aff_guid,
-                    "aff_name": aff_name,
-                    "ok": ok,
-                    "reason": push_reason,
-                }
-            )
-            if ok:
-                return True, "pushed", lines, attempts
-    return False, "all_candidates_failed", lines, attempts
 
 
 def _probe_active_wants_deep(sim_info):
@@ -3428,8 +3303,10 @@ def _usage_lines():
         "simulation skill_plan_now <sim_firstname>",
         "simulation wants_plan_now <sim_firstname>",
         "simulation aspiration_plan_now <sim_firstname>",
+        "simulation holiday_plan_now <sim_firstname>",
         "simulation wants_probe_now",
         "simulation aspirations_probe_now",
+        "simulation popup_probe",
         "simulation configpath",
         "simulation dump_log",
         "simulation probe_all",
@@ -4101,26 +3978,29 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         if sim is None:
             output("No sim instance available.")
             return True
-        wants, want_source = _get_wants_list(sim_info)
-        if not wants:
-            output(f"wants_plan_now FAIL reason={want_source}")
+        director = importlib.import_module("simulation_mode.director")
+        capabilities = importlib.import_module("simulation_mode.capabilities")
+        try:
+            caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+        except Exception as exc:
+            output(f"wants_plan_now FAIL caps_error={exc}")
             return True
-        affordance_guids = sorted(_collect_want_affordance_guids(wants))
-        if not affordance_guids:
-            output("wants_plan_now FAIL reason=no_affordance_guid64_found")
-            return True
-        success, reason, lines, attempts = _attempt_affordance_guid_pushes(
-            sim_info, sim, affordance_guids, "wants_plan_now"
+        bundle = director.extract_goal_guid_bundle_from_wants(sim_info, caps)
+        counts = _bundle_counts(bundle)
+        success, reason = director.attempt_goal_guid_bundle_push(
+            sim_info, sim, bundle, caps, "wants_plan_now"
         )
-        for line in lines[:10]:
-            output(line)
+        output(
+            "wants_plan_now bundle_counts ad={ad} loot={loot} skill_gain={skill_gain} skill={skill}".format(
+                **counts
+            )
+        )
         output(f"wants_plan_now result={'SUCCESS' if success else 'FAIL'} reason={reason}")
         _safe_story_event(
             "wants_plan_now" if success else "wants_plan_now_failed",
             sim_info=sim_info,
             reason=reason,
-            affordance_guid_count=len(affordance_guids),
-            attempted_pushes=attempts[:8],
+            bundle_counts=counts,
         )
         return True
 
@@ -4137,22 +4017,76 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         if sim is None:
             output("No sim instance available.")
             return True
-        affordance_guids = sorted(_collect_aspiration_affordance_guids(sim_info))
-        if not affordance_guids:
-            output("aspiration_plan_now FAIL reason=no_affordance_guid64_found")
+        director = importlib.import_module("simulation_mode.director")
+        capabilities = importlib.import_module("simulation_mode.capabilities")
+        try:
+            caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+        except Exception as exc:
+            output(f"aspiration_plan_now FAIL caps_error={exc}")
             return True
-        success, reason, lines, attempts = _attempt_affordance_guid_pushes(
-            sim_info, sim, affordance_guids, "aspiration_plan_now"
+        bundle = director.extract_goal_guid_bundle_from_aspiration(sim_info, caps)
+        counts = _bundle_counts(bundle)
+        success, reason = director.attempt_goal_guid_bundle_push(
+            sim_info, sim, bundle, caps, "aspiration_plan_now"
         )
-        for line in lines[:10]:
-            output(line)
+        output(
+            "aspiration_plan_now bundle_counts ad={ad} loot={loot} skill_gain={skill_gain} skill={skill}".format(
+                **counts
+            )
+        )
         output(f"aspiration_plan_now result={'SUCCESS' if success else 'FAIL'} reason={reason}")
         _safe_story_event(
             "aspiration_plan_now" if success else "aspiration_plan_now_failed",
             sim_info=sim_info,
             reason=reason,
-            affordance_guid_count=len(affordance_guids),
-            attempted_pushes=attempts[:8],
+            bundle_counts=counts,
+        )
+        return True
+
+    if action_key == "holiday_plan_now":
+        if not key:
+            output("Missing sim_firstname. Usage: simulation holiday_plan_now <sim_firstname>")
+            return True
+        sim_info = _resolve_sim_info_by_first_name(key)
+        if sim_info is None:
+            output(f"No active household sim found named '{key}'.")
+            return True
+        ok, sim, _error = _safe_call(sim_info, "get_sim_instance")
+        sim = sim if ok else None
+        if sim is None:
+            output("No sim instance available.")
+            return True
+        director = importlib.import_module("simulation_mode.director")
+        capabilities = importlib.import_module("simulation_mode.capabilities")
+        try:
+            caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+        except Exception as exc:
+            output(f"holiday_plan_now FAIL caps_error={exc}")
+            return True
+        entries = _get_active_holiday_entries()
+        bundle = {"ad": set(), "loot": set(), "skill_gain": set(), "skill": set()}
+        for entry in entries:
+            entry_bundle = director.collect_goal_guid_bundle(entry, caps, max_depth=4)
+            for k in bundle.keys():
+                bundle[k] |= set(entry_bundle.get(k, []))
+        bundle = {k: sorted(v) for k, v in bundle.items()}
+        counts = _bundle_counts(bundle)
+        success, reason = director.attempt_goal_guid_bundle_push(
+            sim_info, sim, bundle, caps, "holiday_plan_now"
+        )
+        output(f"holiday_plan_now entry_count={len(entries)}")
+        output(
+            "holiday_plan_now bundle_counts ad={ad} loot={loot} skill_gain={skill_gain} skill={skill}".format(
+                **counts
+            )
+        )
+        output(f"holiday_plan_now result={'SUCCESS' if success else 'FAIL'} reason={reason}")
+        _safe_story_event(
+            "holiday_plan_now" if success else "holiday_plan_now_failed",
+            sim_info=sim_info,
+            reason=reason,
+            entry_count=len(entries),
+            bundle_counts=counts,
         )
         return True
 
@@ -4205,6 +4139,43 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "probe_all":
         return _probe_all(output)
+
+    if action_key == "popup_probe":
+        output("POPUP PROBE")
+        dialog_names = [
+            name
+            for name in dir(services)
+            if "dialog" in name.lower() or "ui" in name.lower()
+        ]
+        output(f"services_dialog_ui={dialog_names}")
+        ui_dialog_spec = importlib.util.find_spec("ui.ui_dialog")
+        if ui_dialog_spec is None:
+            output("ui.ui_dialog_import=missing")
+        else:
+            ui_dialog = importlib.import_module("ui.ui_dialog")
+            output("ui.ui_dialog_import=ok")
+            ui_dialog_class = getattr(ui_dialog, "UiDialog", None)
+            output(f"UiDialog_present={ui_dialog_class is not None}")
+            if ui_dialog_class is not None:
+                methods = [
+                    name
+                    for name in dir(ui_dialog_class)
+                    if any(token in name.lower() for token in ("show", "response", "cancel"))
+                ]
+                output(f"UiDialog_methods={methods}")
+        ui_dialog_service_spec = importlib.util.find_spec("ui.ui_dialog_service")
+        if ui_dialog_service_spec is None:
+            output("ui.ui_dialog_service_import=missing")
+        else:
+            ui_dialog_service = importlib.import_module("ui.ui_dialog_service")
+            output("ui.ui_dialog_service_import=ok")
+            service_attrs = [
+                name
+                for name in dir(ui_dialog_service)
+                if any(token in name.lower() for token in ("show", "response", "cancel"))
+            ]
+            output(f"ui_dialog_service_attrs={service_attrs}")
+        return True
 
     if action_key == "dump_log":
         dumper = importlib.import_module("simulation_mode.log_dump")

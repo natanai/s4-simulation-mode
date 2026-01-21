@@ -148,6 +148,114 @@ def _safe_call(obj, name, *args, **kwargs):
         return False, None, f"{type(exc).__name__}: {exc}"
 
 
+def _caps_keysets(caps):
+    def _to_int_set(d):
+        if not d:
+            return set()
+        out = set()
+        for k in d.keys():
+            try:
+                out.add(int(k))
+            except Exception:
+                continue
+        return out
+
+    return {
+        "ad": _to_int_set((caps or {}).get("by_ad_guid")),
+        "loot": _to_int_set((caps or {}).get("by_loot_guid")),
+        "skill_gain": _to_int_set((caps or {}).get("by_skill_gain_guid")),
+        "skill": _to_int_set((caps or {}).get("by_skill_guid")),
+    }
+
+
+def collect_goal_guid_bundle(obj, caps, max_depth=4, max_nodes=2500, max_attrs=200):
+    keysets = _caps_keysets(caps)
+    found = {"ad": set(), "loot": set(), "skill_gain": set(), "skill": set()}
+    seen = set()
+
+    def _consider_int(x):
+        if not isinstance(x, int) or isinstance(x, bool):
+            return
+        if x in keysets["ad"]:
+            found["ad"].add(x)
+        if x in keysets["loot"]:
+            found["loot"].add(x)
+        if x in keysets["skill_gain"]:
+            found["skill_gain"].add(x)
+        if x in keysets["skill"]:
+            found["skill"].add(x)
+
+    def _walk(o, depth):
+        if o is None or depth > max_depth:
+            return
+        oid = id(o)
+        if oid in seen:
+            return
+        seen.add(oid)
+        if len(seen) > max_nodes:
+            return
+
+        if isinstance(o, int) and not isinstance(o, bool):
+            _consider_int(o)
+            return
+        if isinstance(o, (list, tuple, set, frozenset)):
+            for v in o:
+                _walk(v, depth + 1)
+            return
+        if isinstance(o, dict):
+            for v in o.values():
+                _walk(v, depth + 1)
+            return
+
+        try:
+            g = getattr(o, "guid64", None)
+            _consider_int(g)
+        except Exception:
+            pass
+        try:
+            t = getattr(o, "__tuning__", None)
+            tg = getattr(t, "guid64", None)
+            _consider_int(tg)
+        except Exception:
+            pass
+
+        d = None
+        try:
+            d = vars(o)
+        except Exception:
+            d = None
+        if isinstance(d, dict):
+            for v in d.values():
+                _walk(v, depth + 1)
+            return
+
+        names = []
+        try:
+            names = dir(o)
+        except Exception:
+            names = []
+        if len(names) > max_attrs:
+            names = names[:max_attrs]
+        for name in names:
+            if name.startswith("_"):
+                continue
+            try:
+                v = getattr(o, name)
+            except Exception:
+                continue
+            if callable(v):
+                continue
+            _walk(v, depth + 1)
+
+    _walk(obj, 0)
+    return {
+        "ad": sorted(found["ad"]),
+        "loot": sorted(found["loot"]),
+        "skill_gain": sorted(found["skill_gain"]),
+        "skill": sorted(found["skill"]),
+    }
+
+
 def _sim_identifier(sim_info):
     sim_id = getattr(sim_info, "sim_id", None)
     return sim_id or id(sim_info)
@@ -1381,71 +1489,63 @@ def run_skill_plan(sim_info, sim, now, force=False, source="director"):
     if not settings.director_enable_wants:
         wants_reason = "disabled_by_setting"
     else:
-        want_guid_list = _extract_affordance_guid64s_from_wants(sim_info)
-        if not want_guid_list:
-            wants_reason = "no_guid64"
-            _append_debug("Director: wants_attempt=no_guid64")
-        else:
-            caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
-            ok, reason = _attempt_guid64_goal_push(
-                sim_info, sim, want_guid_list, caps, "director_wants"
-            )
-            wants_reason = reason
-            if ok:
-                try:
-                    story_log.append_event(
-                        "director_wants_push",
-                        sim_info=sim_info,
-                        sim_name=_sim_display_name(sim_info),
-                        guid_count=len(want_guid_list),
-                        reason=reason,
-                    )
-                except Exception:
-                    pass
-                return {
-                    "success": True,
-                    "skill_key": "wants",
-                    "skill_reason": "director_wants",
-                    "skill_source": "wants",
-                    "wants_reason": wants_reason,
-                    "career_reason": None,
-                    "started_candidates": [],
-                }
-            _append_debug("Director: wants_attempt=no_pushable_candidates")
+        caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+        bundle = extract_goal_guid_bundle_from_wants(sim_info, caps)
+        ok, reason = attempt_goal_guid_bundle_push(
+            sim_info, sim, bundle, caps, "director_wants"
+        )
+        wants_reason = reason
+        if ok:
+            try:
+                story_log.append_event(
+                    "director_wants_push",
+                    sim_info=sim_info,
+                    sim_name=_sim_display_name(sim_info),
+                    bundle_counts={k: len(bundle.get(k, [])) for k in bundle.keys()},
+                    reason=reason,
+                )
+            except Exception:
+                pass
+            return {
+                "success": True,
+                "skill_key": "wants",
+                "skill_reason": "director_wants",
+                "skill_source": "wants",
+                "wants_reason": wants_reason,
+                "career_reason": None,
+                "started_candidates": [],
+            }
+        _append_debug("Director: wants_attempt=no_push")
 
     aspiration_reason = None
     if settings.director_enable_aspirations:
-        aspiration_guid_list = _extract_affordance_guid64s_from_aspiration(sim_info)
-        if not aspiration_guid_list:
-            aspiration_reason = "no_guid64"
-            _append_debug("Director: aspiration_attempt=no_guid64")
-        else:
-            caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
-            ok, reason = _attempt_guid64_goal_push(
-                sim_info, sim, aspiration_guid_list, caps, "director_aspiration"
-            )
-            aspiration_reason = reason
-            if ok:
-                try:
-                    story_log.append_event(
-                        "director_aspiration_push",
-                        sim_info=sim_info,
-                        sim_name=_sim_display_name(sim_info),
-                        guid_count=len(aspiration_guid_list),
-                        reason=reason,
-                    )
-                except Exception:
-                    pass
-                return {
-                    "success": True,
-                    "skill_key": "aspiration",
-                    "skill_reason": "director_aspiration",
-                    "skill_source": "aspiration",
-                    "wants_reason": wants_reason,
-                    "career_reason": None,
-                    "started_candidates": [],
-                }
-            _append_debug("Director: aspiration_attempt=no_pushable_candidates")
+        caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
+        bundle = extract_goal_guid_bundle_from_aspiration(sim_info, caps)
+        ok, reason = attempt_goal_guid_bundle_push(
+            sim_info, sim, bundle, caps, "director_aspiration"
+        )
+        aspiration_reason = reason
+        if ok:
+            try:
+                story_log.append_event(
+                    "director_aspiration_push",
+                    sim_info=sim_info,
+                    sim_name=_sim_display_name(sim_info),
+                    bundle_counts={k: len(bundle.get(k, [])) for k in bundle.keys()},
+                    reason=reason,
+                )
+            except Exception:
+                pass
+            return {
+                "success": True,
+                "skill_key": "aspiration",
+                "skill_reason": "director_aspiration",
+                "skill_source": "aspiration",
+                "wants_reason": wants_reason,
+                "career_reason": None,
+                "started_candidates": [],
+            }
+        _append_debug("Director: aspiration_attempt=no_push")
     else:
         aspiration_reason = "disabled_by_setting"
 
@@ -2714,34 +2814,6 @@ def _get_active_wants(sim_info):
 def get_active_want_targets(sim_info):
     return _get_active_wants(sim_info)
 
-
-def _get_affordance_manager():
-    getter = _safe_get(services, "get_instance_manager")
-    if callable(getter):
-        ok, manager, _error = _safe_call(
-            services, "get_instance_manager", sims4.resources.Types.INTERACTION
-        )
-        if ok:
-            return manager
-    return None
-
-
-def _resolve_affordance_tuning(guid64):
-    if not isinstance(guid64, int):
-        return None
-    manager = _get_affordance_manager()
-    if manager is None:
-        return None
-    ok, tuning, _error = _safe_call(manager, "get", guid64)
-    return tuning if ok else None
-
-
-def _is_affordance_guid64(value):
-    if not isinstance(value, int):
-        return False
-    return _resolve_affordance_tuning(value) is not None
-
-
 def _find_first_attr(obj, attr_names):
     for attr in attr_names:
         value = _safe_get(obj, attr)
@@ -2750,82 +2822,26 @@ def _find_first_attr(obj, attr_names):
     return None, None
 
 
-def _collect_affordance_guid64s(obj, seen=None, depth=0, max_depth=2):
-    if obj is None:
-        return set()
-    if seen is None:
-        seen = set()
-    if id(obj) in seen:
-        return set()
-    seen.add(id(obj))
-    found = set()
-    if isinstance(obj, int) and _is_affordance_guid64(obj):
-        found.add(obj)
-        return found
-    guid_value = _safe_get(obj, "guid64")
-    if isinstance(guid_value, int) and _is_affordance_guid64(guid_value):
-        found.add(guid_value)
-    if isinstance(obj, (list, tuple, set)):
-        for entry in obj:
-            found |= _collect_affordance_guid64s(
-                entry, seen=seen, depth=depth, max_depth=max_depth
-            )
-        return found
-    if depth >= max_depth:
-        return found
-    tokens = ("guid", "afford", "interaction", "aff")
-    try:
-        names = dir(obj)
-    except Exception:
-        return found
-    for name in names:
-        if not any(token in name.lower() for token in tokens):
-            continue
-        value = _safe_get(obj, name)
-        if value is None:
-            continue
-        if isinstance(value, int) and _is_affordance_guid64(value):
-            found.add(value)
-            continue
-        if isinstance(value, (list, tuple, set)):
-            for entry in value:
-                found |= _collect_affordance_guid64s(
-                    entry, seen=seen, depth=depth + 1, max_depth=max_depth
-                )
-            continue
-        guid_value = _safe_get(value, "guid64")
-        if isinstance(guid_value, int) and _is_affordance_guid64(guid_value):
-            found.add(guid_value)
-            continue
-        found |= _collect_affordance_guid64s(
-            value, seen=seen, depth=depth + 1, max_depth=max_depth
-        )
-    return found
-
-
-def _extract_affordance_guid64s_from_wants(sim_info):
+def extract_goal_guid_bundle_from_wants(sim_info, caps):
     wants = _get_active_wants(sim_info)
-    found = set()
-    for want in wants or []:
-        found |= _collect_affordance_guid64s(want)
-        _goal_attr, goal = _find_first_attr(
-            want, ("goal", "_goal", "objective", "_objective", "whim_goal", "_whim_goal")
-        )
-        if goal is not None:
-            found |= _collect_affordance_guid64s(goal)
-    return sorted(found)
+    bundle = {"ad": set(), "loot": set(), "skill_gain": set(), "skill": set()}
+    if not wants:
+        return {"ad": [], "loot": [], "skill_gain": [], "skill": []}
+    for want in wants:
+        b = collect_goal_guid_bundle(want, caps, max_depth=4)
+        for k in bundle.keys():
+            bundle[k] |= set(b.get(k, []))
+    return {k: sorted(bundle[k]) for k in bundle.keys()}
 
 
-def _extract_affordance_guid64s_from_aspiration(sim_info):
+def extract_goal_guid_bundle_from_aspiration(sim_info, caps):
     tracker = _safe_get(sim_info, "aspiration_tracker")
     if tracker is None:
-        return []
+        return {"ad": [], "loot": [], "skill_gain": [], "skill": []}
     active = _safe_get(tracker, "active_aspiration") or _safe_get(
         tracker, "_active_aspiration"
     )
-    found = set()
-    if active is not None:
-        found |= _collect_affordance_guid64s(active)
+
     _milestone_attr, milestone = _find_first_attr(
         tracker,
         (
@@ -2840,16 +2856,32 @@ def _extract_affordance_guid64s_from_aspiration(sim_info):
     if milestone is None and callable(_safe_get(tracker, "get_current_milestone")):
         ok, result, _error = _safe_call(tracker, "get_current_milestone")
         milestone = result if ok else None
-    if milestone is not None:
-        found |= _collect_affordance_guid64s(milestone)
-    return sorted(found)
+
+    bundle = {"ad": set(), "loot": set(), "skill_gain": set(), "skill": set()}
+    for obj in (active, milestone):
+        if obj is None:
+            continue
+        b = collect_goal_guid_bundle(obj, caps, max_depth=4)
+        for k in bundle.keys():
+            bundle[k] |= set(b.get(k, []))
+    return {k: sorted(bundle[k]) for k in bundle.keys()}
 
 
-def _attempt_guid64_goal_push(sim_info, sim, guid_list, caps, reason_prefix):
+def _candidates_for_kind(kind, guid, caps):
+    if kind == "ad":
+        return capabilities.get_candidates_for_ad_guid(guid, caps)
+    if kind == "loot":
+        return capabilities.get_candidates_for_loot_guid(guid, caps)
+    if kind == "skill_gain":
+        return capabilities.get_candidates_for_skill_gain_guid(guid, caps)
+    if kind == "skill":
+        return capabilities.get_candidates_for_skill_guid(guid, caps)
+    return []
+
+
+def attempt_goal_guid_bundle_push(sim_info, sim, bundle, caps, reason_prefix):
     if sim_info is None or sim is None:
         return False, "sim_missing"
-    if not guid_list:
-        return False, "no_guid64"
     if caps is None:
         try:
             caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
@@ -2857,42 +2889,27 @@ def _attempt_guid64_goal_push(sim_info, sim, guid_list, caps, reason_prefix):
             return False, f"caps_error:{exc}"
     if not caps:
         return False, "caps_missing"
-    had_candidates = False
-    for guid in guid_list:
-        candidates = capabilities.get_candidates_for_ad_guid(guid, caps)
-        candidates = [
-            entry
-            for entry in candidates
-            if entry.get("allow_autonomous") is True and entry.get("safe_push") is True
-        ]
-        if candidates:
-            had_candidates = True
-        for entry in candidates:
-            def_id = entry.get("obj_def_id")
-            aff_guid = entry.get("aff_guid64")
-            probe = {}
-            ok, _push_reason = push_by_def_and_aff_guid(
-                sim,
-                def_id,
-                aff_guid,
-                reason=f"{reason_prefix} guid64={guid}",
-                probe_details=probe,
-                precheck=settings.director_precheck_affordance_tests,
+
+    kind_order = ("ad", "loot", "skill_gain", "skill")
+    for kind in kind_order:
+        guid_list = (bundle or {}).get(kind) or []
+        if not guid_list:
+            continue
+        for guid in guid_list:
+            candidates = _candidates_for_kind(kind, guid, caps)
+            candidates = [
+                entry
+                for entry in candidates
+                if entry.get("allow_autonomous", True) and entry.get("safe_push", True)
+            ]
+            if not candidates:
+                continue
+            ok, reason = _try_push_candidate(
+                sim_info, sim, candidates, caps, f"{reason_prefix}_{kind}", guid
             )
             if ok:
-                global _LAST_PUSH_SUCCESS
-                global _LAST_ACTION_DETAILS
-                last = probe.get("last_success")
-                if isinstance(last, dict):
-                    _LAST_PUSH_SUCCESS = last
-                    obj_label = last.get("object_label")
-                    aff_label = last.get("affordance_label")
-                    if obj_label and aff_label:
-                        _LAST_ACTION_DETAILS = (obj_label, aff_label)
-                return True, "pushed"
-    if not had_candidates:
-        return False, "no_pushable_candidates"
-    return False, "all_candidates_failed"
+                return True, f"{kind}:{guid}"
+    return False, "no_push"
 
 
 def _resolve_whim_rule(whim_name: str):
@@ -3305,15 +3322,17 @@ def _try_resolve_wants(sim_info, force=False, now=None):
     sim = sim_info.get_sim_instance()
     if sim is None:
         return False, "WANT unavailable (no active sim)"
-    guid_list = _extract_affordance_guid64s_from_wants(sim_info)
-    if not guid_list:
-        _log_probe("WANT_NOW no_guid64")
-        return False, "WANT no affordance guid64 found"
     caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
-    ok, reason = _attempt_guid64_goal_push(sim_info, sim, guid_list, caps, "want_now")
+    bundle = extract_goal_guid_bundle_from_wants(sim_info, caps)
+    if not any(bundle.get(k) for k in bundle.keys()):
+        _log_probe("WANT_NOW no_guid64")
+        return False, "WANT no goal guid64 found"
+    ok, reason = attempt_goal_guid_bundle_push(sim_info, sim, bundle, caps, "want_now")
     _log_probe(
         "WANT_NOW guid_count={} result={} reason={}".format(
-            len(guid_list), "SUCCESS" if ok else "FAIL", reason
+            sum(len(bundle.get(k, [])) for k in bundle.keys()),
+            "SUCCESS" if ok else "FAIL",
+            reason,
         )
     )
     if ok:
@@ -3329,7 +3348,7 @@ def _try_resolve_wants(sim_info, force=False, now=None):
             sim_info=sim_info,
             sim_name=_sim_display_name(sim_info),
             reason=reason,
-            affordance_guid_count=len(guid_list),
+            bundle_counts={k: len(bundle.get(k, [])) for k in bundle.keys()},
         )
         return True, "WANT pushed"
     return False, f"WANT {reason}"

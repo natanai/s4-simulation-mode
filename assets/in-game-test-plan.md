@@ -6,7 +6,7 @@ This plan validates that the Simulation Mode kernel loads, responds to console c
 executes guardian/director behavior safely during live gameplay.
 Simulation Mode operates only on active household Sims.
 
-Build 76 note: guardian noncritical interrupts default on for new installs, and collect includes wants/aspiration/holiday diagnostics.
+Build 77 note: guardian noncritical interrupts default on for new installs, and collect includes wants/aspiration/holiday diagnostics.
 
 ## Preconditions
 
@@ -50,7 +50,9 @@ Build 76 note: guardian noncritical interrupts default on for new installs, and 
    * **Expected:** bypasses cooldown and pushes an action (or reports why it could not).
 5. Optional escalation test: set `guardian_interrupt_running_noncritical=true` with the recommended thresholds, keep a noncritical interaction running, and let the motive dip below the threshold.
    * **Expected:** story events show `guardian_noncritical_interrupt_waiting` strikes, then `guardian_noncritical_cancel`, followed by `guardian_push` or `guardian_push_failed`.
-6. Infinite action while unsafe checklist:
+6. Verify that after `guardian_noncritical_cancel`, a `guardian_push` (force=true) occurs even if the Sim is briefly “busy”, and the looping action ends.
+7. Verify guardian does not cancel sleep/toilet when that running interaction is addressing an unsafe motive (blocked_by_running_care behavior logged).
+8. Infinite action while unsafe checklist:
    1. Enable simulation.
    2. Let a Sim start an infinite-ish action (singing/mirror/etc).
    3. Wait until a motive drops below `director_min_safe_motive`.

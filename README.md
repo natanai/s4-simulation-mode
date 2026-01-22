@@ -1,4 +1,4 @@
-# Simulation Mode Kernel Mod (v0.5.0, Build 78 — see VERSION.txt)
+# Simulation Mode Kernel Mod (v0.5.0, Build 80 — see VERSION.txt)
 
 ## What it is
 
@@ -83,10 +83,11 @@ All commands are exposed under `simulation` (and the alias `simulation_mode`).
 | Disable Simulation Mode | `simulation false` |
 | Collect snapshot log | `simulation collect` |
 | Force object scan | `simulation force_scan` |
-| Trigger skill plan | `simulation skill_plan_now <sim_firstname>` |
-| Trigger wants plan | `simulation wants_plan_now [SimFirstName]` |
-| Trigger aspiration plan | `simulation aspiration_plan_now [SimFirstName]` |
-| Trigger holiday plan | `simulation holiday_plan_now [SimFirstName]` |
+| Trigger skill plan | `simulation skill_plan_now [SimFirstName]` |
+| Trigger wants plan | `simulation wants_plan_now` |
+| Trigger aspiration plan | `simulation aspiration_plan_now` |
+| Trigger holiday plan | `simulation holiday_plan_now` |
+| Probe holiday interactions | `simulation holiday_probe_now` |
 | Popup probe (observability) | `simulation popup_probe` |
 
 Notes:
@@ -129,23 +130,23 @@ During the noncritical cancel cooldown window, guardian may attempt controlled f
 
 ## Wants/Aspirations/Holidays (Bedrock)
 
-Goal GUIDs are extracted by matching int/guid64 values inside wants, aspirations, and holidays
-against the capability keyspaces: `by_ad_guid`, `by_loot_guid`, `by_skill_gain_guid`, and
-`by_skill_guid`. This keeps all planning grounded in the kernel index instead of affordance
-tuning lookups.
+We now resolve Wants/Aspiration/Holiday objectives to INTERACTION tuning GUID64s and bridge
+those to scanned lot affordances via `capabilities.by_aff_guid`. No keyword matching and no
+heuristics are used; this is a direct GUID bridge.
 
-Commands (default to the selected Sim when no name is provided):
+Commands (operate on the active Sim):
 
-* `simulation wants_plan_now [SimFirstName]`
-* `simulation aspiration_plan_now [SimFirstName]`
-* `simulation holiday_plan_now [SimFirstName]`
+* `simulation wants_plan_now`
+* `simulation aspiration_plan_now`
+* `simulation holiday_plan_now`
+* `simulation holiday_probe_now`
 * `simulation popup_probe`
 
 These probes depend on capabilities.by_loot_guid containing real ACTION (loot action) GUIDs; run `simulation force_scan` after updating to rebuild the catalog/capabilities.
 
 ## Readiness diagnostics (wants/aspirations/holidays)
 
-Wants, aspirations, and holiday processing remain disabled by default. The collect command now includes diagnostics sections for goal GUID bundle extraction (ad/loot/skill_gain/skill) and calendar introspection, but no keyword mapping is used.
+Wants, aspirations, and holiday processing remain disabled by default. The collect command now includes diagnostics for the interaction GUID bridge (resolved interaction GUID64s and availability on-lot), plus holiday service discovery hints.
 
 ## Testing workflow (for development)
 

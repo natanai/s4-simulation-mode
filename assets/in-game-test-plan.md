@@ -6,7 +6,7 @@ This plan validates that the Simulation Mode kernel loads, responds to console c
 executes guardian/director behavior safely during live gameplay.
 Simulation Mode operates only on active household Sims.
 
-Build note (see VERSION.txt): guardian noncritical interrupts default on for new installs, and collect includes wants/aspiration/holiday diagnostics.
+Build note (see VERSION.txt): guardian noncritical interrupts default on for new installs, and collect includes the interaction GUID bridge diagnostics for wants/aspirations/holidays.
 
 ## Preconditions
 
@@ -71,7 +71,7 @@ Build note (see VERSION.txt): guardian noncritical interrupts default on for new
 5. Optional: run `simulation director_push <skill_key>` on a known skill.
    * **Expected:** success/failure message plus last action/debug.
 6. Optional: run `simulation director_takeover <skill_key>` to cancel current interactions and push.
-7. Run `simulation skill_plan_now <sim_firstname>` while the Sim is already performing an unrelated interaction.
+7. Run `simulation skill_plan_now [SimFirstName]` while the Sim is already performing an unrelated interaction.
    * **Expected:** a result is logged to the collect log file and the console reports success/failure.
 8. After any successful director push, confirm `director_push` events include non-unknown `object_label` and `affordance_label`.
 9. Optional: set `director_idle_override_allow_bypass_cooldown_once=true`, trigger quick idle, and confirm a `director_idle_override_bypass_cooldown_once` story-log event appears.
@@ -97,10 +97,12 @@ Build note (see VERSION.txt): guardian noncritical interrupts default on for new
    * **Expected:** `simulation-mode.log` is written to disk.
 3. Run `simulation collect`.
    * **Expected:** a new `SimulationMode COLLECT` block is appended to the collect log file.
-   * **Expected:** wants/aspiration GUID extraction and holiday/calendar probe-only sections appear (diagnostics only).
+   * **Expected:** interaction GUID bridge diagnostics and holiday service discovery hints appear (diagnostics only).
 4. Run `simulation probe_wants`, `simulation probe_want 0`, `simulation probe_career`,
    and `simulation probe_aspiration`.
    * **Expected:** each writes diagnostics to the probe log (`simulation-mode-probe.log`).
+5. Run `simulation holiday_probe_now`.
+   * **Expected:** a short summary prints with resolved interaction GUID64 count.
 
 ## Shutdown
 

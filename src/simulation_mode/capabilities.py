@@ -84,6 +84,7 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
     data = {
         "meta": None,
         "by_ad_guid": {},
+        "by_aff_guid": {},
         "by_loot_guid": {},
         "by_skill_guid": {},
         "by_skill_gain_guid": {},
@@ -115,8 +116,6 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
                     key = str(guid)
                     observed_counts[key] = observed_counts.get(key, 0) + 1
                 safe_push = bool(record.get("safe_push"))
-                if not safe_push:
-                    continue
                 if record.get("is_picker_like") or record.get("is_cheat") or record.get("is_debug") or record.get("is_staging_like"):
                     continue
                 obj_def_id = record.get("obj_def_id")
@@ -130,8 +129,17 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
                     "aff_name": record.get("aff_name"),
                     "allow_autonomous": bool(record.get("allow_autonomous")),
                     "allow_user_directed": bool(record.get("allow_user_directed")),
-                    "safe_push": True,
+                    "safe_push": safe_push,
+                    "is_picker": bool(record.get("is_picker_like")),
                 }
+                try:
+                    aff_guid_int = int(aff_guid64)
+                except Exception:
+                    aff_guid_int = None
+                if aff_guid_int and aff_guid_int > 0:
+                    _add_to_index(data["by_aff_guid"], aff_guid_int, entry)
+                if not safe_push:
+                    continue
                 for guid in record.get("autonomy_ad_guids") or []:
                     _add_to_index(data["by_ad_guid"], guid, entry)
                 loot_guids = (
@@ -150,6 +158,7 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
     meta = data.get("meta") or {}
     by_skill = data.get("by_skill_guid") or {}
     by_skill_gain = data.get("by_skill_gain_guid") or {}
+    by_aff_guid = data.get("by_aff_guid") or {}
     if isinstance(by_skill, dict):
         keys = list(by_skill.keys())
         meta["by_skill_guid_keys"] = len(keys)
@@ -168,6 +177,15 @@ def build_capabilities_from_catalog_jsonl(catalog_path: str):
     else:
         meta["by_skill_gain_guid_keys"] = 0
         meta["by_skill_gain_guid_entries_total"] = 0
+    if isinstance(by_aff_guid, dict):
+        keys = list(by_aff_guid.keys())
+        meta["by_aff_guid_keys"] = len(keys)
+        meta["by_aff_guid_entries"] = sum(
+            len(by_aff_guid.get(key, [])) for key in keys
+        )
+    else:
+        meta["by_aff_guid_keys"] = 0
+        meta["by_aff_guid_entries"] = 0
     meta["skill_guid_observed_counts"] = observed_counts
     meta["build_number"] = sm_version.BUILD_NUMBER
     meta["version"] = sm_version.__version__
@@ -180,6 +198,16 @@ def get_candidates_for_ad_guid(guid64: int, caps: dict):
         return []
     index = caps.get("by_ad_guid") or {}
     return list(index.get(str(guid64)) or [])
+
+
+def get_candidates_for_aff_guid(aff_guid64, caps):
+    if not caps or aff_guid64 is None:
+        return []
+    try:
+        key = str(int(aff_guid64))
+    except Exception:
+        return []
+    return list((caps.get("by_aff_guid", {}) or {}).get(key, []) or [])
 
 
 def get_candidates_for_loot_guid(guid64: int, caps: dict):

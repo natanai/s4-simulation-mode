@@ -92,6 +92,58 @@ def _bundle_counts(bundle):
     }
 
 
+def _attempt_aff_guid_push(sim_info, sim, caps, aff_guid64s, reason_prefix, output_lines=None):
+    from simulation_mode import capabilities
+    from simulation_mode import push_utils
+
+    if sim is None:
+        return False, "no_sim", None, None
+    if not caps:
+        return False, "caps_missing", None, None
+    aff_guid64s = list(aff_guid64s or [])
+    by_aff = caps.get("by_aff_guid") or {}
+    filtered_to_caps = []
+    for guid in aff_guid64s:
+        try:
+            key = str(int(guid))
+        except Exception:
+            continue
+        if key in by_aff:
+            filtered_to_caps.append(int(guid))
+    if output_lines is not None:
+        output_lines.append(f"{reason_prefix}_resolved_aff_guids={len(aff_guid64s)}")
+        output_lines.append(
+            f"{reason_prefix}_available_aff_guids={len(filtered_to_caps)}"
+        )
+        for guid in filtered_to_caps[:10]:
+            bucket = capabilities.get_candidates_for_aff_guid(guid, caps)
+            output_lines.append(f"aff_guid64={guid} candidates={len(bucket)}")
+    for guid in filtered_to_caps:
+        candidates = capabilities.get_candidates_for_aff_guid(guid, caps)
+        for entry in candidates:
+            if not entry or not entry.get("safe_push"):
+                continue
+            if not entry.get("allow_autonomous"):
+                continue
+            if entry.get("is_picker"):
+                continue
+            ok, _push_reason = push_utils.push_by_def_and_aff_guid(
+                sim,
+                obj_def_id=entry["obj_def_id"],
+                aff_guid64=guid,
+                reason=f"{reason_prefix}:{guid}",
+                precheck=sm_settings.get_bool(
+                    "director_precheck_affordance_tests", True
+                ),
+                force=sm_settings.get_bool(
+                    "director_force_push_goal_affordances", False
+                ),
+            )
+            if ok:
+                return True, "pushed", guid, entry
+    return False, "no_push", None, None
+
+
 def _status_lines():
     running, daemon_error, daemon_tick_count = _daemon_snapshot()
     version = MOD_VERSION
@@ -1607,24 +1659,101 @@ def _get_wants_list(sim_info):
     return [], "no_wants_method"
 
 
+def _get_active_holiday_entries_any():
+    debug_lines = []
+
+    def _normalize_entries(raw):
+        if raw is None:
+            return []
+        if isinstance(raw, dict):
+            return [value for value in raw.values() if value is not None]
+        if isinstance(raw, (list, tuple, set)):
+            return [value for value in raw if value is not None]
+        return [raw]
+
+    def _collect_from_service(service, label):
+        for method_name in (
+            "get_active_holidays",
+            "get_current_holidays",
+            "get_active_holiday_entries",
+        ):
+            if callable(_safe_get(service, method_name)):
+                ok, result, _err = _safe_call(service, method_name)
+                entries = _normalize_entries(result if ok else None)
+                debug_lines.append(
+                    f"holiday_source_try={label}.{method_name} -> "
+                    f"{type(result).__name__ if ok else 'error'} -> entries={len(entries)}"
+                )
+                if entries:
+                    return entries, f"{label}.{method_name}"
+        for attr_name in (
+            "active_holidays",
+            "_active_holidays",
+            "current_holidays",
+            "_current_holidays",
+        ):
+            if hasattr(service, attr_name):
+                raw = _safe_get(service, attr_name)
+                entries = _normalize_entries(raw)
+                debug_lines.append(
+                    f"holiday_source_try={label}.{attr_name} -> "
+                    f"{type(raw).__name__} -> entries={len(entries)}"
+                )
+                if entries:
+                    return entries, f"{label}.{attr_name}"
+        return [], None
+
+    service_candidates = []
+    holiday_getter = getattr(services, "holiday_service", None)
+    if callable(holiday_getter):
+        try:
+            svc = holiday_getter()
+        except Exception:
+            svc = None
+        if svc is not None:
+            service_candidates.append(("services.holiday_service", svc))
+    season_getter = getattr(services, "season_service", None)
+    if callable(season_getter):
+        try:
+            season_svc = season_getter()
+        except Exception:
+            season_svc = None
+        if season_svc is not None:
+            for attr in (
+                "holiday_service",
+                "_holiday_service",
+                "holiday_tracker",
+                "_holiday_tracker",
+            ):
+                raw = _safe_get(season_svc, attr)
+                svc = None
+                if callable(raw):
+                    try:
+                        svc = raw()
+                    except Exception:
+                        svc = None
+                else:
+                    svc = raw
+                if svc is not None:
+                    service_candidates.append((f"season_service.{attr}", svc))
+    calendar_getter = getattr(services, "calendar_service", None)
+    if callable(calendar_getter):
+        try:
+            svc = calendar_getter()
+        except Exception:
+            svc = None
+        if svc is not None:
+            service_candidates.append(("services.calendar_service", svc))
+
+    for label, service in service_candidates:
+        entries, source = _collect_from_service(service, label)
+        if entries:
+            return entries, source or label, debug_lines
+    return [], "none", debug_lines
+
+
 def _get_active_holiday_entries():
-    entries = []
-    for svc in (services.calendar_service(), services.season_service()):
-        if svc is None:
-            continue
-        active = _safe_get(svc, "active_holidays") or _safe_get(svc, "_active_holidays")
-        if active is None and callable(_safe_get(svc, "get_active_holidays")):
-            ok, result, _err = _safe_call(svc, "get_active_holidays")
-            active = result if ok else None
-        if active is None:
-            continue
-        if isinstance(active, dict):
-            active = list(active.values())
-        if not isinstance(active, (list, tuple, set)):
-            active = [active]
-        for x in active:
-            if x is not None:
-                entries.append(x)
+    entries, _source, _debug = _get_active_holiday_entries_any()
     return entries
 
 
@@ -1733,7 +1862,7 @@ def _extract_tuning_guid64s(obj):
     return sorted(candidates)
 
 
-def _probe_wants_for_interactions(sim_info):
+def _probe_wants_for_interactions(sim_info, emit_story_event=True):
     from simulation_mode import story_log
 
     wants, want_source = _get_wants_list(sim_info)
@@ -1757,14 +1886,15 @@ def _probe_wants_for_interactions(sim_info):
             }
         )
         fail_reasons.extend(resolve_failures)
-    story_log.append_event(
-        "wants_probe_now",
-        sim_info=sim_info,
-        want_count=len(wants or []),
-        resolved_interaction_guid64=sorted(all_resolved),
-        extraction_fail_reasons=fail_reasons,
-        wants=details,
-    )
+    if emit_story_event:
+        story_log.append_event(
+            "wants_probe_now",
+            sim_info=sim_info,
+            want_count=len(wants or []),
+            resolved_interaction_guid64=sorted(all_resolved),
+            extraction_fail_reasons=fail_reasons,
+            wants=details,
+        )
     return details, fail_reasons, sorted(all_resolved)
 
 
@@ -1807,7 +1937,7 @@ def _get_aspiration_objectives_for_probe(sim_info):
         return [], ["objectives_unreadable"]
 
 
-def _probe_aspirations_for_interactions(sim_info):
+def _probe_aspirations_for_interactions(sim_info, emit_story_event=True):
     from simulation_mode import story_log
 
     objectives, objective_failures = _get_aspiration_objectives_for_probe(sim_info)
@@ -1836,16 +1966,52 @@ def _probe_aspirations_for_interactions(sim_info):
             }
         )
         fail_reasons.extend(resolve_failures)
-    story_log.append_event(
-        "aspirations_probe_now",
-        sim_info=sim_info,
-        aspiration_guid64=active_guid,
-        objective_count=len(objectives or []),
-        resolved_interaction_guid64=sorted(all_resolved),
-        extraction_fail_reasons=fail_reasons,
-        objectives=details,
-    )
+    if emit_story_event:
+        story_log.append_event(
+            "aspirations_probe_now",
+            sim_info=sim_info,
+            aspiration_guid64=active_guid,
+            objective_count=len(objectives or []),
+            resolved_interaction_guid64=sorted(all_resolved),
+            extraction_fail_reasons=fail_reasons,
+            objectives=details,
+        )
     return details, fail_reasons, sorted(all_resolved)
+
+
+def _probe_holiday_for_interactions(sim_info, emit_story_event=True):
+    from simulation_mode import story_log
+
+    entries, source_label, _debug = _get_active_holiday_entries_any()
+    fail_reasons = []
+    details = []
+    all_resolved = set()
+    for entry in entries or []:
+        entry_guid = _tuning_guid64(entry)
+        candidates = _extract_tuning_guid64s(entry)
+        resolved, resolve_failures = _resolve_interaction_guid64s(candidates)
+        all_resolved.update(resolved)
+        details.append(
+            {
+                "entry_guid64": entry_guid,
+                "entry_type": type(entry).__name__,
+                "resolved_interaction_guid64s": resolved,
+                "candidate_guid64s": candidates[:30],
+                "extraction_fail_reasons": resolve_failures,
+            }
+        )
+        fail_reasons.extend(resolve_failures)
+    if emit_story_event:
+        story_log.append_event(
+            "holiday_probe_now",
+            sim_info=sim_info,
+            entry_count=len(entries or []),
+            source_label=source_label,
+            resolved_interaction_guid64=sorted(all_resolved),
+            extraction_fail_reasons=fail_reasons,
+            entries=details,
+        )
+    return details, fail_reasons, sorted(all_resolved), source_label, len(entries or [])
 
 
 def _collect_aspiration_probe_lines_for_sim(sim_info):
@@ -2086,179 +2252,78 @@ def _collect_internal_probes(sim_info):
     deep_lines, _tracker, _slots = _probe_active_wants_deep(sim_info)
     lines.append("ACTIVE WANTS / WHIMS (DEEP DUMP)")
     lines.extend(deep_lines)
-    lines.append("WANTS -> GOAL GUID64 EXTRACTION (AD/LOOT/SKILL_GAIN/SKILL)")
+    lines.append("WANTS -> INTERACTION GUID64 BRIDGE")
     try:
-        director = importlib.import_module("simulation_mode.director")
+        capabilities = importlib.import_module("simulation_mode.capabilities")
     except Exception as exc:
-        lines.append(f"director_import_error={exc}")
-        director = None
-    capabilities = None
-    wants_bundle = {"ad": [], "loot": [], "skill_gain": [], "skill": []}
-    if director is not None:
+        lines.append(f"capabilities_import_error={exc}")
+        capabilities = None
+    if capabilities is not None:
         try:
-            capabilities = importlib.import_module("simulation_mode.capabilities")
             caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
-            wants_bundle = director.extract_goal_guid_bundle_from_wants(sim_info, caps)
         except Exception as exc:
-            lines.append(f"wants_guid64_extract_error={exc}")
-            wants_bundle = {"ad": [], "loot": [], "skill_gain": [], "skill": []}
+            lines.append(f"caps_error={exc}")
             caps = None
     else:
         caps = None
-    lines.append(
-        "wants_goal_guid64_counts ad={ad} loot={loot} skill_gain={skill_gain} skill={skill}".format(
-            ad=len(wants_bundle.get("ad", [])),
-            loot=len(wants_bundle.get("loot", [])),
-            skill_gain=len(wants_bundle.get("skill_gain", [])),
-            skill=len(wants_bundle.get("skill", [])),
-        )
-    )
-    if caps is None and director is not None and capabilities is not None:
-        lines.append("caps_missing=True")
-    if caps is not None and capabilities is not None:
-        kind_to_candidates = {
-            "ad": capabilities.get_candidates_for_ad_guid,
-            "loot": capabilities.get_candidates_for_loot_guid,
-            "skill_gain": capabilities.get_candidates_for_skill_gain_guid,
-            "skill": capabilities.get_candidates_for_skill_guid,
-        }
-        for kind, guid_list in wants_bundle.items():
-            if not guid_list:
-                continue
-            for guid in guid_list[:10]:
-                candidates = kind_to_candidates[kind](guid, caps)
-                lines.append(f"wants_guid64={guid} kind={kind} candidates={len(candidates)}")
-                for candidate in candidates[:2]:
-                    obj_def_id = candidate.get("obj_def_id")
-                    aff_guid = candidate.get("aff_guid64")
-                    aff_name = candidate.get("aff_name")
-                    lines.append(
-                        f"  candidate obj_def_id={obj_def_id} aff_guid64={aff_guid} "
-                        f"aff_name={aff_name}"
-                    )
-    lines.append("ASPIRATION -> GOAL GUID64 EXTRACTION (AD/LOOT/SKILL_GAIN/SKILL)")
-    aspiration_bundle = {"ad": [], "loot": [], "skill_gain": [], "skill": []}
-    if director is not None:
-        try:
-            if capabilities is None:
-                capabilities = importlib.import_module("simulation_mode.capabilities")
-            if caps is None and capabilities is not None:
-                caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
-            aspiration_bundle = director.extract_goal_guid_bundle_from_aspiration(
-                sim_info, caps
-            )
-        except Exception as exc:
-            lines.append(f"aspiration_guid64_extract_error={exc}")
-            aspiration_bundle = {"ad": [], "loot": [], "skill_gain": [], "skill": []}
-    lines.append(
-        "aspiration_goal_guid64_counts ad={ad} loot={loot} skill_gain={skill_gain} skill={skill}".format(
-            ad=len(aspiration_bundle.get("ad", [])),
-            loot=len(aspiration_bundle.get("loot", [])),
-            skill_gain=len(aspiration_bundle.get("skill_gain", [])),
-            skill=len(aspiration_bundle.get("skill", [])),
-        )
-    )
-    if caps is None and director is not None and capabilities is not None:
-        lines.append("caps_missing=True")
-    if caps is not None and capabilities is not None:
-        kind_to_candidates = {
-            "ad": capabilities.get_candidates_for_ad_guid,
-            "loot": capabilities.get_candidates_for_loot_guid,
-            "skill_gain": capabilities.get_candidates_for_skill_gain_guid,
-            "skill": capabilities.get_candidates_for_skill_guid,
-        }
-        for kind, guid_list in aspiration_bundle.items():
-            if not guid_list:
-                continue
-            for guid in guid_list[:10]:
-                candidates = kind_to_candidates[kind](guid, caps)
-                lines.append(
-                    f"aspiration_guid64={guid} kind={kind} candidates={len(candidates)}"
-                )
-                for candidate in candidates[:2]:
-                    obj_def_id = candidate.get("obj_def_id")
-                    aff_guid = candidate.get("aff_guid64")
-                    aff_name = candidate.get("aff_name")
-                    lines.append(
-                        f"  candidate obj_def_id={obj_def_id} aff_guid64={aff_guid} "
-                        f"aff_name={aff_name}"
-                    )
-    lines.append("HOLIDAY/CALENDAR (PROBE-ONLY INTROSPECTION)")
-    try:
-        services_mod = importlib.import_module("services")
-    except Exception as exc:
-        lines.append(f"services_import_error={exc}")
-        services_mod = None
-    calendar_service = None
-    season_service = None
-    if services_mod is not None:
-        calendar_getter = getattr(services_mod, "calendar_service", None)
-        if callable(calendar_getter):
-            try:
-                calendar_service = calendar_getter()
-            except Exception as exc:
-                lines.append(f"calendar_service_error={exc}")
-        season_getter = getattr(services_mod, "season_service", None)
-        if callable(season_getter):
-            try:
-                season_service = season_getter()
-            except Exception as exc:
-                lines.append(f"season_service_error={exc}")
-    for label, service in (
-        ("calendar_service", calendar_service),
-        ("season_service", season_service),
-    ):
-        if service is None:
-            continue
-        lines.append(f"{label}_type={type(service).__name__}")
-        attrs = _filter_names(
-            service, ("holiday", "tradition", "event", "calendar", "fest", "season")
-        )
-        lines.append(f"{label}_attrs_hint={attrs[:15]}")
-        active_items = None
-        for method_name in (
-            "get_active_holidays",
-            "get_current_holidays",
-            "get_running_holidays",
-        ):
-            method = getattr(service, method_name, None)
-            if callable(method):
+
+    def _append_aff_guid_probe(prefix, resolved):
+        resolved = list(resolved or [])
+        available = []
+        by_aff = caps.get("by_aff_guid") if caps else {}
+        if by_aff:
+            for guid in resolved:
                 try:
-                    active_items = method()
-                except Exception as exc:
-                    lines.append(f"{label}_{method_name}_error={exc}")
-                    active_items = None
-                if active_items is not None:
-                    break
-        if active_items is None:
-            for attr_name in (
-                "active_holidays",
-                "current_holidays",
-                "running_holidays",
-            ):
-                if hasattr(service, attr_name):
-                    active_items = getattr(service, attr_name, None)
-                    if active_items is not None:
-                        break
-        if active_items is None:
-            lines.append(f"{label}_active_holidays=none")
-            continue
-        try:
-            for idx, entry in enumerate(active_items):
-                if idx >= 5:
-                    break
-                lines.append(f"{label}_entry[{idx}]_type={type(entry).__name__}")
-                if director is not None and caps is not None:
-                    bundle = director.collect_goal_guid_bundle(entry, caps, max_depth=4)
-                    lines.append(
-                        f"{label}_entry[{idx}]_bundle_counts "
-                        f"ad={len(bundle.get('ad', []))} "
-                        f"loot={len(bundle.get('loot', []))} "
-                        f"skill_gain={len(bundle.get('skill_gain', []))} "
-                        f"skill={len(bundle.get('skill', []))}"
-                    )
-        except Exception as exc:
-            lines.append(f"{label}_active_items_error={exc}")
+                    key = str(int(guid))
+                except Exception:
+                    continue
+                if key in by_aff:
+                    available.append(int(guid))
+        lines.append(
+            f"{prefix}_resolved_interaction_guid64_count={len(resolved)}"
+        )
+        lines.append(f"{prefix}_available_on_lot_count={len(available)}")
+        if caps is None:
+            lines.append(f"{prefix}_caps_missing=True")
+        for guid in available[:10]:
+            candidates = (
+                capabilities.get_candidates_for_aff_guid(guid, caps)
+                if capabilities is not None
+                else []
+            )
+            lines.append(f"{prefix}_aff_guid64={guid} candidates={len(candidates)}")
+
+    _wants_details, wants_fail, wants_resolved = _probe_wants_for_interactions(
+        sim_info, emit_story_event=False
+    )
+    _append_aff_guid_probe("wants", wants_resolved)
+    if wants_fail:
+        lines.append(f"wants_extraction_fail_reasons={wants_fail[:6]}")
+    lines.append("ASPIRATION -> INTERACTION GUID64 BRIDGE")
+    _asp_details, asp_fail, asp_resolved = _probe_aspirations_for_interactions(
+        sim_info, emit_story_event=False
+    )
+    _append_aff_guid_probe("aspiration", asp_resolved)
+    if asp_fail:
+        lines.append(f"aspiration_extraction_fail_reasons={asp_fail[:6]}")
+    lines.append("HOLIDAY -> INTERACTION GUID64 BRIDGE")
+    _entries, source_label, debug_lines = _get_active_holiday_entries_any()
+    (
+        _hol_details,
+        hol_fail,
+        hol_resolved,
+        hol_source,
+        hol_entry_count,
+    ) = _probe_holiday_for_interactions(sim_info, emit_story_event=False)
+    lines.append(f"holiday_entry_count={hol_entry_count}")
+    lines.append(f"holiday_source_label={source_label or hol_source}")
+    _append_aff_guid_probe("holiday", hol_resolved)
+    if hol_fail:
+        lines.append(f"holiday_extraction_fail_reasons={hol_fail[:6]}")
+    if debug_lines:
+        lines.append("holiday_debug_lines:")
+        for line in debug_lines[:10]:
+            lines.append(f"- {line}")
     lines.append("CAREER SUMMARY (PROBE)")
     lines.extend(_collect_career_summary(sim_info))
     lines.append("ASPIRATION SUMMARY (PROBE)")
@@ -2719,6 +2784,27 @@ def _aspirations_probe_now(output):
     details, fail_reasons, resolved = _probe_aspirations_for_interactions(sim_info)
     output("aspirations_probe_now OK")
     output(f"objective_count={len(details)}")
+    output(f"resolved_interaction_guid64_count={len(resolved)}")
+    if fail_reasons:
+        output(f"extraction_fail_reasons={fail_reasons[:6]}")
+    return True
+
+
+def _holiday_probe_now(output):
+    sim_info = _active_sim_info()
+    if sim_info is None:
+        output("No active sim found.")
+        return True
+    (
+        details,
+        fail_reasons,
+        resolved,
+        source_label,
+        entry_count,
+    ) = _probe_holiday_for_interactions(sim_info)
+    output("holiday_probe_now OK")
+    output(f"source_label={source_label}")
+    output(f"entry_count={entry_count}")
     output(f"resolved_interaction_guid64_count={len(resolved)}")
     if fail_reasons:
         output(f"extraction_fail_reasons={fail_reasons[:6]}")
@@ -3318,10 +3404,11 @@ def _usage_lines():
         "simulation want_now",
         "simulation collect",
         "simulation force_scan",
-        "simulation skill_plan_now <sim_firstname>",
+        "simulation skill_plan_now [SimFirstName]",
         "simulation wants_plan_now",
         "simulation aspiration_plan_now",
         "simulation holiday_plan_now",
+        "simulation holiday_probe_now",
         "simulation wants_probe_now",
         "simulation aspirations_probe_now",
         "simulation popup_probe",
@@ -3984,110 +4071,222 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
         return True
 
     if action_key == "wants_plan_now":
+        from simulation_mode import story_log
+
         sim_info = _resolve_sim_info_optional_first_name(key, output)
+        if sim_info is None:
+            output("No active sim found.")
+            return True
         ok, sim, _error = _safe_call(sim_info, "get_sim_instance")
         sim = sim if ok else None
         if sim is None:
             output("No sim instance available.")
             return True
-        director = importlib.import_module("simulation_mode.director")
         capabilities = importlib.import_module("simulation_mode.capabilities")
         try:
             caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
         except Exception as exc:
             output(f"wants_plan_now FAIL caps_error={exc}")
             return True
-        bundle = director.extract_goal_guid_bundle_from_wants(sim_info, caps)
-        counts = _bundle_counts(bundle)
-        success, reason = director.attempt_goal_guid_bundle_push(
-            sim_info, sim, bundle, caps, "wants_plan_now"
+        details, fail_reasons, resolved = _probe_wants_for_interactions(
+            sim_info, emit_story_event=False
         )
+        output_lines = []
+        success, reason, chosen_guid, chosen_entry = _attempt_aff_guid_push(
+            sim_info, sim, caps, resolved, "want_plan", output_lines=output_lines
+        )
+        available_count = 0
+        by_aff = caps.get("by_aff_guid") or {}
+        for guid in resolved:
+            try:
+                key = str(int(guid))
+            except Exception:
+                continue
+            if key in by_aff:
+                available_count += 1
         output(
-            "wants_plan_now bundle_counts ad={ad} loot={loot} skill_gain={skill_gain} skill={skill}".format(
-                **counts
+            f"wants_plan_now resolved_interaction_guid64_count={len(resolved)} "
+            f"available_on_lot_count={available_count}"
+        )
+        for line in output_lines:
+            output(f"wants_plan_now {line}")
+        output(
+            f"wants_plan_now result={'SUCCESS' if success else 'FAIL'} reason={reason}"
+        )
+        if success:
+            story_log.append_event(
+                "wants_plan_now",
+                sim_info=sim_info,
+                chosen_aff_guid64=chosen_guid,
+                chosen_obj_def_id=(
+                    chosen_entry.get("obj_def_id") if chosen_entry else None
+                ),
+                resolved_count=len(resolved),
+                available_count=available_count,
             )
-        )
-        output(f"wants_plan_now result={'SUCCESS' if success else 'FAIL'} reason={reason}")
-        _safe_story_event(
-            "wants_plan_now" if success else "wants_plan_now_failed",
-            sim_info=sim_info,
-            reason=reason,
-            bundle_counts=counts,
-        )
+        else:
+            story_log.append_event(
+                "wants_plan_now_failed",
+                sim_info=sim_info,
+                reason=reason,
+                resolved_count=len(resolved),
+                available_count=available_count,
+                extraction_fail_reasons=fail_reasons,
+            )
         return True
 
     if action_key == "aspiration_plan_now":
+        from simulation_mode import story_log
+
         sim_info = _resolve_sim_info_optional_first_name(key, output)
+        if sim_info is None:
+            output("No active sim found.")
+            return True
         ok, sim, _error = _safe_call(sim_info, "get_sim_instance")
         sim = sim if ok else None
         if sim is None:
             output("No sim instance available.")
             return True
-        director = importlib.import_module("simulation_mode.director")
         capabilities = importlib.import_module("simulation_mode.capabilities")
         try:
             caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
         except Exception as exc:
             output(f"aspiration_plan_now FAIL caps_error={exc}")
             return True
-        bundle = director.extract_goal_guid_bundle_from_aspiration(sim_info, caps)
-        counts = _bundle_counts(bundle)
-        success, reason = director.attempt_goal_guid_bundle_push(
-            sim_info, sim, bundle, caps, "aspiration_plan_now"
+        details, fail_reasons, resolved = _probe_aspirations_for_interactions(
+            sim_info, emit_story_event=False
         )
+        output_lines = []
+        success, reason, chosen_guid, chosen_entry = _attempt_aff_guid_push(
+            sim_info, sim, caps, resolved, "aspiration_plan", output_lines=output_lines
+        )
+        available_count = 0
+        by_aff = caps.get("by_aff_guid") or {}
+        for guid in resolved:
+            try:
+                key = str(int(guid))
+            except Exception:
+                continue
+            if key in by_aff:
+                available_count += 1
         output(
-            "aspiration_plan_now bundle_counts ad={ad} loot={loot} skill_gain={skill_gain} skill={skill}".format(
-                **counts
+            f"aspiration_plan_now resolved_interaction_guid64_count={len(resolved)} "
+            f"available_on_lot_count={available_count}"
+        )
+        for line in output_lines:
+            output(f"aspiration_plan_now {line}")
+        output(
+            "aspiration_plan_now result="
+            f"{'SUCCESS' if success else 'FAIL'} reason={reason}"
+        )
+        if success:
+            story_log.append_event(
+                "aspiration_plan_now",
+                sim_info=sim_info,
+                chosen_aff_guid64=chosen_guid,
+                chosen_obj_def_id=(
+                    chosen_entry.get("obj_def_id") if chosen_entry else None
+                ),
+                resolved_count=len(resolved),
+                available_count=available_count,
             )
-        )
-        output(f"aspiration_plan_now result={'SUCCESS' if success else 'FAIL'} reason={reason}")
-        _safe_story_event(
-            "aspiration_plan_now" if success else "aspiration_plan_now_failed",
-            sim_info=sim_info,
-            reason=reason,
-            bundle_counts=counts,
-        )
+        else:
+            story_log.append_event(
+                "aspiration_plan_now_failed",
+                sim_info=sim_info,
+                reason=reason,
+                resolved_count=len(resolved),
+                available_count=available_count,
+                extraction_fail_reasons=fail_reasons,
+            )
         return True
 
     if action_key == "holiday_plan_now":
+        from simulation_mode import story_log
+
         sim_info = _resolve_sim_info_optional_first_name(key, output)
+        if sim_info is None:
+            output("No active sim found.")
+            return True
         ok, sim, _error = _safe_call(sim_info, "get_sim_instance")
         sim = sim if ok else None
         if sim is None:
             output("No sim instance available.")
             return True
-        director = importlib.import_module("simulation_mode.director")
         capabilities = importlib.import_module("simulation_mode.capabilities")
         try:
             caps = capabilities.ensure_capabilities(sim_info, force_rebuild=False)
         except Exception as exc:
             output(f"holiday_plan_now FAIL caps_error={exc}")
             return True
-        entries = _get_active_holiday_entries()
-        bundle = {"ad": set(), "loot": set(), "skill_gain": set(), "skill": set()}
-        for entry in entries:
-            entry_bundle = director.collect_goal_guid_bundle(entry, caps, max_depth=4)
-            for k in bundle.keys():
-                bundle[k] |= set(entry_bundle.get(k, []))
-        bundle = {k: sorted(v) for k, v in bundle.items()}
-        counts = _bundle_counts(bundle)
-        success, reason = director.attempt_goal_guid_bundle_push(
-            sim_info, sim, bundle, caps, "holiday_plan_now"
-        )
-        output(f"holiday_plan_now entry_count={len(entries)}")
-        output(
-            "holiday_plan_now bundle_counts ad={ad} loot={loot} skill_gain={skill_gain} skill={skill}".format(
-                **counts
+        entries, source_label, debug_lines = _get_active_holiday_entries_any()
+        if not entries:
+            output("holiday_plan_now entry_count=0")
+            output("holiday_plan_now result=FAIL reason=no_entries")
+            story_log.append_event(
+                "holiday_plan_now_failed",
+                sim_info=sim_info,
+                reason="no_entries",
+                source=source_label,
+                debug=debug_lines,
             )
+            return True
+        (
+            _details,
+            fail_reasons,
+            resolved,
+            probe_source,
+            entry_count,
+        ) = _probe_holiday_for_interactions(sim_info, emit_story_event=False)
+        output_lines = []
+        success, reason, chosen_guid, chosen_entry = _attempt_aff_guid_push(
+            sim_info, sim, caps, resolved, "holiday_plan", output_lines=output_lines
         )
-        output(f"holiday_plan_now result={'SUCCESS' if success else 'FAIL'} reason={reason}")
-        _safe_story_event(
-            "holiday_plan_now" if success else "holiday_plan_now_failed",
-            sim_info=sim_info,
-            reason=reason,
-            entry_count=len(entries),
-            bundle_counts=counts,
+        available_count = 0
+        by_aff = caps.get("by_aff_guid") or {}
+        for guid in resolved:
+            try:
+                key = str(int(guid))
+            except Exception:
+                continue
+            if key in by_aff:
+                available_count += 1
+        output(
+            f"holiday_plan_now entry_count={entry_count} source={source_label or probe_source}"
         )
+        output(
+            f"holiday_plan_now resolved_interaction_guid64_count={len(resolved)} "
+            f"available_on_lot_count={available_count}"
+        )
+        for line in output_lines:
+            output(f"holiday_plan_now {line}")
+        output(
+            f"holiday_plan_now result={'SUCCESS' if success else 'FAIL'} reason={reason}"
+        )
+        if success:
+            story_log.append_event(
+                "holiday_plan_now",
+                sim_info=sim_info,
+                source_label=source_label or probe_source,
+                entry_count=entry_count,
+                resolved_count=len(resolved),
+                available_count=available_count,
+                chosen_aff_guid64=chosen_guid,
+                chosen_obj_def_id=(
+                    chosen_entry.get("obj_def_id") if chosen_entry else None
+                ),
+            )
+        else:
+            story_log.append_event(
+                "holiday_plan_now_failed",
+                sim_info=sim_info,
+                reason=reason,
+                source_label=source_label or probe_source,
+                entry_count=entry_count,
+                resolved_count=len(resolved),
+                available_count=available_count,
+                extraction_fail_reasons=fail_reasons,
+            )
         return True
 
     if action_key == "director_push":
@@ -4127,6 +4326,9 @@ def simulation_cmd(action: str = None, key: str = None, value: str = None, _conn
 
     if action_key == "aspirations_probe_now":
         return _aspirations_probe_now(output)
+
+    if action_key == "holiday_probe_now":
+        return _holiday_probe_now(output)
 
     if action_key == "probe_want":
         return _probe_want(output, key)
